@@ -66,6 +66,7 @@ from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
     StateDBSessionMessagesSnapshot,
+    _dedupe_persisted_reasoning_rows,
     _is_empty_partial_activity_message,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
@@ -6782,6 +6783,7 @@ def _merge_display_messages_after_agent_result(
     # three inputs consistently so prefix/delta detection below stays aligned.
     # (#5334; same internal-control-message class as #3320/#3821/#4373/#4875)
     previous_display = _drop_synthetic_control_messages(previous_display)
+    previous_display = _dedupe_persisted_reasoning_rows(previous_display)
     # Deduplicate stale _partial messages that accumulated in previous_display.
     # A bug in cancel_stream() could insert multiple identical _partial messages
     # when _stripped was empty but _has_reasoning/_has_tools was True. The
@@ -7110,7 +7112,7 @@ def _merge_display_messages_after_agent_result(
         merged.append(copy.deepcopy(display_msg))
         if key is not None:
             seen.add(key)
-    return merged
+    return _dedupe_persisted_reasoning_rows(merged)
 
 
 def _stamp_missing_message_timestamps(messages, *, now: float | None = None) -> int:

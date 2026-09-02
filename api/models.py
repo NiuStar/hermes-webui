@@ -12,6 +12,7 @@ import re
 import threading
 import time
 import uuid
+from bisect import bisect_right
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -834,6 +835,126 @@ def _content_has_reasoning_only_parts(content) -> bool:
     return saw_reasoning
 
 
+def _is_reasoning_only_assistant_message(message) -> bool:
+    """Return True for display-only assistant reasoning rows."""
+    if not isinstance(message, dict) or message.get('role') != 'assistant':
+        return False
+    if message.get('tool_calls'):
+        return False
+    content = message.get('content', '')
+    if isinstance(content, str):
+        if content.strip():
+            return False
+    elif isinstance(content, list):
+        if not _content_has_reasoning_only_parts(content):
+            return False
+    elif str(content or '').strip():
+        return False
+    return bool(
+        str(message.get('reasoning') or message.get('reasoning_content') or '').strip()
+        or _content_has_reasoning_only_parts(content)
+    )
+
+
+def _reasoning_only_message_identity(message):
+    """Return durable identity for a replayable reasoning-only row."""
+    if not _is_reasoning_only_assistant_message(message):
+        return None
+    row_id = message.get('id')
+    if isinstance(row_id, int) and not isinstance(row_id, bool) and row_id > 0:
+        return ('id', row_id)
+    reasoning = str(
+        message.get('reasoning') or message.get('reasoning_content') or ''
+    ).strip()
+    content = message.get('content')
+    if not reasoning and isinstance(content, list):
+        reasoning = '\n'.join(
+            str(part.get('thinking') or part.get('reasoning') or part.get('text') or '').strip()
+            for part in content
+            if isinstance(part, dict) and str(part.get('type') or '').lower() in {'thinking', 'reasoning'}
+        ).strip()
+    timestamp = _message_timestamp(message)
+    if not reasoning or timestamp is None:
+        return None
+    return ('legacy', timestamp, hashlib.sha256(reasoning.encode('utf-8')).digest())
+
+
+def _relocate_stale_reasoning_tail(messages):
+    """Move a replayed old reasoning-only suffix back into timestamp order."""
+    rows = list(messages or [])
+    tail_start = len(rows)
+    while tail_start > 0 and _is_reasoning_only_assistant_message(rows[tail_start - 1]):
+        tail_start -= 1
+    if tail_start == len(rows) or tail_start == 0:
+        return rows
+
+    prefix = rows[:tail_start]
+    prefix_timestamps = [_message_timestamp(message) for message in prefix]
+    known_prefix_timestamps = [timestamp for timestamp in prefix_timestamps if timestamp is not None]
+    if not known_prefix_timestamps:
+        return rows
+    latest_prefix_timestamp = max(known_prefix_timestamps)
+
+    stale_tail = []
+    retained_tail = []
+    for message in rows[tail_start:]:
+        timestamp = _message_timestamp(message)
+        if timestamp is not None and timestamp < latest_prefix_timestamp:
+            stale_tail.append((timestamp, message))
+        else:
+            retained_tail.append(message)
+    if not stale_tail:
+        return rows
+
+    if len(known_prefix_timestamps) == len(prefix_timestamps) and all(
+        left <= right for left, right in zip(prefix_timestamps, prefix_timestamps[1:])
+    ):
+        buckets = {}
+        for timestamp, message in stale_tail:
+            buckets.setdefault(bisect_right(prefix_timestamps, timestamp), []).append(message)
+        relocated = []
+        for index in range(len(prefix) + 1):
+            relocated.extend(buckets.get(index, ()))
+            if index < len(prefix):
+                relocated.append(prefix[index])
+        relocated.extend(retained_tail)
+        return relocated
+
+    relocated = list(prefix)
+    for timestamp, message in stale_tail:
+        insert_at = len(relocated)
+        while insert_at > 0:
+            previous_timestamp = _message_timestamp(relocated[insert_at - 1])
+            if previous_timestamp is None or previous_timestamp <= timestamp:
+                break
+            insert_at -= 1
+        relocated.insert(insert_at, message)
+    relocated.extend(retained_tail)
+    return relocated
+
+
+def _dedupe_persisted_reasoning_rows(messages):
+    """Keep one copy of replayed reasoning rows and repair stale suffix order."""
+    deduped = []
+    positions = {}
+    for message in list(messages or []):
+        identity = _reasoning_only_message_identity(message)
+        if identity is None:
+            deduped.append(message)
+            continue
+        existing_idx = positions.get(identity)
+        if existing_idx is None:
+            positions[identity] = len(deduped)
+            deduped.append(message)
+            continue
+        existing = deduped[existing_idx]
+        if isinstance(existing, dict):
+            for key, value in message.items():
+                if value not in (None, '', [], {}) and existing.get(key) in (None, '', [], {}):
+                    existing[key] = copy.deepcopy(value)
+    return _relocate_stale_reasoning_tail(deduped)
+
+
 def _active_stream_ids():
     with STREAMS_LOCK:
         active_ids = set(STREAMS.keys())
@@ -984,48 +1105,29 @@ def _is_empty_partial_activity_message(message):
 
 
 def _last_message_timestamp(messages, *, tail_window: int = 8):
-    """perf(session-load-latency) Priority 1: bounded tail-scan.
+    """Return the newest real user/assistant activity timestamp.
 
-    Old behavior: reversed-iterate ALL messages until a non-tool, non-empty
-    message's timestamp is found. For a 2,730-message session on eMMC, that's
-    ~500ms of Python attribute lookups, repeated on every /api/session
-    response.
-
-    New behavior: the messages array is chronologically ordered, so the
-    last non-tool message is at the very end. We scan only the last
-    ``tail_window`` messages — covers the realistic case where 1-3 tool
-    rows sit after the last assistant/user message. Falls back to a full
-    scan only when no timestamp is found in the window, which preserves
-    exact correctness for messages with very large trailing tool clusters
-    (rare in practice; we'd need >8 consecutive tool rows to hit it).
+    Replayed state.db rows can be appended after newer sidecar rows, so array
+    order is not guaranteed to be chronological. A reverse-first match can
+    therefore return an older timestamp and leave an active conversation under
+    its previous sidebar date. ``compact()`` already walks the message list for
+    user_message_count, so use the same linear bound here and keep correctness.
+    ``tail_window`` remains accepted for API compatibility.
     """
     if not isinstance(messages, list):
         return None
-    n = len(messages)
-    start = max(0, n - max(1, int(tail_window)))
-    # Walk from the end backwards. reversed() over a slice still creates
-    # a full reverse iterator, but only the slice's elements are touched.
-    for message in reversed(messages[start:]):
+    latest = None
+    for message in messages:
         if isinstance(message, dict) and message.get('role') == 'tool':
+            continue
+        if _is_reasoning_only_assistant_message(message):
             continue
         if _is_empty_partial_activity_message(message):
             continue
         ts = _message_timestamp(message)
-        if ts:
-            return ts
-    # Window miss — fall back to the original full-reversed scan. The
-    # caller pays this cost only when the heuristic didn't find a hit,
-    # which means the session is unusual (long tool tail or all-empty
-    # messages).
-    for message in reversed(messages):
-        if isinstance(message, dict) and message.get('role') == 'tool':
-            continue
-        if _is_empty_partial_activity_message(message):
-            continue
-        ts = _message_timestamp(message)
-        if ts:
-            return ts
-    return None
+        if ts and (latest is None or ts > latest):
+            latest = ts
+    return latest
 
 
 def _message_role(message):
@@ -5367,6 +5469,7 @@ def _row_may_need_sidecar_metadata_refresh(
     session: dict,
     *,
     stale_snapshot_ids: set[str] | None = None,
+    allow_plain_mtime_check: bool = False,
 ) -> bool:
     """Return True when a row needs canonical sidecar runtime/snapshot metadata.
 
@@ -5411,6 +5514,13 @@ def _row_may_need_sidecar_metadata_refresh(
             or session.get('_lineage_root_id')
             or session.get('_compression_segment_count')
         )
+        if (
+            allow_plain_mtime_check
+            and sid
+            and not lineage_shaped
+            and _sidecar_mtime_after_index_updated_at(session)
+        ):
+            return True
         needs_mtime_check = bool(
             sid
             and (
@@ -5443,6 +5553,19 @@ def _sidecar_mtime_after_index_timestamp(session: dict) -> bool:
         return False
     indexed_ts = _session_sort_timestamp(session)
     return sidecar_mtime > indexed_ts + 0.001
+
+
+def _sidecar_mtime_after_index_updated_at(session: dict, *, tolerance: float = 1.0) -> bool:
+    """Return True when a sidecar clearly post-dates its indexed metadata."""
+    sid = str(session.get('session_id') or '')
+    if not sid or not is_safe_session_id(sid):
+        return False
+    try:
+        sidecar_mtime = (SESSION_DIR / f'{sid}.json').stat().st_mtime
+        indexed_updated_at = float(session.get('updated_at') or 0)
+    except (OSError, TypeError, ValueError):
+        return False
+    return sidecar_mtime > indexed_updated_at + max(0.0, float(tolerance))
 
 
 def _stale_snapshot_metadata_refresh_ids(sessions: list[dict]) -> set[str]:
@@ -5515,10 +5638,11 @@ def _refresh_index_rows_from_sidecar_metadata(
     """
     out: list[dict] = []
     stale_snapshot_ids = _stale_snapshot_metadata_refresh_ids(sessions)
-    for session in sessions:
+    for row_index, session in enumerate(sessions):
         if not _row_may_need_sidecar_metadata_refresh(
             session,
             stale_snapshot_ids=stale_snapshot_ids,
+            allow_plain_mtime_check=row_index < 300,
         ):
             out.append(session)
             continue
@@ -5530,7 +5654,7 @@ def _refresh_index_rows_from_sidecar_metadata(
             sid,
             index_message_counts=index_message_counts,
         )
-        if not sidecar:
+        if not sidecar or str(getattr(sidecar, 'session_id', '') or '') != str(sid):
             out.append(session)
             continue
         compact = sidecar.compact(include_runtime=True)
@@ -10956,6 +11080,14 @@ def _cleanup_manifest_thread_lock(hermes_home):
 
 def delete_cli_session(sid) -> bool:
     """Delete a CLI session while serializing manifest and DB cleanup."""
+    if os.getenv("HERMES_WEBUI_DISABLE_SESSION_DELETE", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }:
+        logger.warning(
+            "Blocked state.db session deletion for %s because recovery delete guard is enabled",
+            sid,
+        )
+        return False
     try:
         from api.profiles import get_active_hermes_home
         hermes_home = Path(get_active_hermes_home()).expanduser().resolve()

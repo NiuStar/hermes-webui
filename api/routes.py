@@ -8701,6 +8701,8 @@ def _message_counts_as_renderable_for_window(message) -> bool:
         return False
     if _is_empty_partial_activity_message(message):
         return False
+    if _is_reasoning_only_assistant_message(message):
+        return False
     role = str(message.get("role") or "").strip().lower()
     return bool(role and role != "tool")
 
@@ -8909,8 +8911,18 @@ def _tool_message_for_limited_payload(message):
 
 
 def _messages_for_limited_payload(messages) -> list:
-    """Bound hidden tool-result payloads before sending a msg_limit response."""
-    return [_tool_message_for_limited_payload(msg) for msg in list(messages or [])]
+    """Bound hidden activity before sending a paginated chat response.
+
+    Reasoning-only assistant rows are supporting replay metadata, not final
+    reply text. Large recovered sessions can accumulate hundreds of these rows
+    after the newest answer; sending them all makes reload render only Thinking
+    cards and can freeze the tab. Full transcript/export paths keep the rows.
+    """
+    return [
+        _tool_message_for_limited_payload(message)
+        for message in list(messages or [])
+        if not _is_reasoning_only_assistant_message(message)
+    ]
 
 
 def _limited_webui_messages_for_display(session, state_db_messages) -> list:
@@ -10293,6 +10305,7 @@ from api.models import (
     _session_message_visible_key,
     _message_timestamp_as_float,
     _is_empty_partial_activity_message,
+    _is_reasoning_only_assistant_message,
     _hide_from_default_sidebar,
     prune_session_from_index,
     agent_session_rows_existing,
@@ -15884,6 +15897,19 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, _sanitize_error(exc), status=500)
 
     if parsed.path == "/api/session/delete":
+        # Recovery safety guard: a state.db cascade delete can hold a write
+        # transaction for minutes on a multi-GB restored database.  Fail
+        # closed before touching sidecars, indexes, or authoritative rows.
+        # This is deployment-controlled and leaves normal behavior unchanged
+        # when the flag is unset.
+        if os.getenv("HERMES_WEBUI_DISABLE_SESSION_DELETE", "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }:
+            return bad(
+                handler,
+                "Session deletion is temporarily disabled while restored history is protected",
+                status=423,
+            )
         sid = body.get("session_id", "")
         if not sid:
             return bad(handler, "session_id is required")
