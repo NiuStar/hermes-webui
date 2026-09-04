@@ -241,6 +241,21 @@ stream that is no longer replayable, the server must:
 replay. Clients receiving a snapshot must treat prior cursor state as invalid and
 resync from the snapshot payload.
 
+### Bounded closed-run retention
+
+Run-journal replay is intentionally bounded after a run closes. The server keeps
+all unfinished run files, plus the newest closed run, and by default retains at
+most eight closed runs and 256 MiB of closed-run data per session. Operators may
+set `HERMES_WEBUI_RUN_JOURNAL_MAX_CLOSED_RUNS` and
+`HERMES_WEBUI_RUN_JOURNAL_MAX_CLOSED_BYTES` to positive integer limits.
+
+Only journals with a durable close marker, or legacy journals whose bounded final
+line is a valid identity-matched relay-close event, are eligible for eviction.
+Malformed, ambiguous, and unfinished journals fail closed and remain on disk.
+When a client presents a cursor whose closed run has been evicted, the existing
+`session_snapshot` fallback above is authoritative; the server must not claim
+that exact event replay succeeded.
+
 ## Heartbeat
 
 Phase 1 reuses `_SSE_HEARTBEAT_INTERVAL_SECONDS` (defined in `api/routes.py`) for

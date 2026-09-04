@@ -56,6 +56,11 @@ _SNAPSHOT_ARGS_MAX_DEPTH = 8
 _SNAPSHOT_ARGS_MAX_STRING_CHARS = 8192
 _SNAPSHOT_ARGS_MAX_TOTAL_CHARS = 64 * 1024
 _SNAPSHOT_ARGS_TRUNCATED_SUFFIX = "...[truncated]"
+_CLOSED_RUN_MARKER_SUFFIX = ".closed"
+_CLOSED_RUN_RETENTION_LOCK = threading.Lock()
+_DEFAULT_MAX_CLOSED_RUNS = 8
+_DEFAULT_MAX_CLOSED_BYTES = 256 * 1024 * 1024
+_LEGACY_CLOSE_TAIL_BYTES = 64 * 1024
 
 
 def _default_session_dir() -> Path:
@@ -342,6 +347,176 @@ def _fsync_parent_dir(path: Path) -> None:
         pass
 
 
+def _positive_env_int(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def _closed_run_marker_path(path: Path) -> Path:
+    return path.with_name(path.name + _CLOSED_RUN_MARKER_SUFFIX)
+
+
+def _mark_run_closed(path: Path, *, created_at: float) -> None:
+    marker = _closed_run_marker_path(path)
+    tmp = marker.with_name(f".{marker.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    journal_signature = _summary_cache_signature(path)
+    if journal_signature is None:
+        raise OSError("run journal disappeared before close marker")
+    data = json.dumps(
+        {
+            "version": 1,
+            "closed_at": float(created_at),
+            "journal_signature": list(journal_signature),
+        },
+        separators=(",", ":"),
+    ) + "\n"
+    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, marker)
+        _fsync_parent_dir(marker)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _evict_run_path_caches(path: Path) -> None:
+    path_key = str(path)
+    parent_key = str(path.parent)
+    with _WRITER_LOCKS_GUARD:
+        for key in [entry for entry in _WRITER_LOCKS if entry[0] == parent_key and entry[1] == path.name]:
+            del _WRITER_LOCKS[key]
+    with _SEQ_CACHE_LOCK:
+        _SEQ_CACHE.pop(path_key, None)
+    with _SUMMARY_CACHE_LOCK:
+        _SUMMARY_CACHE.pop(path_key, None)
+
+
+def _evict_pruned_run_caches(path: Path) -> None:
+    """Drop content caches without replacing the live per-path writer lock."""
+    path_key = str(path)
+    with _SEQ_CACHE_LOCK:
+        _SEQ_CACHE.pop(path_key, None)
+    with _SUMMARY_CACHE_LOCK:
+        _SUMMARY_CACHE.pop(path_key, None)
+
+
+def _legacy_closed_at(path: Path) -> float | None:
+    """Recognize an old closed journal from one bounded final event line."""
+    try:
+        with path.open("rb") as fh:
+            size = fh.seek(0, os.SEEK_END)
+            start = max(0, size - _LEGACY_CLOSE_TAIL_BYTES)
+            fh.seek(start)
+            tail = fh.read(_LEGACY_CLOSE_TAIL_BYTES)
+        lines = [line for line in tail.splitlines() if line.strip()]
+        if not lines:
+            return None
+        if start and not tail.startswith(b"\n") and len(lines) == 1:
+            return None
+        event = json.loads(lines[-1])
+        if not isinstance(event, dict):
+            return None
+        run_id = path.stem
+        session_id = path.parent.name
+        seq = event.get("seq")
+        if (
+            event.get("event") not in SSE_RELAY_CLOSE_EVENTS
+            or event.get("terminal") is not True
+            or event.get("run_id") != run_id
+            or event.get("session_id") != session_id
+            or not isinstance(seq, int)
+            or isinstance(seq, bool)
+            or seq < 1
+            or event.get("event_id") != f"{run_id}:{seq}"
+        ):
+            return None
+        return float(event.get("created_at") or path.stat().st_mtime)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _prune_closed_run_journals(current_path: Path) -> None:
+    """Bound closed run files while preserving live and newest recovery state."""
+    max_runs = _positive_env_int(
+        "HERMES_WEBUI_RUN_JOURNAL_MAX_CLOSED_RUNS",
+        _DEFAULT_MAX_CLOSED_RUNS,
+    )
+    max_bytes = _positive_env_int(
+        "HERMES_WEBUI_RUN_JOURNAL_MAX_CLOSED_BYTES",
+        _DEFAULT_MAX_CLOSED_BYTES,
+    )
+    with _CLOSED_RUN_RETENTION_LOCK:
+        closed = []
+        marked_journals = set()
+        for marker in current_path.parent.glob(f"*.jsonl{_CLOSED_RUN_MARKER_SUFFIX}"):
+            journal = marker.with_name(marker.name[: -len(_CLOSED_RUN_MARKER_SUFFIX)])
+            try:
+                if not journal.is_file():
+                    marker.unlink(missing_ok=True)
+                    continue
+                marker_data = json.loads(marker.read_text(encoding="utf-8"))
+                closed_at = float(marker_data.get("closed_at") or marker.stat().st_mtime)
+                marker_signature = tuple(marker_data.get("journal_signature") or ())
+                if marker_signature != _summary_cache_signature(journal):
+                    continue
+                closed.append((closed_at, journal.name, journal, marker, journal.stat().st_size))
+                marked_journals.add(journal)
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+        for journal in current_path.parent.glob("*.jsonl"):
+            if journal in marked_journals:
+                continue
+            closed_at = _legacy_closed_at(journal)
+            if closed_at is None:
+                continue
+            closed.append((closed_at, journal.name, journal, None, journal.stat().st_size))
+        closed.sort(key=lambda item: (item[0], item[1]))
+        total_bytes = sum(item[4] for item in closed)
+        while len(closed) > 1 and (len(closed) > max_runs or total_bytes > max_bytes):
+            item = closed[0]
+            _closed_at, _name, journal, marker, size = item
+            with _lock_for(journal):
+                try:
+                    if marker is not None:
+                        marker_data = json.loads(marker.read_text(encoding="utf-8"))
+                        confirmed_closed_at = float(
+                            marker_data.get("closed_at") or marker.stat().st_mtime
+                        )
+                        marker_signature = tuple(
+                            marker_data.get("journal_signature") or ()
+                        )
+                        if (
+                            confirmed_closed_at != _closed_at
+                            or marker_signature != _summary_cache_signature(journal)
+                        ):
+                            closed.remove(item)
+                            continue
+                    elif _legacy_closed_at(journal) != _closed_at:
+                        closed.remove(item)
+                        continue
+                    journal.unlink()
+                    if marker is not None:
+                        marker.unlink(missing_ok=True)
+                    # Invalidate seq/summary state before releasing the same
+                    # per-path lock. A late append can then recreate the file
+                    # only after its seq cache has reset to 1.
+                    _evict_pruned_run_caches(journal)
+                except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                    closed.remove(item)
+                    continue
+            closed.remove(item)
+            total_bytes -= size
+
+
 def _event_created_at(event: dict, *, fallback: float = 0.0) -> float:
     try:
         return float(event.get("created_at") or fallback)
@@ -430,10 +605,27 @@ def append_run_event(
             fh.flush()
             if _should_fsync_event(terminal_state):
                 os.fsync(fh.fileno())
+        try:
+            marker = _closed_run_marker_path(path)
+            if event_name in SSE_RELAY_CLOSE_EVENTS:
+                _mark_run_closed(path, created_at=event["created_at"])
+            else:
+                marker.unlink(missing_ok=True)
+        except Exception:
+            # Retention metadata is best-effort. The event above is already
+            # durable and must remain deliverable if marker I/O fails.
+            pass
         _discard_cached_summary(path)
         if created_file:
             _fsync_parent_dir(path)
-        return event
+    if event_name in SSE_RELAY_CLOSE_EVENTS:
+        try:
+            _prune_closed_run_journals(path)
+        except Exception:
+            # Retention is best-effort. Journal durability and live delivery
+            # must not fail merely because cleanup could not complete.
+            pass
+    return event
 
 
 class RunJournalWriter:
@@ -447,18 +639,15 @@ class RunJournalWriter:
         self._lock = _lock_for(self._path)
 
     def append_sse_event(self, event_name: str, payload=None) -> dict:
-        # Draw from the shared module-level seq cache under the per-path lock so
-        # this writer and any direct append_run_event() call on the same path
-        # agree on one monotonic, gapless sequence.
-        with self._lock:
-            seq = _reserve_next_seq(self._path)
+        # Let append_run_event reserve the sequence and append while holding the
+        # same per-path lock. Splitting those steps would let retention remove a
+        # reopened journal after sequence reservation but before the write.
         return append_run_event(
             self.session_id,
             self.run_id,
             event_name,
             payload or {},
             session_dir=self.session_dir,
-            seq=seq,
         )
 
 
