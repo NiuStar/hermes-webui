@@ -10551,6 +10551,7 @@ from api.streaming import (
     _materialize_pending_user_turn_before_error,
     generate_session_title_for_session,
     _compact_for_echo_compare,
+    _redacted_session_payload_with_full_messages,
     _strip_compact_echo_suffix,
 )
 from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
@@ -18395,6 +18396,63 @@ def _parse_run_journal_after_seq(qs: dict, stream_id: str | None = None) -> int 
         return 0
 
 
+def _run_journal_replay_projection(entry, summary):
+    """Rehydrate compact successful terminals or fail closed for replay."""
+    event_name = entry.get("event") or entry.get("type") or "message"
+    payload = entry.get("payload")
+    if (
+        event_name != "done"
+        or not isinstance(payload, dict)
+        or type(payload.get("_journal_compact_done")) is not int
+        or payload.get("_journal_compact_done") != 1
+    ):
+        return event_name, payload
+    session_id = str((summary or {}).get("session_id") or "").strip()
+    compact_session = payload.get("session")
+    compact_session_id = (
+        str(compact_session.get("session_id") or "").strip()
+        if isinstance(compact_session, dict)
+        else ""
+    )
+    if not session_id or compact_session_id != session_id:
+        return "apperror", {
+            "type": "journal_snapshot_unavailable",
+            "recovery_control": True,
+            "message": "The completed session could not be restored from its journal.",
+        }
+    try:
+        session = get_session(session_id)
+        hydrated_session = _redacted_session_payload_with_full_messages(session)
+        if (
+            not isinstance(hydrated_session, dict)
+            or str(hydrated_session.get("session_id") or "") != session_id
+        ):
+            raise ValueError("hydrated session identity mismatch")
+        expected_count = compact_session.get("message_count")
+        if (
+            type(expected_count) is not int
+            or type(hydrated_session.get("message_count")) is not int
+            or hydrated_session["message_count"] != expected_count
+        ):
+            raise ValueError("hydrated session message count mismatch")
+        expected_revision = compact_session.get("regeneration_revision")
+        if (
+            expected_revision not in (None, "")
+            and hydrated_session.get("regeneration_revision") != expected_revision
+        ):
+            raise ValueError("hydrated session revision mismatch")
+    except Exception:
+        return "apperror", {
+            "type": "journal_snapshot_unavailable",
+            "recovery_control": True,
+            "message": "The completed session could not be restored from its journal.",
+        }
+    hydrated = dict(payload)
+    hydrated.pop("_journal_compact_done", None)
+    hydrated["session"] = hydrated_session
+    return "done", hydrated
+
+
 def _replay_run_journal(
     handler,
     stream_id: str,
@@ -18413,10 +18471,11 @@ def _replay_run_journal(
         max_seq=max_seq,
     )
     for entry in journal.get("events") or []:
+        event_name, payload = _run_journal_replay_projection(entry, summary)
         _sse_with_id(
             handler,
-            entry.get("event") or entry.get("type") or "message",
-            entry.get("payload"),
+            event_name,
+            payload,
             entry.get("event_id"),
         )
     if include_stale and not summary.get("terminal"):

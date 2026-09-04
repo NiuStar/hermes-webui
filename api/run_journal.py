@@ -61,6 +61,20 @@ _CLOSED_RUN_RETENTION_LOCK = threading.Lock()
 _DEFAULT_MAX_CLOSED_RUNS = 8
 _DEFAULT_MAX_CLOSED_BYTES = 256 * 1024 * 1024
 _LEGACY_CLOSE_TAIL_BYTES = 64 * 1024
+_COMPACT_DONE_MARKER = "_journal_compact_done"
+_COMPACT_DONE_SESSION_FIELDS = (
+    "session_id",
+    "message_count",
+    "updated_at",
+    "regeneration_revision",
+)
+_COMPACT_DONE_PAYLOAD_FIELDS = (
+    "usage",
+    "terminal_state",
+    "terminal_reason",
+    "status",
+    "created_at",
+)
 
 
 def _default_session_dir() -> Path:
@@ -628,6 +642,32 @@ def append_run_event(
     return event
 
 
+def _journal_payload_for_sse_event(event_name: str, payload):
+    """Project a live SSE payload into its smaller durable representation."""
+    if (
+        str(event_name or "").strip() != "done"
+        or not isinstance(payload, dict)
+        or payload.get("ephemeral") is True
+        or "answer" in payload
+    ):
+        return payload
+    session = payload.get("session")
+    if not isinstance(session, dict) or not session.get("session_id"):
+        return payload
+    compact = {
+        _COMPACT_DONE_MARKER: 1,
+        "session": {
+            key: session[key]
+            for key in _COMPACT_DONE_SESSION_FIELDS
+            if key in session
+        },
+    }
+    for key in _COMPACT_DONE_PAYLOAD_FIELDS:
+        if key in payload:
+            compact[key] = payload[key]
+    return compact
+
+
 class RunJournalWriter:
     """Stateful writer for one WebUI stream/run."""
 
@@ -646,7 +686,7 @@ class RunJournalWriter:
             self.session_id,
             self.run_id,
             event_name,
-            payload or {},
+            _journal_payload_for_sse_event(event_name, payload or {}),
             session_dir=self.session_dir,
         )
 
@@ -893,6 +933,20 @@ def read_session_run_events(
     replay_events = [event for event in cursor_events if event["seq"] > cursor_seq]
     for _created_at, _run_id, events in runs[cursor_index + 1:]:
         replay_events.extend(events)
+    if any(
+        event.get("event") == "done"
+        and isinstance(event.get("payload"), dict)
+        and type(event["payload"].get(_COMPACT_DONE_MARKER)) is int
+        and event["payload"].get(_COMPACT_DONE_MARKER) == 1
+        for event in replay_events
+    ):
+        return {
+            "session_id": sid,
+            "cursor_run_id": cursor_run_id,
+            "cursor_seq": cursor_seq,
+            "status": "replay_snapshot_required",
+            "events": [],
+        }
     return {
         "session_id": sid,
         "cursor_run_id": cursor_run_id,

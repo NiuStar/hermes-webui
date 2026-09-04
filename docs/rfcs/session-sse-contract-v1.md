@@ -256,6 +256,26 @@ When a client presents a cursor whose closed run has been evicted, the existing
 `session_snapshot` fallback above is authoritative; the server must not claim
 that exact event replay succeeded.
 
+### Compact successful terminal records
+
+The live `/api/chat/stream` `done` event keeps its existing full public session
+payload so the active browser can settle without an extra request. Its durable
+run-journal projection is intentionally smaller after authoritative session
+writeback succeeds: it records a version marker, session identity, exact
+`message_count`, optional regeneration revision, usage, and terminal metadata,
+but not the transcript or session-level tool-call arrays.
+
+Replay must never expose that compact internal record as a normal browser
+`done` payload. A dead per-run stream may rehydrate it from the authoritative
+persisted session only when session identity, exact message count, and any
+recorded revision still match. If rehydration fails or the session advanced,
+the stream emits a recovery-control error instead of a misleading terminal
+payload. Session-scoped replay treats a compact `done` ahead of the cursor as a
+snapshot boundary and uses the existing `session_snapshot` fallback. Error,
+cancel, ephemeral `/btw`, and other answer-bearing terminal payloads are not
+compacted because they may be the only recovery copy when final session
+persistence did not occur or failed.
+
 ## Heartbeat
 
 Phase 1 reuses `_SSE_HEARTBEAT_INTERVAL_SECONDS` (defined in `api/routes.py`) for
