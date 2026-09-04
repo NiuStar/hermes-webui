@@ -603,3 +603,34 @@ def test_prune_clears_sequence_cache_before_reopened_run_can_append(
         "session_1", after_event_id="victim:1", session_dir=tmp_path
     )
     assert replay["status"] == "ok"
+
+
+def test_session_replay_falls_back_when_prune_removes_path_after_read(
+    tmp_path, monkeypatch
+):
+    append_run_event(
+        "session_1",
+        "run_1",
+        "stream_end",
+        {},
+        session_dir=tmp_path,
+        created_at=1.0,
+    )
+    import api.run_journal as run_journal
+
+    original_iter = run_journal._iter_bounded_raw_jsonl_lines
+
+    def remove_after_read(path, **kwargs):
+        yield from original_iter(path, **kwargs)
+        path.unlink()
+
+    monkeypatch.setattr(
+        run_journal, "_iter_bounded_raw_jsonl_lines", remove_after_read
+    )
+
+    replay = read_session_run_events(
+        "session_1", after_event_id="run_1:1", session_dir=tmp_path
+    )
+
+    assert replay["status"] == "cursor_run_missing"
+    assert replay["events"] == []

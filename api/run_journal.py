@@ -860,7 +860,17 @@ def read_session_run_events(
             if str(exc) == "replay_limit_bytes":
                 return {"session_id": sid, "cursor_run_id": cursor_run_id, "cursor_seq": cursor_seq, "status": "replay_limit_bytes", "events": []}
             raise
-        created_at = min((_event_created_at(event) for event in events), default=path.stat().st_mtime)
+        try:
+            path_mtime = path.stat().st_mtime
+        except FileNotFoundError:
+            # Retention can remove a closed run after replay finished reading it.
+            # Treat it as absent so the caller uses the existing authoritative
+            # session-snapshot fallback instead of leaking a filesystem race.
+            continue
+        created_at = min(
+            (_event_created_at(event) for event in events),
+            default=path_mtime,
+        )
         runs.append((created_at, run_id, events))
     runs.sort(key=lambda run: (run[0], run[1]))
     cursor_index = next((index for index, (_created_at, run_id, _events) in enumerate(runs) if run_id == cursor_run_id), None)
