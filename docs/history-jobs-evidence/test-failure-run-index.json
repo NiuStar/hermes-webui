@@ -1,0 +1,169 @@
+[
+  {
+    "file": "baseline-no-node.log",
+    "sha256": "895767537546008ec43c0022897e7da22f94069689220cc7e9b112e837960d52",
+    "summary_lines": [
+      "            setTimeout(()=>{{console.error('api did not reject after timeoutMs');process.exit(3);}},250);",
+      "args = ['node', '-e', \"\\n        const events=[];\\n        global.document={baseURI:'http://example.test/hermes/'};\\n        ...n          });\\n        setTimeout(()=>{console.error('api did not reject after timeoutMs');process.exit(3);},250);\\n\"]",
+      "E                   FileNotFoundError: [Errno 2] No such file or directory: 'node'",
+      "/usr/local/lib/python3.12/subprocess.py:1955: FileNotFoundError",
+      "3 failed, 12 passed, 7 errors in 19.05s"
+    ]
+  },
+  {
+    "file": "baseline-node.log",
+    "sha256": "6b4eea00aa458fc5a6fd2c30fccce8a2de038f1923fb2606cb01769dd49bdde5",
+    "summary_lines": [
+      "71 passed in 31.64s"
+    ]
+  },
+  {
+    "file": "current-no-node.log",
+    "sha256": "bba938518904fc13fd699d998f351f035c82c36026d4b5cec3f0c9994427386c",
+    "summary_lines": [
+      "            setTimeout(()=>{{console.error('api did not reject after timeoutMs');process.exit(3);}},250);",
+      "args = ['node', '-e', \"\\n        const events=[];\\n        global.document={baseURI:'http://example.test/hermes/'};\\n        ...n          });\\n        setTimeout(()=>{console.error('api did not reject after timeoutMs');process.exit(3);},250);\\n\"]",
+      "E                   FileNotFoundError: [Errno 2] No such file or directory: 'node'",
+      "/usr/local/lib/python3.12/subprocess.py:1955: FileNotFoundError",
+      "3 failed, 12 passed, 7 errors in 18.29s"
+    ]
+  },
+  {
+    "file": "current-node.log",
+    "sha256": "17f974d4cd8b31ec0ea7cfee0f32887b0a838a8b89e4f7ac33ad1871e365d415",
+    "summary_lines": [
+      "71 passed in 30.51s"
+    ]
+  },
+  {
+    "file": "delete-baseline-guard.log",
+    "sha256": "5ef541873428b4f87609267eabdf9253c18b9bab48dd72c4309da221769932f6",
+    "summary_lines": [
+      "1 failed in 16.58s"
+    ]
+  },
+  {
+    "file": "delete-baseline-isolated.log",
+    "sha256": "b8279980f0667abb9032fc1cf2e3cc3db80c1a75136fe480a4e621336680fd67",
+    "summary_lines": [
+      "23 passed in 27.63s"
+    ]
+  },
+  {
+    "file": "delete-current-guard.log",
+    "sha256": "ec7dc5ec62c4d50b0ac7fd3a506ef082bfbda0f9f840a26a1fa787883be0ee1d",
+    "summary_lines": [
+      "1 failed in 16.19s"
+    ]
+  },
+  {
+    "file": "delete-current-isolated.log",
+    "sha256": "83976b4c533c76fe21e05299fd0292b557664ebe084628d867a379720ce68dc9",
+    "summary_lines": [
+      "23 passed in 27.49s"
+    ]
+  },
+  {
+    "file": "first-test-60.log",
+    "sha256": "c485e007d16b45adce41ec519dc9047e7905258cf722312bc0050e2cb3d29f74",
+    "summary_lines": [
+      "============================== 1 passed in 16.50s =============================="
+    ]
+  },
+  {
+    "file": "first-test.log",
+    "sha256": "bc1f4f3b3a1f33e972c2f33e49cac6bf7703b3cab725cdc881257b5cbd2af6aa",
+    "summary_lines": [
+      "E   Failed: Timeout (>10.0s) from pytest-timeout.",
+      "ERROR tests/test_1003_preferences_autosave.py::test_debounce_cancels_pending_timer_on_rapid_input - Failed: Timeout (>10.0s) from pytest-timeout.",
+      "============================== 1 error in 11.66s ==============================="
+    ]
+  },
+  {
+    "file": "history-targeted.log",
+    "sha256": "3b8d1d192e3d21975aba47a32415de0a96068ab304c6a757aedf4ca733daf4b4",
+    "summary_lines": [
+      "51 passed in 41.52s"
+    ]
+  },
+  {
+    "file": "node-install.log",
+    "sha256": "59b8fa413432b1039f0108221c6bfedfec787779aca3dbeead61cca7c59e8ec4",
+    "summary_lines": []
+  },
+  {
+    "file": "passkey-baseline-isolated.log",
+    "sha256": "5e34370d9420f0eb2fa64f375004155d3c941e71f2358cab37a5222b7b0d04a3",
+    "summary_lines": [
+      "17 passed in 18.73s"
+    ]
+  },
+  {
+    "file": "passkey-baseline.log",
+    "sha256": "8ae9a1e376ebd30ae49813c6f05266fdc5bcb918fdc2d5eeaa6e826f6d4853b4",
+    "summary_lines": [
+      "2 failed, 15 passed in 16.93s"
+    ]
+  },
+  {
+    "file": "passkey-current-isolated.log",
+    "sha256": "388a7adc4e5543f129357f64d0be92b5860789c0602de3e333f319a06f58af0c",
+    "summary_lines": [
+      "17 passed in 16.48s"
+    ]
+  },
+  {
+    "file": "passkey-current.log",
+    "sha256": "9d6708e61069f8411dd6dfd16c61f8f5814f1ddab0531581d0ebff8490e9f191",
+    "summary_lines": [
+      "2 failed, 15 passed in 17.75s"
+    ]
+  },
+  {
+    "file": "shard-00-60.log",
+    "sha256": "52185431515673d71de5fd5424a7c95146bbefe5322b8d170c0ed0125ac36bff",
+    "summary_lines": [
+      "======= 1 failed, 150 passed, 4 skipped, 9 warnings in 151.42s (0:02:31) ======="
+    ]
+  },
+  {
+    "file": "shard-00-clean.log",
+    "sha256": "134d53232a42e524b95ebfa9b2239a08ed72f09bb23443d239b95573b5359ba3",
+    "summary_lines": [
+      "tests/test_title_aux_routing.py::TestGenerateTitleRawViaAuxTimeout::test_configured_provider_model_and_base_url_are_passed_to_aux_client PASSED [ 90%]",
+      "tests/test_title_aux_routing.py::TestGenerateTitleRawViaAuxTimeout::test_german_fallback_uses_generic_topic_extraction_without_literal_override PASSED [ 90%]",
+      "tests/test_title_aux_routing.py::TestGenerateTitleRawViaAuxTimeout::test_title_prompt_requires_matching_user_language PASSED [ 90%]",
+      "tests/test_title_aux_routing.py::TestAuxTitleTimeoutEdgeCases::test_timeout_non_numeric_string_falls_back_to_default PASSED [ 90%]",
+      "tests/test_title_aux_routing.py::TestAuxTitleTimeoutEdgeCases::test_timeout_positive_passes_through PASSED [ 90%]"
+    ]
+  },
+  {
+    "file": "shard-00-collection.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "summary_lines": []
+  },
+  {
+    "file": "shard-00-first-fail.log",
+    "sha256": "e5144237ff838b63e9ad6792be14cf880f78dc48298e51fc60996649e4c61eb9",
+    "summary_lines": []
+  },
+  {
+    "file": "shard-00-isolated.log",
+    "sha256": "a76cb0e516ba4f74ba9915c8629e2056e1ac35e3eb4beca6f2b82814e671c779",
+    "summary_lines": [
+      "======= 1 failed, 608 passed, 4 skipped, 9 warnings in 208.51s (0:03:28) ======="
+    ]
+  },
+  {
+    "file": "shard-00.log",
+    "sha256": "c10d16ee9b117042e245c4fa2b8ce2ae18fb76bac5a2e002d8ec52e90f4023af",
+    "summary_lines": []
+  },
+  {
+    "file": "tls-current.log",
+    "sha256": "ec6f0916c53aeef9566e1e7051b6219fde6da845f48000f673fbb702bb981fcd",
+    "summary_lines": [
+      "============================== 1 passed in 25.10s =============================="
+    ]
+  }
+]

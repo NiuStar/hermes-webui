@@ -1,0 +1,482 @@
+{
+  "source": "/workspace/history-jobs-full-suite.log",
+  "source_sha256": "6cdc1bc982411a0d7578213aff6ffba741501da5dc43376389a2183a3aa84ec5",
+  "revision": "82ce96beda8c700cfed379a527ca15d9d2344764",
+  "collected": 15306,
+  "interrupted": true,
+  "summary": {
+    "failed": 28,
+    "passed": 1785,
+    "skipped": 181,
+    "errors": 7
+  },
+  "groups": {
+    "missing_node": 35
+  },
+  "baseline_revision": "f5730a66feca090f5684c6d966344eeda969e79f",
+  "verification": {
+    "original_failure_modules_current": "71 passed",
+    "original_failure_modules_baseline": "71 passed",
+    "history_targeted": "51 passed",
+    "delete_current_and_baseline": "23 passed each with process-local guard override; failing with inherited guard",
+    "passkey_current_and_baseline": "17 passed each with process-local onboarding override; 2 failed each with inherited open flag",
+    "full_suite": "NOT COMPLETE; no worker authorization"
+  },
+  "records": [
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_1325_user_fenced_code.py::TestUserFencedBlocks::test_simple_fenced_block",
+      "source_lines": [
+        1414,
+        1609
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_1325_user_fenced_code.py::TestUserFencedBlocks::test_fenced_block_escaped_html",
+      "source_lines": [
+        1609,
+        1805
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_1325_user_fenced_code.py::TestUserFencedBlocks::test_plain_text_not_interpreted_as_markdown",
+      "source_lines": [
+        1805,
+        2001
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_1325_user_fenced_code.py::TestUserFencedBlocks::test_language_header_shown",
+      "source_lines": [
+        2001,
+        2196
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_1325_user_fenced_code.py::TestUserFencedBlocks::test_no_language_no_header",
+      "source_lines": [
+        2196,
+        2391
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_1325_user_fenced_code.py::TestUserFencedBlocks::test_diff_block_colored",
+      "source_lines": [
+        2391,
+        2586
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_1325_user_fenced_code.py::TestUserFencedBlocks::test_multiple_fenced_blocks",
+      "source_lines": [
+        2586,
+        2781
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_1325_user_fenced_code.py::TestUserFencedBlocks::test_fenced_block_with_ampersand",
+      "source_lines": [
+        2781,
+        2976
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_1325_user_fenced_code.py::TestUserFencedBlocks::test_empty_code_block",
+      "source_lines": [
+        2976,
+        3171
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_1325_user_fenced_code.py::TestUserFencedBlocks::test_special_chars_outside_blocks_escaped",
+      "source_lines": [
+        3171,
+        3366
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_1325_user_fenced_code.py::TestUserFencedBlocks::test_links_not_rendered_in_plain_text",
+      "source_lines": [
+        3366,
+        3562
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_1325_user_fenced_code.py::TestUserFencedBlocks::test_four_backtick_outer_fence_preserves_inner_triple_fence",
+      "source_lines": [
+        3562,
+        3758
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_1325_user_fenced_code.py::TestUserFencedBlocks::test_inline_backticks_not_touched",
+      "source_lines": [
+        3758,
+        3954
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_745_code_block_newlines.py::TestCodeBlockNewlinePreservation::test_js_syntax_valid",
+      "source_lines": [
+        3954,
+        4150
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_api_timeout.py::test_api_rejects_hung_fetch_with_timeout_and_toast",
+      "source_lines": [
+        4150,
+        4366
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_api_timeout.py::test_api_rejects_stalled_response_body_with_timeout",
+      "source_lines": [
+        4366,
+        4587
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_api_timeout.py::test_api_can_suppress_timeout_toast_for_background_pollers",
+      "source_lines": [
+        4587,
+        4803
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_cli_only_slash_commands.py::test_agent_command_metadata_helper_resolves_name_and_alias",
+      "source_lines": [
+        4803,
+        5008
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_cli_only_slash_commands.py::test_cli_only_response_helper_uses_canonical_command_name",
+      "source_lines": [
+        5008,
+        5208
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_cli_only_slash_commands.py::test_bundle_command_metadata_helper_resolves_known_bundle",
+      "source_lines": [
+        5208,
+        5412
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_cli_only_slash_commands.py::test_cli_only_slugs_reserve_skill_autocomplete_namespace",
+      "source_lines": [
+        5412,
+        5636
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_cli_only_slash_commands.py::test_skill_autocomplete_matches_keyword_in_name_or_description",
+      "source_lines": [
+        5636,
+        5842
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_cli_only_slash_commands.py::test_skill_autocomplete_hides_keyword_match_shadowed_by_bundle",
+      "source_lines": [
+        5842,
+        6043
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_cli_only_slash_commands.py::test_skill_autocomplete_waits_for_bundle_metadata_before_showing_colliding_keyword_match",
+      "source_lines": [
+        6043,
+        6286
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_cli_only_slash_commands.py::test_bundle_collisions_stay_hidden_until_agent_metadata_is_ready",
+      "source_lines": [
+        6286,
+        6537
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_cli_only_slash_commands.py::test_reload_skills_agent_command_metadata_resolves_alias",
+      "source_lines": [
+        6537,
+        6740
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_cli_only_slash_commands.py::test_codex_runtime_agent_command_metadata_resolves_alias",
+      "source_lines": [
+        6740,
+        6943
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "FAILED",
+      "nodeid": "tests/test_composer_status_timeout.py::test_composer_status_timeout_is_race_safe",
+      "source_lines": [
+        6943,
+        7226
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "ERROR",
+      "nodeid": "tests/test_cancel_stream_owner_guard.py::TestCancelStreamOwnerGuardRuntime::test_t1_no_active_stream_is_noop",
+      "source_lines": [
+        34,
+        231
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "ERROR",
+      "nodeid": "tests/test_cancel_stream_owner_guard.py::TestCancelStreamOwnerGuardRuntime::test_t2_happy_path_keeps_owner_for_sse_cancel_settle",
+      "source_lines": [
+        231,
+        428
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "ERROR",
+      "nodeid": "tests/test_cancel_stream_owner_guard.py::TestCancelStreamOwnerGuardRuntime::test_t3_cancelled_false_surfaces_toast",
+      "source_lines": [
+        428,
+        625
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "ERROR",
+      "nodeid": "tests/test_cancel_stream_owner_guard.py::TestCancelStreamOwnerGuardRuntime::test_t4_network_error_does_not_throw",
+      "source_lines": [
+        625,
+        822
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "ERROR",
+      "nodeid": "tests/test_cancel_stream_owner_guard.py::TestCancelStreamOwnerGuardRuntime::test_t3b_failed_http_keeps_owner_state",
+      "source_lines": [
+        822,
+        1019
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "ERROR",
+      "nodeid": "tests/test_cancel_stream_owner_guard.py::TestCancelStreamOwnerGuardRuntime::test_t5_owner_guard_preserves_new_turn",
+      "source_lines": [
+        1019,
+        1216
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    },
+    {
+      "status": "ERROR",
+      "nodeid": "tests/test_cancel_stream_owner_guard.py::TestCancelStreamOwnerGuardRuntime::test_owner_guard_surfaces_issue_reference",
+      "source_lines": [
+        1216,
+        1414
+      ],
+      "errors": [
+        "FileNotFoundError: [Errno 2] No such file or directory: 'node'"
+      ],
+      "symptom_group": "missing_node",
+      "classification": "environment_missing_node_confirmed_baseline_and_current"
+    }
+  ]
+}
