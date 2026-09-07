@@ -10,6 +10,66 @@ import threading
 import time
 import traceback
 import uuid
+from contextvars import ContextVar
+from functools import wraps
+import re
+
+# Request-local and opt-in: no profiler hooks or process-wide monkeypatches.
+_session_timing = ContextVar('session_fine_timing', default=None)
+
+
+def session_timed_call(name, fn, *args, **kwargs):
+    trace = _session_timing.get()
+    if trace is None or len(trace['spans']) >= 128:
+        return fn(*args, **kwargs)
+    parent = trace['stack'][-1] if trace['stack'] else None
+    span = {'name': name, 'parent': parent, 'children_ms': 0.0}
+    index = len(trace['spans'])
+    trace['spans'].append(span)
+    trace['stack'].append(index)
+    started = time.monotonic()
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        elapsed = (time.monotonic() - started) * 1000
+        trace['stack'].pop()
+        span['inclusive_ms'] = elapsed
+        span['exclusive_ms'] = elapsed - span.pop('children_ms')
+        if parent is not None:
+            trace['spans'][parent]['children_ms'] += elapsed
+
+
+def session_timing_count(name, value):
+    trace = _session_timing.get()
+    if trace is not None and len(trace['counts']) < 64 and isinstance(value, (int, bool)):
+        trace['counts'][name] = value
+
+
+def session_timing_request(fn):
+    @wraps(fn)
+    def wrapped(handler, parsed):
+        if parsed.path != '/api/session' or os.getenv('HERMES_WEBUI_SESSION_FINE_TIMING') != '1':
+            return fn(handler, parsed)
+        rid = getattr(handler, 'headers', {}).get('X-WebUI-Timing-ID', '')
+        # Explicit bounded request opt-in, not every browser poll.
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,48}', rid):
+            return fn(handler, parsed)
+        trace = {'spans': [], 'stack': [], 'counts': {}, 'request_id': rid}
+        token = _session_timing.set(trace)
+        started = time.monotonic()
+        try:
+            return fn(handler, parsed)
+        finally:
+            elapsed = (time.monotonic() - started) * 1000
+            _session_timing.reset(token)
+            total = sum(s['exclusive_ms'] for s in trace['spans'])
+            trace.pop('stack')
+            trace.update(elapsed_ms=elapsed, exclusive_sum_ms=total, unattributed_ms=elapsed-total)
+            try:
+                handler._safe_webui_print('Session fine timing: ' + json.dumps(trace, separators=(',', ':')))
+            except Exception:
+                pass  # Diagnostics must never replace a response/exception.
+    return wrapped
 from typing import Any
 
 

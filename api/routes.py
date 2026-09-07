@@ -2929,7 +2929,9 @@ from api.helpers import (
 )
 from api.agent_health import build_agent_health_payload
 from api.gateway_chat import gateway_chat_config_status
-from api.request_diagnostics import RequestDiagnostics
+from api.request_diagnostics import (
+    RequestDiagnostics, session_timed_call, session_timing_request, session_timing_count,
+)
 from api.system_health import build_system_health_payload
 
 
@@ -7808,7 +7810,7 @@ def _resolve_context_length_for_session_model(
             cfg=_cfg_for_cl if isinstance(_cfg_for_cl, dict) else {},
         )
         try:
-            return _get_cl(
+            return session_timed_call('agent.get_model_context_length', _get_cl,
                 model_for_lookup,
                 _ctx_lookup.base_url,
                 api_key=_ctx_lookup.api_key,
@@ -7818,7 +7820,7 @@ def _resolve_context_length_for_session_model(
             ) or 0
         except TypeError:
             # Older hermes-agent builds: legacy 2-arg form.
-            return _get_cl(model_for_lookup, _ctx_lookup.base_url) or 0
+            return session_timed_call('agent.get_model_context_length_legacy', _get_cl, model_for_lookup, _ctx_lookup.base_url) or 0
     except Exception:
         return 0
 
@@ -9026,7 +9028,7 @@ def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None
     # Building the key requires the sidecar rows (cheap: already in memory or
     # served from the lineage cache) but not the state.db rows -- that
     # asymmetry is the whole point.
-    cache_key = _display_merge_cache_key(session, sidecar_messages, None)
+    cache_key = session_timed_call('_display_merge_cache_key', _display_merge_cache_key, session, sidecar_messages, None)
     if cache_key is None:
         return None
     with _display_merge_cache_lock:
@@ -9088,14 +9090,14 @@ def _limited_webui_messages_for_display_with_sidecar(
         else:
             _state_key = state_db_signature
             if _state_key is not None:
-                _current_key = _state_db_session_signature(
+                _current_key = session_timed_call('_state_db_session_signature', _state_db_session_signature,
                     getattr(session, "session_id", None),
                     getattr(session, "profile", None) or None,
                 )
                 if _current_key != _state_key:
                     _state_key = None
         if _state_key is not None:
-            cache_key = _display_merge_cache_key(
+            cache_key = session_timed_call('_display_merge_cache_key', _display_merge_cache_key,
                 session,
                 sidecar_messages,
                 state_db_messages,
@@ -9108,7 +9110,7 @@ def _limited_webui_messages_for_display_with_sidecar(
             if _display_merge_cache_entry_usable(entry, cache_key):
                 _display_merge_cache.move_to_end(sid, last=True)
                 return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
-    merged = merge_session_messages_append_only(
+    merged = session_timed_call('merge_session_messages_append_only', merge_session_messages_append_only,
         sidecar_messages,
         state_db_messages,
         truncation_watermark=getattr(session, "truncation_watermark", None),
@@ -9124,18 +9126,22 @@ def _limited_webui_messages_for_display_with_sidecar(
         if (
             state_db_signature is not _DISPLAY_STATE_SIGNATURE_UNSET
             and not _streaming_key
-            and _state_db_session_signature(
+            and session_timed_call('_state_db_session_signature', _state_db_session_signature,
                 getattr(session, "session_id", None),
                 getattr(session, "profile", None) or None,
             )
             != state_db_signature
         ):
             cache_key = None
+    session_timing_count("merge_cache_key_valid", cache_key is not None)
+    session_timing_count("merge_rows", len(merged))
     cache_size = (
-        _cache_json_size_bytes(merged, _DISPLAY_MERGE_CACHE_MAX_BYTES)
+        session_timed_call('_cache_json_size_bytes', _cache_json_size_bytes, merged, _DISPLAY_MERGE_CACHE_MAX_BYTES)
         if cache_key is not None
         else None
     )
+    session_timing_count("merge_cache_size_bytes", cache_size if cache_size is not None else -1)
+    session_timing_count("merge_cache_size_rejected", cache_size is not None and cache_size > _DISPLAY_MERGE_CACHE_MAX_BYTES)
     if (
         cache_key is not None
         and cache_size is not None
@@ -9150,7 +9156,7 @@ def _limited_webui_messages_for_display_with_sidecar(
                 "size_bytes": cache_size,
             }
             _display_merge_cache.move_to_end(sid, last=True)
-            _trim_message_cache(
+            session_timed_call('_trim_message_cache', _trim_message_cache,
                 _display_merge_cache,
                 max_entries=_DISPLAY_MERGE_CACHE_MAX,
                 max_bytes=_DISPLAY_MERGE_CACHE_MAX_BYTES,
@@ -12928,6 +12934,7 @@ def _render_index_shell_base() -> str:
     return base
 
 
+@session_timing_request
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
     proxy_result = _handle_extension_sidecar_proxy(handler, parsed, "GET")
@@ -13523,7 +13530,7 @@ def handle_get(handler, parsed) -> bool:
         sid = query.get("session_id", [""])[0]
         if not sid:
             if _diag: _diag.finish()
-            return j(handler, {"error": "session_id is required"}, status=400)
+            return session_timed_call('j', j, handler, {"error": "session_id is required"}, status=400)
         # ?messages=0 skips the message payload for fast session switching.
         # The frontend uses this when switching conversations in the sidebar
         # (only needs metadata). The full message array is loaded lazily
@@ -13558,7 +13565,7 @@ def handle_get(handler, parsed) -> bool:
         try:
             _t1 = _time.monotonic()
             if _diag: _diag.stage("t1_after_get_session_check")
-            s = get_session(sid, metadata_only=(not load_messages))
+            s = session_timed_call('get_session', get_session, sid, metadata_only=(not load_messages))
             _session_profile = getattr(s, 'profile', None) or None
             if not _session_visible_to_active_profile(_session_profile, handler):
                 if _session_profile:
@@ -13634,7 +13641,7 @@ def handle_get(handler, parsed) -> bool:
                     and not getattr(s, "active_stream_id", None)
                     and not getattr(s, "pending_user_message", None)
                 ):
-                    _display_cache_hit = _display_merge_cached_messages(
+                    _display_cache_hit = session_timed_call('_display_merge_cached_messages', _display_merge_cached_messages,
                         s,
                         limited_sidecar_messages,
                         msg_before=msg_before,
@@ -13670,12 +13677,12 @@ def handle_get(handler, parsed) -> bool:
             _t2 = _time.monotonic()
             if _diag: _diag.stage("t2_after_state_db_load")
             effective_model = (
-                _resolve_effective_session_model_for_display(s)
+                session_timed_call('_resolve_effective_session_model_for_display', _resolve_effective_session_model_for_display, s)
                 if resolve_model
                 else None
             )
             effective_provider = (
-                _resolve_effective_session_model_provider_for_display(s)
+                session_timed_call('_resolve_effective_session_model_provider_for_display', _resolve_effective_session_model_provider_for_display, s)
                 if resolve_model
                 else None
             )
@@ -13693,9 +13700,11 @@ def handle_get(handler, parsed) -> bool:
                     _all_msgs = _merged_session_messages_for_display(s, cli_messages)
                 elif msg_limit is not None:
                     if _display_cache_hit is not None:
+                        session_timing_count("display_cache_hit", True)
                         _all_msgs = _display_cache_hit
                     else:
-                        _all_msgs = _limited_webui_messages_for_display_with_sidecar(
+                        session_timing_count("display_cache_hit", False)
+                        _all_msgs = session_timed_call('_limited_webui_messages_for_display_with_sidecar', _limited_webui_messages_for_display_with_sidecar,
                             s,
                             limited_sidecar_messages,
                             state_db_messages,
@@ -13704,7 +13713,7 @@ def handle_get(handler, parsed) -> bool:
                         )
                 else:
                     _all_msgs = merge_session_messages_append_only(
-                        _webui_sidecar_lineage_messages_for_display(s),
+                        session_timed_call('_webui_sidecar_lineage_messages_for_display', _webui_sidecar_lineage_messages_for_display, s),
                         state_db_messages,
                         truncation_watermark=getattr(s, "truncation_watermark", None),
                         truncation_boundary=getattr(s, "truncation_boundary", None),
@@ -13740,15 +13749,15 @@ def handle_get(handler, parsed) -> bool:
                 _summary_message_count = None
                 _summary_last_message_at = None
             if load_messages:
-                _truncated_msgs, _messages_offset = _message_window_for_display(
+                _truncated_msgs, _messages_offset = session_timed_call('_message_window_for_display', _message_window_for_display,
                     _all_msgs,
                     msg_limit=msg_limit,
                     msg_before=msg_before,
                     expand_renderable=expand_renderable,
                 )
                 if msg_limit is not None:
-                    _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
-                _truncated_msgs = _hydrate_anchor_activity_scenes(
+                    _truncated_msgs = session_timed_call('_messages_for_limited_payload', _messages_for_limited_payload, _truncated_msgs)
+                _truncated_msgs = session_timed_call('_hydrate_anchor_activity_scenes', _hydrate_anchor_activity_scenes,
                     _truncated_msgs,
                     getattr(s, "anchor_activity_scenes", None),
                     message_offset=_messages_offset,
@@ -13776,7 +13785,12 @@ def handle_get(handler, parsed) -> bool:
             # config.yaml gets a 256K window in the initial UI indicator and
             # /api/session/get response — the same wrong-window display this
             # fix addresses on the streaming side.
+            session_timing_count("resolve_model", resolve_model)
+            session_timing_count("load_messages", load_messages)
+            session_timing_count("history_count", len(_all_msgs))
+            session_timing_count("window_count", len(_truncated_msgs))
             _persisted_cl = getattr(s, "context_length", 0) or 0
+            session_timing_count("persisted_context_present", bool(_persisted_cl))
             _threshold_tokens = getattr(s, "threshold_tokens", 0) or 0
             if (not _persisted_cl) or resolve_model:
                 _stored_model_for_lookup = getattr(s, "model", "") or ""
@@ -13789,11 +13803,11 @@ def handle_get(handler, parsed) -> bool:
                     _provider_for_lookup,
                     _base_url_for_lookup,
                     _api_key_for_lookup,
-                ) = _session_context_length_lookup_state(
+                ) = session_timed_call('_session_context_length_lookup_state', _session_context_length_lookup_state,
                     _model_for_lookup,
                     effective_provider or getattr(s, "model_provider", None) or "",
                 )
-                _fb_cl = _resolve_context_length_for_session_model(
+                _fb_cl = session_timed_call('_resolve_context_length_for_session_model', _resolve_context_length_for_session_model,
                     _model_for_lookup,
                     _provider_for_lookup,
                     base_url=_base_url_for_lookup,
@@ -13827,7 +13841,7 @@ def handle_get(handler, parsed) -> bool:
             # in the session-level list).  The browser-side
             # _syncToolCallsForLoadedMessages handles deduplication by tid.
             if _windowed_messages:
-                _session_tool_calls = _tool_calls_for_message_window(
+                _session_tool_calls = session_timed_call('_tool_calls_for_message_window', _tool_calls_for_message_window,
                     _session_tool_calls,
                     _messages_offset,
                     len(_truncated_msgs),
@@ -13836,21 +13850,21 @@ def handle_get(handler, parsed) -> bool:
             _merged_last_message_at = _summary_last_message_at if _summary_last_message_at is not None else 0
             if _summary_last_message_at is None and _all_msgs:
                 try:
-                    _merged_last_message_at = max(
+                    _merged_last_message_at = session_timed_call('full_history_max_timestamp', max, (
                         float((m or {}).get("timestamp") or 0)
                         for m in _all_msgs
                         if isinstance(m, dict)
-                    )
+                    ))
                 except (TypeError, ValueError):
                     _merged_last_message_at = 0
-            active_stream_ids = _active_stream_ids()
+            active_stream_ids = session_timed_call('active_stream_ids', _active_stream_ids)
             try:
-                compact_session = s.compact(
+                compact_session = session_timed_call('compact', s.compact,
                     include_runtime=True,
                     active_stream_ids=active_stream_ids,
                 )
             except TypeError:
-                compact_session = s.compact()
+                compact_session = session_timed_call('compact_legacy', s.compact)
             raw = compact_session | {
                 "messages": _truncated_msgs,
                 "message_count": _merged_message_count,
@@ -13866,7 +13880,7 @@ def handle_get(handler, parsed) -> bool:
             }
             if original_stream_id:
                 try:
-                    journal = find_run_summary(original_stream_id)
+                    journal = session_timed_call('find_run_summary', find_run_summary, original_stream_id)
                 except Exception:
                     journal = None
                 if journal:
@@ -13895,7 +13909,7 @@ def handle_get(handler, parsed) -> bool:
             # todo list as the current state instead of falling through to an
             # older non-empty write.
             if load_messages and _all_msgs:
-                attach_todo_state(raw, _all_msgs)
+                session_timed_call('attach_todo_state', attach_todo_state, raw, _all_msgs)
             if _merged_last_message_at:
                 raw["last_message_at"] = max(
                     float(raw.get("last_message_at") or 0),
@@ -13907,7 +13921,7 @@ def handle_get(handler, parsed) -> bool:
                 )
             # #2980: surface the visible continuation for a hidden pre-compression
             # snapshot so a mobile reload mid-compression can recover to it.
-            continuation_sid = _pre_compression_continuation_session_id(s)
+            continuation_sid = session_timed_call('_pre_compression_continuation_session_id', _pre_compression_continuation_session_id, s)
             if continuation_sid:
                 raw["continuation_session_id"] = continuation_sid
             if cli_meta and _session_source_is_webui(cli_meta):
@@ -13964,10 +13978,10 @@ def handle_get(handler, parsed) -> bool:
                 )
                 if revision:
                     raw["regeneration_revision"] = revision
-            redact = redact_session_data(raw)
+            redact = session_timed_call('redact_session_data', redact_session_data, raw)
             _t5 = _time.monotonic()
             if _diag: _diag.stage("t5_after_redact")
-            resp = j(handler, {"session": redact})
+            resp = session_timed_call('j', j, handler, {"session": redact})
             _t6 = _time.monotonic()
             if _diag: _diag.stage("t6_after_json_write")
             _total_ms = (_t6 - _t0) * 1000
