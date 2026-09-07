@@ -34,6 +34,10 @@ class HistoryStore:
                 CREATE TABLE IF NOT EXISTS shadow_generations(
                     scope TEXT NOT NULL, generation TEXT NOT NULL, total INTEGER NOT NULL,
                     PRIMARY KEY(scope,generation));
+                CREATE TABLE IF NOT EXISTS shadow_captures(
+                    scope TEXT NOT NULL, generation TEXT NOT NULL, capture_sha256 TEXT NOT NULL,
+                    manifest TEXT NOT NULL, PRIMARY KEY(scope,generation),
+                    FOREIGN KEY(scope,generation) REFERENCES shadow_generations(scope,generation));
                 CREATE TABLE IF NOT EXISTS shadow_rows(
                     scope TEXT NOT NULL, generation TEXT NOT NULL, pos INTEGER NOT NULL,
                     renderable INTEGER NOT NULL, tail_end INTEGER NOT NULL,
@@ -59,9 +63,9 @@ class HistoryStore:
                     FOREIGN KEY(scope,generation) REFERENCES shadow_generations(scope,generation));
                 CREATE INDEX IF NOT EXISTS shadow_tool_page ON shadow_tools(scope,generation,anchor);
             """)
-            for table in ("shadow_rows", "shadow_tools", "shadow_scenes"):
+            for table in ("shadow_rows", "shadow_tools", "shadow_scenes", "shadow_captures"):
                 db.execute(f"CREATE TRIGGER IF NOT EXISTS {table}_sealed BEFORE INSERT ON {table} WHEN EXISTS(SELECT 1 FROM shadow_seals WHERE scope=NEW.scope AND generation=NEW.generation) BEGIN SELECT RAISE(ABORT,'sealed_history'); END")
-            for table in ("shadow_generations", "shadow_rows", "shadow_tools", "shadow_seals", "shadow_scenes"):
+            for table in ("shadow_generations", "shadow_rows", "shadow_tools", "shadow_seals", "shadow_scenes", "shadow_captures"):
                 for operation in ("UPDATE", "DELETE"):
                     db.execute(f"CREATE TRIGGER IF NOT EXISTS {table}_{operation} BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT,'immutable_history'); END")
 
@@ -76,12 +80,17 @@ class HistoryStore:
         finally:
             db.close()
 
-    def build_shadow(self, scope, messages, *, tool_calls=(), scenes=None, max_bytes):
+    def build_shadow(self, scope, messages, *, tool_calls=(), scenes=None, max_bytes, capture=None):
         """Atomically materialize one isolated merged capture; never modify sources."""
         from api.routes import (_message_counts_as_renderable_for_window,
                                 _tool_call_ids_in_messages, _tool_result_matches_call_ids)
         if type(max_bytes) is not int or max_bytes <= 0:
             raise ValueError("explicit positive candidate byte budget required")
+        if capture is not None:
+            from api.history_capture import verify_capture
+            verify_capture(capture)
+            if capture['scope'] != [scope.profile_identity, scope.session_id]:
+                raise ValueError('capture scope mismatch')
         generation = uuid.uuid4().hex
         encoded = [json.dumps(m, ensure_ascii=False, allow_nan=False) for m in messages]
         tools = [json.dumps(t, ensure_ascii=False, allow_nan=False) for t in tool_calls]
@@ -118,6 +127,9 @@ class HistoryStore:
                 (scope.key, generation, i, t.get('assistant_msg_idx') if type(t.get('assistant_msg_idx')) is int else None, s)
                 for i, (t, s) in enumerate(zip(tool_calls, tools, strict=True))])
             db.executemany("INSERT INTO shadow_scenes VALUES(?,?,?,?,?,?,?)", scene_rows)
+            if capture is not None:
+                db.execute("INSERT INTO shadow_captures VALUES(?,?,?,?)", (
+                    scope.key, generation, capture['sha256'], json.dumps(capture['manifest'], ensure_ascii=False)))
             db.execute("INSERT INTO shadow_seals VALUES(?,?)", (scope.key, generation))
         return generation
 
@@ -145,9 +157,11 @@ class HistoryStore:
             truncated = before is not None or len(messages) < total
             if truncated:
                 tools = [json.loads(r[0]) for r in db.execute("SELECT payload FROM shadow_tools WHERE scope=? AND generation=? AND anchor>=? AND anchor<? ORDER BY ordinal", (scope.key, generation, start, start+len(messages)))]
+                scene_tools = tools
                 tools = _tool_calls_for_message_window(tools, start, len(messages))
             else:
                 tools = [json.loads(r[0]) for r in db.execute("SELECT payload FROM shadow_tools WHERE scope=? AND generation=? ORDER BY ordinal", (scope.key, generation))]
+                scene_tools = tools
             from api.routes import _assistant_anchor_scene_message_ref, _hydrate_anchor_activity_scenes
             records = {}
             for i, message in enumerate(messages):
@@ -156,7 +170,7 @@ class HistoryStore:
                     for ordinal, key, payload in db.execute("SELECT ordinal,record_key,payload FROM shadow_scenes WHERE scope=? AND generation=? AND (ref=? OR anchor=?)", (scope.key, generation, ref, start+i)):
                         records[ordinal] = (key, json.loads(payload))
             messages = _hydrate_anchor_activity_scenes(messages, dict(records[i] for i in sorted(records)),
-                                                      message_offset=start, tool_calls=tools)
+                                                      message_offset=start, tool_calls=scene_tools)
         return {"messages": messages, "tool_calls": tools, "message_count": total,
                 "_messages_offset": start, "_messages_truncated": start > 0}
 
