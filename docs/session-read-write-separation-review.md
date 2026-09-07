@@ -22,3 +22,14 @@
 R1已有ca3fb45a文档修订；R2–R6及逐项风险/测试扩展本轮补充，均需独立复审，不因新增文字自动关闭。对应规范：session-read-write-separation-protocol-v2.md；风险：session-read-write-separation-risk-matrix.md；测试：session-read-write-separation-test-addendum.md。
 
 本记录保留原始评审证据，尚未宣称任何问题已获独立关闭。原始数据库、sidecar、journal、备份和暂存未改变。
+
+
+## 本轮修订交付与覆盖核验
+
+R1：implementation§9，T21；R2：protocol-v2 R2，T22；R3：R3，T23；R4：R4，T24；R5：R5，T25；R6：R6，T26。以上状态均为DOC_REVISED_PENDING_REVIEW，而非已关闭。
+
+新增风险矩阵D01–D26，每项含来源、触发/影响、措施、验证和残余/回退；架构全部11个编号章节及实施全部10个编号章节均有明确风险链接。测试主计划T01–T20与扩展T21–T42共同构成42组规格，全部NOT_RUN。
+
+实际运行的仅文档检查：26风险行/42测试行编号唯一；风险引用的测试全部定义，测试扩展风险引用全部存在；无APPEND占位，git diff --check通过。检查不执行SQL，不证明事务、功能或生产性能。
+
+独立复审已派发deleg_01bdb892，目标修订97887787；之后fa355797仅增加章节风险链接。复审结论到达前保持BLOCKED，不声称R2–R6已获终审关闭。完整DDL及trigger仍须后续获授权的M0离线TDD验证，实际写方排他证明缺失时scope维持LEGACY，不能以文档覆盖率替代启用资格。
