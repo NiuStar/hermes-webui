@@ -46,15 +46,22 @@ class HistoryStore:
                     anchor INTEGER, payload TEXT NOT NULL,
                     PRIMARY KEY(scope,generation,ordinal),
                     FOREIGN KEY(scope,generation) REFERENCES shadow_generations(scope,generation));
+                CREATE TABLE IF NOT EXISTS shadow_scenes(
+                    scope TEXT NOT NULL, generation TEXT NOT NULL, ordinal INTEGER NOT NULL,
+                    ref TEXT NOT NULL, anchor INTEGER, record_key TEXT NOT NULL, payload TEXT NOT NULL,
+                    PRIMARY KEY(scope,generation,ordinal),
+                    FOREIGN KEY(scope,generation) REFERENCES shadow_generations(scope,generation));
+                CREATE INDEX IF NOT EXISTS shadow_scene_ref ON shadow_scenes(scope,generation,ref);
+                CREATE INDEX IF NOT EXISTS shadow_scene_anchor ON shadow_scenes(scope,generation,anchor);
                 CREATE TABLE IF NOT EXISTS shadow_seals(
                     scope TEXT NOT NULL, generation TEXT NOT NULL,
                     PRIMARY KEY(scope,generation),
                     FOREIGN KEY(scope,generation) REFERENCES shadow_generations(scope,generation));
                 CREATE INDEX IF NOT EXISTS shadow_tool_page ON shadow_tools(scope,generation,anchor);
             """)
-            for table in ("shadow_rows", "shadow_tools"):
+            for table in ("shadow_rows", "shadow_tools", "shadow_scenes"):
                 db.execute(f"CREATE TRIGGER IF NOT EXISTS {table}_sealed BEFORE INSERT ON {table} WHEN EXISTS(SELECT 1 FROM shadow_seals WHERE scope=NEW.scope AND generation=NEW.generation) BEGIN SELECT RAISE(ABORT,'sealed_history'); END")
-            for table in ("shadow_generations", "shadow_rows", "shadow_tools", "shadow_seals"):
+            for table in ("shadow_generations", "shadow_rows", "shadow_tools", "shadow_seals", "shadow_scenes"):
                 for operation in ("UPDATE", "DELETE"):
                     db.execute(f"CREATE TRIGGER IF NOT EXISTS {table}_{operation} BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT,'immutable_history'); END")
 
@@ -69,7 +76,7 @@ class HistoryStore:
         finally:
             db.close()
 
-    def build_shadow(self, scope, messages, *, tool_calls=(), max_bytes):
+    def build_shadow(self, scope, messages, *, tool_calls=(), scenes=None, max_bytes):
         """Atomically materialize one isolated merged capture; never modify sources."""
         from api.routes import (_message_counts_as_renderable_for_window,
                                 _tool_call_ids_in_messages, _tool_result_matches_call_ids)
@@ -78,7 +85,17 @@ class HistoryStore:
         generation = uuid.uuid4().hex
         encoded = [json.dumps(m, ensure_ascii=False, allow_nan=False) for m in messages]
         tools = [json.dumps(t, ensure_ascii=False, allow_nan=False) for t in tool_calls]
-        if sum(len(s.encode()) for s in encoded + tools) > max_bytes:
+        scene_rows = []
+        for ordinal, (key, record) in enumerate((scenes or {}).items()):
+            if not isinstance(record, dict):
+                continue
+            try:
+                anchor = int(record.get("message_index"))
+            except (ValueError, TypeError):
+                anchor = None
+            scene_rows.append((scope.key, generation, ordinal, str(record.get("message_ref") or key or ""),
+                               anchor, key, json.dumps(record, ensure_ascii=False, allow_nan=False)))
+        if sum(len(s.encode()) for s in encoded + tools + [r[-1] for r in scene_rows]) > max_bytes:
             raise ValueError("candidate byte budget exceeded")
         visible = [_message_counts_as_renderable_for_window(m) for m in messages]
         ends = list(range(1, len(messages) + 1))
@@ -99,7 +116,8 @@ class HistoryStore:
                            [(scope.key, generation, i, int(visible[i]), ends[i], s) for i, s in enumerate(encoded)])
             db.executemany("INSERT INTO shadow_tools VALUES(?,?,?,?,?)", [
                 (scope.key, generation, i, t.get('assistant_msg_idx') if type(t.get('assistant_msg_idx')) is int else None, s)
-                for i, (t, s) in enumerate(zip(tool_calls, tools))])
+                for i, (t, s) in enumerate(zip(tool_calls, tools, strict=True))])
+            db.executemany("INSERT INTO shadow_scenes VALUES(?,?,?,?,?,?,?)", scene_rows)
             db.execute("INSERT INTO shadow_seals VALUES(?,?)", (scope.key, generation))
         return generation
 
@@ -112,7 +130,7 @@ class HistoryStore:
             raise ValueError("before must be an integer")
         with self._connect() as db:
             db.execute("BEGIN")
-            row = db.execute("SELECT total FROM shadow_generations WHERE scope=? AND generation=?", (scope.key, generation)).fetchone()
+            row = db.execute("SELECT total FROM shadow_generations JOIN shadow_seals USING(scope,generation) WHERE scope=? AND generation=?", (scope.key, generation)).fetchone()
             if row is None:
                 raise KeyError("unknown scoped generation")
             total = row[0]
@@ -130,6 +148,15 @@ class HistoryStore:
                 tools = _tool_calls_for_message_window(tools, start, len(messages))
             else:
                 tools = [json.loads(r[0]) for r in db.execute("SELECT payload FROM shadow_tools WHERE scope=? AND generation=? ORDER BY ordinal", (scope.key, generation))]
+            from api.routes import _assistant_anchor_scene_message_ref, _hydrate_anchor_activity_scenes
+            records = {}
+            for i, message in enumerate(messages):
+                if isinstance(message, dict) and message.get("role") == "assistant":
+                    ref = _assistant_anchor_scene_message_ref(message)
+                    for ordinal, key, payload in db.execute("SELECT ordinal,record_key,payload FROM shadow_scenes WHERE scope=? AND generation=? AND (ref=? OR anchor=?)", (scope.key, generation, ref, start+i)):
+                        records[ordinal] = (key, json.loads(payload))
+            messages = _hydrate_anchor_activity_scenes(messages, dict(records[i] for i in sorted(records)),
+                                                      message_offset=start, tool_calls=tools)
         return {"messages": messages, "tool_calls": tools, "message_count": total,
                 "_messages_offset": start, "_messages_truncated": start > 0}
 

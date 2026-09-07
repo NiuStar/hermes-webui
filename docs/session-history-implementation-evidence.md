@@ -30,6 +30,25 @@ failure after the first candidate row and verifies no partial generation remains
 The test environment emits existing missing-requests plugin warnings; not a clean
 production runtime certification.
 
+## Batch 2
+
+- Persisted scene records with ref/index lookup, page-local legacy scene hydration,
+  immutable scene guards; sealed-only reads reject incomplete generations.
+- RED: missing scene capture assertion (1 failed / 2 passed); GREEN 22 passed
+  including tail/renderable neighbors. RED: unsealed generation incorrectly
+  readable (1 failed / 7 passed); fixed by joining immutable seal on reads.
+- Additional characterization tests (already green, not claimed as new RED):
+  empty/tool-only/matched and orphan tool rows, bounded long tool content,
+  duplicate text with active=0/1, before bounds, cross-profile generation denial,
+  SQL immutability, payload budget, actual EXPLAIN indexed visible-row search.
+- Final targeted + neighboring command:
+  `./scripts/test.sh tests/test_display_history.py tests/test_session_tail_payload.py tests/test_session_message_window_renderable_tail.py tests/test_session_lineage_full_transcript.py tests/test_truncate_session_at_keep.py -q`
+  returned **40 passed in 25.17s**. Ruff on both new Python files and
+  `git diff --check` passed. Full suite and production data NOT_RUN.
+- Scene coverage is a basic settled scene, not certification of every scene
+  schema/tool/duplicate-ref combination. Parent and truncation tests in the
+  command are existing legacy regressions, NOT new end-to-end capture coverage.
+
 ## Blocking / remaining
 
 - Actual source writer closure and OS write exclusivity unproven: all scopes
