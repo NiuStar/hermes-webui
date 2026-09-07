@@ -34,7 +34,17 @@ R1：implementation§9，T21；R2：protocol-v2 R2，T22；R3：R3，T23；R4：
 
 以下历史状态由最新复审结论更新；初轮OPEN及上文DOC_REVISED_PENDING_REVIEW保留为历史证据，不是最新逐项状态。
 
-## 独立复审 deleg_01bdb892：R2–R6文档可接受
+## 最新联合复审 deleg_1dff8521：R1–R6文档契约可接受
+
+结论：R1与R2–R6在指定范围内联合一致，未发现协议级阻断，可接受为待验证文档契约。最新文档状态为DOC_REVIEW_ACCEPTED；此前JOINT_REVIEW_PENDING已由本结论替代。实现/启用门禁仍BLOCKED，功能NOT_RUN，不代表实现可用、schema冻结、编码授权或生产放行。
+
+读取完整性：implementation§9 L100–117及§10 L118–122完整读取；protocol-v2全文L1–105分段完整覆盖，无遗漏截断。独立只读评审确认：稳定发布SEALED且无PREPARED/UNCERTAIN与独立active能力不冲突；active固定同epoch不可变基线且仅追加自身对象；破坏性写先闭合/恢复旧mutation并撤权再串行增epoch；未归档事件连续覆盖；token检查至实际源写持有scope门，撤权排空在途写，发布维持R1围栏并补充NULL安全CAS、fence及同事务状态提交。
+
+仍未通过的验证门槛（非新增协议矛盾）：实际写方闭包、权限隔离及源写围栏；完整事件、旧恢复映射及逐源回滚凭证；完整DDL/trigger和真实多连接CAS/崩溃验证。未受控scope默认LEGACY，不启用active_read。下一阶段须另获授权，不能由文档认可自动进入编码。
+
+证据：/home/hermeswebui/.hermes/cache/delegation/live/deleg_1dff8521/task-0.log。子任务未修改文件、执行SQL或提交；本记录由主线程更新。
+
+## 历史独立复审 deleg_01bdb892：R2–R6文档可接受
 
 被审修订97887787；后续fa355797仅增加章节风险链接。独立结论：R2–R6文档修订可接受，未发现新的真正阻断；不构成功能或生产放行。最新状态：R2–R6为DOC_REVIEW_ACCEPTED，R1为JOINT_REVIEW_PENDING；整体仍BLOCKED。
 
