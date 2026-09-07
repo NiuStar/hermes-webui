@@ -27,3 +27,11 @@
 ## 独立终审
 
 deleg_5b1e5d04已针对固定8bc1fd18候选派发只读独立终审；返回前不能标PASS。索引仅汇总，不改变被审候选契约。实际运行目前只有文档静态核验与fixture hash计算；SQL、并发、崩溃、功能及生产性能均NOT_RUN。
+
+## 编码终审结果及修订记录
+
+独立终审deleg_5b1e5d04完整读取8bc1fd18四份候选，结论不接受为完整可编码设计，存在两项P1：UNCERTAIN/OPEN缺合法终态恢复路径；旧恢复映射缺确定身份、结构、列适配及逐源hash覆盖。该结论为静态设计审查，不是SQL或生产测试失败。
+
+1461f5ac修订：transactions§8/schema§6加入恢复专用持久标志、证据门和UNCERTAIN→PREPARED受控路径，保持普通回调撤权；events§6定义mapping-v1身份分配、扩展结构、Agent源码列清单和三源coverage/hash。两项当前均DOC_REVISED_PENDING_REVIEW，不是已关闭。
+
+独立复审deleg_d4d89faf针对1461f5ac已派发。返回并处理结论前整体CODING_DESIGN_BLOCKED。全部SQL/功能NOT_RUN；未改代码、部署或生产数据。
