@@ -17,7 +17,7 @@ api/display_projection.py：既有展示语义的纯适配、段构建、窗口�
 api/display_worker.py：领取任务、源快照验证、构建、发布及启动补偿。
 api/display_events.py：完整展示变更协议；不得把SSE预览伪装完整事件。
 
-接口：begin_mutation(scope, expected_revision, mutation_id)；commit_event(scope, run_id, event_key, payload)；seal_mutation(mutation_id, source_manifest)；enqueue_projection(scope, revision)；claim_job(owner)；publish(job_id, fence, expected_revision, generation)；read_page(scope, generation, before, limit)。scope含规范化profile根标识、source和session_id，路径由受信profile解析器提供，不接受客户端路径。
+接口初版（参数最终以protocol-v2为准，尤其commit_event必须携带epoch/revision/token）：begin_mutation(scope, expected_revision, mutation_id)；commit_event(scope, run_id, event_key, payload)；seal_mutation(mutation_id, source_manifest)；enqueue_projection(scope, revision)；claim_job(owner)；publish(job_id, fence, expected_revision, generation)；read_page(scope, generation, before, limit)。scope含规范化profile根标识、source和session_id，路径由受信profile解析器提供，不接受客户端路径。
 
 ## 3. Schema概念清单（非冻结DDL）
 
@@ -50,11 +50,11 @@ api/display_events.py：完整展示变更协议；不得把SSE预览伪装完�
 
 ## 5. 活动事件与稳定历史
 
-完整事件保留现有anchor所有权，事件种类为message_upsert、activity_upsert、tool_result、todo_replace、terminal；载荷是完整受支持展示字段或明确版本的delta，不含推理上下文替代物。完整工具ID由原始调用携带，缺失时不得按名称猜配。done只能触发整理，不作为完整正文来源。无法捕获完整变更的运行走旧快照恢复，界面明确降级。
+完整事件保留现有anchor所有权，事件种类和必填字段以protocol-v2的版本化payload表为准。首版只接受完整对象替换，不接受缺少基线证明的delta，不含推理上下文替代物。完整工具ID由原始调用携带，缺失时不得按名称猜配。done只能触发整理，不作为完整正文来源。无法捕获完整变更的运行走旧快照恢复，界面明确降级。
 
 GET在同一个派生库读事务固定epoch/generation/covered_seq及活动upper_seq，只返回covered_seq之后的事件；历史分页只取指定段及scene边界。长活动积压分页返回delta_cursor/has_more，不截掉事件冒充完整。客户端逐页追平后才标记恢复完成。
 
-SSE现有run_id:seq保持兼容；新客户端协商projection_v1，附加session_seq及anchor_id，不能强改旧Last-Event-ID。GET返回resume_seq=upper_seq；SSE重连先从持久events补齐再追live，以event_key幂等。归档不是删除事件，切换历史generation后重新以covered_seq裁掉已归档增量。过期epoch游标返回明确409/reload_required，不将旧偏移用于新版本。旧客户端继续旧GET/SSE，服务端不能悄悄替换返回语义。
+SSE现有run_id:seq保持兼容；新客户端协商projection_v1，附加session_seq及anchor_id，不能强改旧Last-Event-ID。GET返回本页实际已交付的resume_seq，同时独立返回快照upper_seq；has_more时不能把游标直接推进upper_seq。SSE从持久events补齐，通知只作唤醒，按protocol-v2处理无遗漏交接，以event_key幂等。归档不是删除事件，切换历史generation后重新以covered_seq裁掉已归档增量。过期epoch游标返回明确409/reload_required，不将旧偏移用于新版本。旧客户端继续旧GET/SSE，服务端不能悄悄替换返回语义。
 
 ## 6. worker与非追加操作
 
@@ -75,7 +75,7 @@ M5：小范围受控验收、逐会话回填；无新测试部署，沿既有生
 
 ## 8. 资源与回滚门禁
 
-建议初始上限而非实测：worker=1，任务积压1000条，单次100行写批；后台新增RSS软门256MiB、硬门512MiB；活动响应目标1MiB但不可切断单事件，超大事件用分页的受权对象读取且旧客户端旧路径。锁等待≤250ms后退避，不在GET执行构建/checkpoint。全量合并若超预算仅拒绝构建，不终止主服务。
+建议初始上限而非实测：worker=1，任务积压1000条，单次100行写批；后台新增RSS软门256MiB、拟议硬门512MiB（同进程尚无已证明硬隔离，不能称已保证）；活动响应目标1MiB但不可切断单事件，超大事件用分页的受权对象读取且旧客户端旧路径。锁等待≤250ms后退避，不在GET执行构建/checkpoint。全量合并若超预算仅拒绝构建，不终止主服务。
 
 实施前必须量化真实源总量、预计派生库+候选版本+WAL+备份的峰值磁盘，记录RSS及I/O。磁盘所需峰值未量化不得启动回填；低于预算安全余量即停止新构建，不删数据腾空间。WAL读事务短批，后台被动checkpoint不得阻塞前台。具体硬资源隔离需本地证明后启用，不能依赖定时采样保证严格硬上限。
 
