@@ -1,6 +1,16 @@
 # 编码设计候选索引与验收状态
 
-候选基线：8bc1fd18e47bfda4514893ca69f252f92f4f1996。状态CANDIDATE_PENDING_INDEPENDENT_REVIEW；并非编码/生产放行。
+最终受审设计基线：80139190459b3de1e0b6a0913cecf877394439fc。状态：CODING_DESIGN_REVIEW_ACCEPTED（文档设计层）；初轮及复审提出的两项P1均已独立关闭。实现验证/生产启用门禁仍关闭，编码执行须另获授权。下方各轮待审或BLOCKED状态保留为历史记录，以本节最新结论为准。
+
+## 最终独立终审结论
+
+独立任务deleg_50e82718完整分批读取固定80139190的事务、schema文档及本次diff，认可恢复崩溃重入修订，关闭前轮剩余P1，未发现新的P1阻断。确认A=UNCERTAIN、B=PREPARED/recovery_only=1均有合法入口；重用持久恢复键、重新排空原业务及恢复执行者、持scope排他门；active保持0，普通回调不恢复权限；补偿和terminal幂等，SEALED只读返回；与状态转换、binding及恢复键不可变trigger不冲突。
+
+结合deleg_5b1e5d04对四份初始候选的完整终审，以及deleg_d4d89faf对mapping-v1的认可，本轮编码设计及已发现P1修订的独立终审闭环完成。此为分轮审查闭环，不冒充最终提交全部文档重新全量审查或运行验证。
+
+证据：deleg_50e82718/task-0.log（本会话delegation审计目录）。主线程确认80139190到记录提交71b94ebf仅索引变更，受审设计正文无变化。本次仅更新索引，不改受审契约。
+
+验证边界：SQL、真实多连接、崩溃、功能及性能全部NOT_RUN；生产LEGACY。实际写方闭包/OS排他、旧恢复适配、资源预算仍须执行阶段验证，不因设计接受而自动满足。下一步仅在另获授权后进行M0隔离TDD，不接生产、不回填、不启用新读、不删除数据。
 
 - [真实写方与接入](session-read-write-separation-coding-writers.md)：实际函数、调用者传播、权限和既有锁顺序；未证明生产闭包则LEGACY。
 - [候选schema](session-read-write-separation-coding-schema.md)：完整表字段、基础/发布trigger正文、数据库与可信入口责任边界。
