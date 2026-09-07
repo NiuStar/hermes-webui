@@ -79,6 +79,22 @@ M5：小范围受控验收、逐会话回填；无新测试部署，沿既有生
 
 回滚先关闭新读及active能力，再停worker，保留数据库与事件。旧journal/sidecar始终保持兼容；回滚镜像必须含既有压缩journal解码器。新事件只有在已同步进旧恢复路径时才允许降级旧版本，否则先保持新读关闭但新恢复组件运行，不能直接遗弃未同步事件。发布前必须证明这个兼容门禁。
 
-## 9. 明确未验证
+## 9. R1修订：写入围栏、源稳定与发布资格
+
+本节收紧§3–6，冲突时以本节为准；状态为修订待复审，不代表功能验证通过。
+
+- mutations新增actual_revision、epoch、writer_token、sealed_at。actual_revision由begin_mutation在同一BEGIN IMMEDIATE事务中分配并持久化，禁止seal时猜测当前revision。mutation_id重试只返回原绑定，参数不同拒绝。
+- 同scope最多一个PREPARED或UNCERTAIN mutation；通过部分唯一索引约束，而非仅进程锁。新写遇未闭合mutation必须等待或返回可重试错误，不允许重叠旧源写。UNCERTAIN需先恢复核验，不能按超时自动认定完成。
+- 旧权威源写操作必须持有该writer_token。seal仅接受匹配scope、epoch、actual_revision和token的当前mutation；旧token、乱序seal与重复但不同源清单均拒绝。
+- SEALED表示全部登记的权威写方已经完成且源清单核验通过，不只是WebUI sidecar保存成功。候选固定输入包括mutation_id、actual_revision、epoch、base_generation、covered_seq、source_manifest_sha。
+- 发布事务要求目标mutation为SEALED、scope无PREPARED/UNCERTAIN、scope当前revision/epoch与候选一致、写方资格有效、源核验通过、任务fence和base_generation匹配。任一不满足不更新published_generation。
+- 稳定历史新读同样要求上述源稳定资格，并在同一读快照校验版本revision/epoch。DIRTY不得把旧视图标为当前结果；退回旧路径或明确等待。活动新读另需完整事件协议，不能借SEALED规则自动启用。
+- 发布与下一次begin_mutation由同库事务排序：先发布后开始新写则立即DIRTY；先开始新写则发布失败。已开始的读仅代表其固定快照，不声称包含随后发生的写入。
+
+### 风险D01：串行围栏可能阻塞正常会话
+
+触发：写方崩溃、seal丢失或UNCERTAIN长期未解决。影响：新写等待、无法启用加速。对策：有界等待、明确错误、持久恢复任务；只核验和恢复持久状态，不重放工具副作用。禁止为可用性跳过围栏。验证：T03/T05/T17及新增T21，在旧源写暂停期间并发构建/发布/新写，断言无新版本发布；注入两个token的乱序seal，断言仅当前合法token可提交。残余风险：未覆盖实际Agent写方时仍不能启用新读。回退：保持旧读；需要绕过新围栏恢复写入时必须先确认所有服务进程关闭新读能力，不能只改一个进程内开关。
+
+## 10. 明确未验证
 
 全读写方围栏尚未实现；稳定源快照跨库证明、完整工具事件捕获、前缀追加证明、资源预算均待TDD验证。性能p95目标与冷首屏未达成。本文没有执行schema、回填、生产写或功能测试。
