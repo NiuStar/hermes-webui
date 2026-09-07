@@ -1,0 +1,104 @@
+{
+  "measurement_count": 30,
+  "all_status_200": true,
+  "max_connect_ms": 0.7920539937913418,
+  "max_body_ms": 0.731672000256367,
+  "groups": [
+    {
+      "session_id": "a110e5f43e66",
+      "message_count": 10,
+      "returned_tail_messages": 10,
+      "tail_hash_identical_all_probes": true,
+      "container-localhost": {
+        "metadata_resolve0_ms": [
+          19.25,
+          8.32
+        ],
+        "tail_resolve0_ms": [
+          61.73
+        ],
+        "tail_resolve1_ms": [
+          2027.54,
+          738.34
+        ]
+      },
+      "host-published": {
+        "metadata_resolve0_ms": [
+          6.37,
+          5.89
+        ],
+        "tail_resolve0_ms": [
+          68.14
+        ],
+        "tail_resolve1_ms": [
+          993.97,
+          671.29
+        ]
+      }
+    },
+    {
+      "session_id": "29e681019f35",
+      "message_count": 27682,
+      "returned_tail_messages": 55,
+      "tail_hash_identical_all_probes": true,
+      "container-localhost": {
+        "metadata_resolve0_ms": [
+          47.39,
+          20.39
+        ],
+        "tail_resolve0_ms": [
+          2216.92
+        ],
+        "tail_resolve1_ms": [
+          3185.95,
+          2767.52
+        ]
+      },
+      "host-published": {
+        "metadata_resolve0_ms": [
+          19.89,
+          29.61
+        ],
+        "tail_resolve0_ms": [
+          2357.65
+        ],
+        "tail_resolve1_ms": [
+          3248.18,
+          2657.17
+        ]
+      }
+    },
+    {
+      "session_id": "d6d43b6448a9",
+      "message_count": 24427,
+      "returned_tail_messages": 77,
+      "tail_hash_identical_all_probes": true,
+      "container-localhost": {
+        "metadata_resolve0_ms": [
+          30.98,
+          31.45
+        ],
+        "tail_resolve0_ms": [
+          1893.74
+        ],
+        "tail_resolve1_ms": [
+          2597.63,
+          2521.76
+        ]
+      },
+      "host-published": {
+        "metadata_resolve0_ms": [
+          33.49,
+          31.28
+        ],
+        "tail_resolve0_ms": [
+          2149.07
+        ],
+        "tail_resolve1_ms": [
+          2663.53,
+          3801.57
+        ]
+      }
+    }
+  ]
+}
