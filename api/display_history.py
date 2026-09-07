@@ -87,10 +87,14 @@ class HistoryStore:
         if type(max_bytes) is not int or max_bytes <= 0:
             raise ValueError("explicit positive candidate byte budget required")
         if capture is not None:
-            from api.history_capture import verify_capture
+            from api.history_capture import verify_capture, merged_messages, _session
             verify_capture(capture)
             if capture['scope'] != [scope.profile_identity, scope.session_id]:
                 raise ValueError('capture scope mismatch')
+            source_session = _session(capture, scope.session_id)
+            if (messages != merged_messages(capture) or list(tool_calls) != (source_session.tool_calls or [])
+                    or (scenes or {}) != (getattr(source_session, 'anchor_activity_scenes', None) or {})):
+                raise ValueError('capture payload mismatch')
         generation = uuid.uuid4().hex
         encoded = [json.dumps(m, ensure_ascii=False, allow_nan=False) for m in messages]
         tools = [json.dumps(t, ensure_ascii=False, allow_nan=False) for t in tool_calls]

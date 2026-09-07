@@ -47,6 +47,8 @@ def capture_sources(session_dir, state_db, session_id, *, profile_identity, max_
             raise ValueError('sidecar identity mismatch')
         if obj.get('active_stream_id') or obj.get('pending_user_message'):
             raise ValueError('active session is not historical')
+        if objects and obj.get('profile') != objects[session_id].get('profile'):
+            raise ValueError('cross-profile parent chain')
         objects[sid] = obj
         observed[path] = hashlib.sha256(raw).hexdigest()
         entries.append({'kind': 'sidecar', 'identity': str(path), 'session_id': sid,
@@ -176,7 +178,7 @@ def merged_messages(capture):
     with patch.object(routes.Session, 'load', side_effect=load), \
          patch.object(routes, 'get_session', side_effect=load), \
          patch.object(routes, '_display_merge_session_is_active', return_value=True), \
-         patch.object(routes, '_sidecar_stat_signature', return_value=None, create=True):
+         patch('api.models._sidecar_stat_signature', return_value=None):
         sidecar = routes._webui_sidecar_lineage_messages_for_display(session)
         return routes._limited_webui_messages_for_display_with_sidecar(
             session, sidecar, _state_messages(capture, sid), msg_before=0)

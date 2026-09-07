@@ -58,6 +58,55 @@ def test_cli_roundtrip_and_failure_exit(tmp_path):
     assert not (tmp_path / 'bad.db').exists()
 
 
+def test_bound_generation_rejects_unrelated_messages(tmp_path):
+    from api.history_capture import capture_sources
+    from api.display_history import HistoryStore, ScopeKey
+    home = sources(tmp_path)
+    capture = capture_sources(home / 'sessions', home / 'state.db', 'child', profile_identity='test', max_bytes=100000)
+    with pytest.raises(ValueError, match='capture payload'):
+        HistoryStore(tmp_path / 'shadow.db').build_shadow(ScopeKey('test', 'child'), [], max_bytes=100000, capture=capture)
+
+
+@pytest.mark.parametrize('case', ['cycle', 'missing', 'identity', 'active', 'budget', 'profile'])
+def test_unsafe_source_capture_fails_closed(tmp_path, case):
+    from api.history_capture import capture_sources
+    home = sources(tmp_path)
+    path = home / 'sessions/parent.json'
+    data = json.loads(path.read_text())
+    if case == 'cycle':
+        data['parent_session_id'] = 'child'
+    elif case == 'missing':
+        data['parent_session_id'] = 'absent'
+    elif case == 'identity':
+        data['session_id'] = 'wrong'
+    elif case == 'active':
+        data['active_stream_id'] = 'running'
+    elif case == 'profile':
+        data['profile'] = 'foreign-profile'
+    path.write_text(json.dumps(data))
+    with pytest.raises((ValueError, FileNotFoundError)):
+        capture_sources(home / 'sessions', home / 'state.db', 'child', profile_identity='test',
+                        max_bytes=1 if case == 'budget' else 100000)
+
+
+def test_differential_reports_real_page_failure_and_still_walks_all_pages(tmp_path, monkeypatch):
+    from api.history_capture import capture_sources, compare_capture
+    from api.display_history import HistoryStore
+    home = sources(tmp_path)
+    capture = capture_sources(home / 'sessions', home / 'state.db', 'child', profile_identity='test', max_bytes=100000)
+    original = HistoryStore.page_shadow
+    def corrupt(self, *args, **kwargs):
+        page = original(self, *args, **kwargs)
+        page['message_count'] += 1
+        return page
+    monkeypatch.setattr(HistoryStore, 'page_shadow', corrupt)
+    report = compare_capture(capture, tmp_path / 'shadow.db', limits=[1], max_bytes=100000)
+    assert report['status'] == 'FAIL'
+    assert report['limits'][0]['complete']
+    assert report['limits'][0]['pages'] == 3
+    assert all(p['different_fields'] == ['message_count'] for p in report['limits'][0]['checks'])
+
+
 def sources(tmp_path):
     home = tmp_path / 'source'
     home.mkdir()
