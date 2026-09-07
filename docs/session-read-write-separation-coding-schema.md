@@ -220,3 +220,66 @@ CREATE TRIGGER job_attempts_input_immutable BEFORE UPDATE ON job_attempts WHEN N
 CREATE TRIGGER generations_input_immutable BEFORE UPDATE ON generations WHEN NEW.scope_id IS NOT OLD.scope_id OR NEW.generation IS NOT OLD.generation OR NEW.job_id IS NOT OLD.job_id OR NEW.attempt IS NOT OLD.attempt OR NEW.row_count IS NOT OLD.row_count OR NEW.manifest_sha IS NOT OLD.manifest_sha BEGIN SELECT RAISE(ABORT,'input_mutation'); END;
 CREATE TRIGGER required_sources_input_immutable BEFORE UPDATE ON required_sources WHEN NEW.scope_id IS NOT OLD.scope_id OR NEW.run_id IS NOT OLD.run_id OR NEW.source_kind IS NOT OLD.source_kind OR NEW.source_identity IS NOT OLD.source_identity OR NEW.mapping_version IS NOT OLD.mapping_version BEGIN SELECT RAISE(ABORT,'input_mutation'); END;
 ```
+
+## 5. 发布和初始状态复合门
+
+```sql
+CREATE TRIGGER publish_guard BEFORE UPDATE OF published_generation ON scopes
+WHEN NEW.published_generation IS NOT OLD.published_generation AND NOT EXISTS(
+ SELECT 1 FROM generations g JOIN job_attempts a ON a.scope_id=g.scope_id AND a.job_id=g.job_id AND a.attempt=g.attempt
+ JOIN jobs j ON j.scope_id=a.scope_id AND j.job_id=a.job_id
+ JOIN mutations m ON m.scope_id=a.scope_id AND m.mutation_id=a.target_mutation_id
+ WHERE g.scope_id=NEW.scope_id AND g.generation=NEW.published_generation AND g.state='VERIFIED'
+ AND a.state='LEASED' AND j.state='LEASED' AND j.attempt=a.attempt AND j.fence=a.fence
+ AND a.base_generation IS OLD.published_generation AND NEW.epoch=a.epoch AND NEW.revision=a.target_revision
+ AND m.epoch=a.epoch AND m.actual_revision=a.target_revision AND m.state='SEALED' AND NEW.eligibility='ELIGIBLE'
+ AND m.source_manifest_sha=a.source_manifest_sha
+ AND NOT EXISTS(SELECT 1 FROM mutations x WHERE x.scope_id=NEW.scope_id AND x.state IN('PREPARED','UNCERTAIN'))
+ AND NOT EXISTS(SELECT 1 FROM generation_segments gs JOIN segments s ON s.scope_id=gs.scope_id AND s.segment_id=gs.segment_id WHERE gs.scope_id=g.scope_id AND gs.generation=g.generation AND s.sealed!=1)
+ AND g.row_count=COALESCE((SELECT sum(s.row_count) FROM generation_segments gs JOIN segments s ON s.scope_id=gs.scope_id AND s.segment_id=gs.segment_id WHERE gs.scope_id=g.scope_id AND gs.generation=g.generation),0))
+BEGIN SELECT RAISE(ABORT,'publication_rejected'); END;
+CREATE TRIGGER generation_published BEFORE UPDATE OF state ON generations WHEN NEW.state='PUBLISHED' AND NOT EXISTS(
+ SELECT 1 FROM scopes WHERE scope_id=NEW.scope_id AND published_generation=NEW.generation)
+BEGIN SELECT RAISE(ABORT,'pointer_required'); END;
+CREATE TRIGGER objects_event_insert BEFORE INSERT ON objects WHEN NEW.object_version!=1 OR NOT EXISTS(
+ SELECT 1 FROM events e WHERE e.scope_id=NEW.scope_id AND e.run_id=NEW.run_id AND e.object_id=NEW.object_id AND e.object_version=NEW.object_version AND e.session_seq=NEW.last_seq AND e.kind=NEW.kind)
+BEGIN SELECT RAISE(ABORT,'object_event_mismatch'); END;
+CREATE TRIGGER objects_event_update BEFORE UPDATE ON objects WHEN NEW.scope_id IS NOT OLD.scope_id OR NEW.run_id IS NOT OLD.run_id OR NEW.object_id IS NOT OLD.object_id OR NEW.object_version!=OLD.object_version+1 OR NOT EXISTS(
+ SELECT 1 FROM events e JOIN runs r ON r.scope_id=e.scope_id AND r.run_id=e.run_id WHERE e.scope_id=NEW.scope_id AND e.run_id=NEW.run_id AND e.object_id=NEW.object_id AND e.object_version=NEW.object_version AND e.session_seq=NEW.last_seq AND e.kind=NEW.kind AND r.state='OPEN')
+BEGIN SELECT RAISE(ABORT,'object_event_mismatch'); END;
+CREATE TRIGGER required_sources_before_events BEFORE INSERT ON required_sources WHEN EXISTS(
+ SELECT 1 FROM events WHERE scope_id=NEW.scope_id AND run_id=NEW.run_id)
+BEGIN SELECT RAISE(ABORT,'source_set_frozen'); END;
+CREATE TRIGGER receipt_binding BEFORE INSERT ON compat_receipts WHEN NOT EXISTS(
+ SELECT 1 FROM required_sources q JOIN runs r ON r.scope_id=q.scope_id AND r.run_id=q.run_id
+ JOIN events e ON e.scope_id=r.scope_id AND e.run_id=r.run_id
+ WHERE q.scope_id=NEW.scope_id AND q.run_id=NEW.run_id AND q.source_kind=NEW.source_kind
+ AND q.source_identity=NEW.source_identity AND r.epoch=NEW.epoch AND e.session_seq=NEW.through_seq)
+BEGIN SELECT RAISE(ABORT,'receipt_binding'); END;
+CREATE TRIGGER active_not_reenable BEFORE UPDATE OF active_allowed ON runs WHEN NEW.active_allowed>OLD.active_allowed
+BEGIN SELECT RAISE(ABORT,'active_revoked'); END;
+CREATE TRIGGER barrier_verified BEFORE UPDATE OF state ON control_barriers WHEN NEW.state='VERIFIED' AND EXISTS(
+ SELECT 1 FROM barrier_members WHERE barrier_id=NEW.barrier_id AND state='PENDING')
+BEGIN SELECT RAISE(ABORT,'barrier_pending'); END;
+```
+
+DB只检查登记成员；入口须比较barrier冻结manifest与实际活进程清单，空成员不自动证明无进程。旧进程退出须有独立证据。
+
+### 初始化和提交前检查的精确归属
+
+入口insert_scope只允许LEGACY/0/NULL；insert_mutation必须PREPARED、与同事务scope新revision/epoch一致；insert_run必须OPEN且匹配mutation、base所属epoch/revision/covered_seq从attempt取得；insert_job只PENDING；claim_job更新job attempt/fence各+1后插入LEASED attempt；insert_generation只BUILDING；insert_segment只sealed=0；insert_recovery_task只PENDING；insert_barrier/member只DRAINING/PENDING。这些初值由下面数据库trigger拒绝绕过。
+
+```sql
+CREATE TRIGGER scopes_initial BEFORE INSERT ON scopes WHEN NEW.eligibility!='LEGACY' OR NEW.epoch!=0 OR NEW.revision!=0 OR NEW.last_seq!=0 OR NEW.published_generation IS NOT NULL BEGIN SELECT RAISE(ABORT,'invalid_initial_state'); END;
+CREATE TRIGGER mutations_initial BEFORE INSERT ON mutations WHEN NEW.state!='PREPARED' BEGIN SELECT RAISE(ABORT,'invalid_initial_state'); END;
+CREATE TRIGGER runs_initial BEFORE INSERT ON runs WHEN NEW.state!='OPEN' BEGIN SELECT RAISE(ABORT,'invalid_initial_state'); END;
+CREATE TRIGGER jobs_initial BEFORE INSERT ON jobs WHEN NEW.state!='PENDING' OR NEW.attempt!=0 OR NEW.fence!=0 BEGIN SELECT RAISE(ABORT,'invalid_initial_state'); END;
+CREATE TRIGGER job_attempts_initial BEFORE INSERT ON job_attempts WHEN NEW.state!='LEASED' BEGIN SELECT RAISE(ABORT,'invalid_initial_state'); END;
+CREATE TRIGGER generations_initial BEFORE INSERT ON generations WHEN NEW.state!='BUILDING' BEGIN SELECT RAISE(ABORT,'invalid_initial_state'); END;
+CREATE TRIGGER segments_initial BEFORE INSERT ON segments WHEN NEW.sealed!=0 BEGIN SELECT RAISE(ABORT,'invalid_initial_state'); END;
+CREATE TRIGGER recovery_tasks_initial BEFORE INSERT ON recovery_tasks WHEN NEW.state!='PENDING' BEGIN SELECT RAISE(ABORT,'invalid_initial_state'); END;
+CREATE TRIGGER control_barriers_initial BEFORE INSERT ON control_barriers WHEN NEW.state!='DRAINING' BEGIN SELECT RAISE(ABORT,'invalid_initial_state'); END;
+CREATE TRIGGER barrier_members_initial BEFORE INSERT ON barrier_members WHEN NEW.state!='PENDING' BEGIN SELECT RAISE(ABORT,'invalid_initial_state'); END;
+```
+
+本轮数据库与应用责任边界：数据库负责FK、唯一键、序号、不可变、状态图及上述发布必要条件；源内容hash、工具ID语义、段偏移连续/场景完整、终态清单、成员全集、修复授权、owner/租约及全事务最终一致性由可信store入口检查，失败整事务回滚。数据库schema无法约束任意同UID发出的commit；无专用受控写权限则ELIGIBLE不得启用。不能把“应用负责”理解为异步检查或事后修补。
