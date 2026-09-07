@@ -2,7 +2,7 @@
 
 状态：BLOCKED。被评审版本：cd20b4fe。评审对象：session-read-write-separation-implementation.md及session-read-write-separation-test-plan.md；已确认架构方向不变。独立只读评审任务deleg_b2abf57c已完成，不等于设计通过。
 
-## 未关闭的P1问题
+## 初轮未关闭的P1问题（历史结论保留）
 
 | ID | 问题 | 必须补齐的契约与验证 | 状态 |
 |---|---|---|---|
@@ -19,4 +19,6 @@
 
 修订顺序：R1/R2/R3写权限及有效期 → R6事务/schema → R4活动协议 → R5回滚凭证 → 测试矩阵逐项对应 → 独立复审。每项必须写出确定性规则和反例测试，不能以“实现时处理”关闭。20组既有测试仅为计划，未执行；此前54项诊断测试与本轮功能无关。
 
-本记录仅保存评审结果，尚未宣称任何问题已经修复。原始数据库、sidecar、journal、备份和暂存未改变。
+R1已有ca3fb45a文档修订；R2–R6及逐项风险/测试扩展本轮补充，均需独立复审，不因新增文字自动关闭。对应规范：session-read-write-separation-protocol-v2.md；风险：session-read-write-separation-risk-matrix.md；测试：session-read-write-separation-test-addendum.md。
+
+本记录保留原始评审证据，尚未宣称任何问题已获独立关闭。原始数据库、sidecar、journal、备份和暂存未改变。
