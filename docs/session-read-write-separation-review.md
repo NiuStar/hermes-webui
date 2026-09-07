@@ -32,4 +32,16 @@ R1：implementation§9，T21；R2：protocol-v2 R2，T22；R3：R3，T23；R4：
 
 实际运行的仅文档检查：26风险行/42测试行编号唯一；风险引用的测试全部定义，测试扩展风险引用全部存在；无APPEND占位，git diff --check通过。检查不执行SQL，不证明事务、功能或生产性能。
 
-独立复审已派发deleg_01bdb892，目标修订97887787；之后fa355797仅增加章节风险链接。复审结论到达前保持BLOCKED，不声称R2–R6已获终审关闭。完整DDL及trigger仍须后续获授权的M0离线TDD验证，实际写方排他证明缺失时scope维持LEGACY，不能以文档覆盖率替代启用资格。
+以下历史状态由最新复审结论更新；初轮OPEN及上文DOC_REVISED_PENDING_REVIEW保留为历史证据，不是最新逐项状态。
+
+## 独立复审 deleg_01bdb892：R2–R6文档可接受
+
+被审修订97887787；后续fa355797仅增加章节风险链接。独立结论：R2–R6文档修订可接受，未发现新的真正阻断；不构成功能或生产放行。最新状态：R2–R6为DOC_REVIEW_ACCEPTED，R1为JOINT_REVIEW_PENDING；整体仍BLOCKED。
+
+评审确认：active固定同epoch的不可变基线、未归档事件连续覆盖；持久events为GET/SSE唯一投递来源且通知丢失可补查；实际写入门覆盖token检查至落盘；回滚逐源读回、连续兼容凭证及全进程排空；CAS包含NULL基线、attempt/fence、同事务发布及同修订重建。
+
+明确限制：第二次读取被截断，未取得implementation§9 R1正文，故该次复审不完整背书R1联合一致性。不能把上述局部接受写成整体设计PASS。补充只读联合复审已派发deleg_1dff8521，要求完整提取R1及protocol-v2再下结论，结果待返回。
+
+证据：/home/hermeswebui/.hermes/cache/delegation/live/deleg_01bdb892/task-0.log。复审全程只读，未修改文件、提交或执行SQL。风险26行和测试42组仅为文档覆盖口径，所有功能测试仍NOT_RUN。
+
+完整DDL/FK/trigger留至M0是可接受的编码细化，但仍须另获授权并完成离线TDD验证；不得据此冻结schema、启动编码或启用生产。实际写方排他证明缺失时scope维持LEGACY，不能以文档覆盖率替代启用资格。
