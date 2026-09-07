@@ -1,6 +1,16 @@
 """Oversized historical merges stay bounded without dropping rows."""
+import pytest
 from api import routes
-from tests.test_display_merge_cache_shortcut import _Session, stable_key, _clean_cache  # noqa: F401
+from tests.test_display_merge_cache_shortcut import _Session
+
+
+@pytest.fixture(autouse=True)
+def stable_key(monkeypatch):
+    routes._display_merge_cache.clear()
+    monkeypatch.setattr('api.models._sidecar_stat_signature', lambda p: ('sig', 1, 2, 3))
+    monkeypatch.setattr(routes, '_state_db_session_signature', lambda *a, **k: 'SIG-A')
+    yield 'SIG-A'
+    routes._display_merge_cache.clear()
 
 
 def test_oversized_merge_is_cached_losslessly(monkeypatch, stable_key):
