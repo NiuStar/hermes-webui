@@ -296,3 +296,12 @@ CREATE TRIGGER mutation_recovery_guard BEFORE UPDATE ON mutations WHEN
  (NEW.recovery_only!=1 OR NEW.recovery_key IS NULL OR NEW.recovery_evidence_json IS NULL))
 BEGIN SELECT RAISE(ABORT,'recovery_evidence_required'); END;
 ```
+
+
+恢复重入补充：PREPARED且recovery_only=1允许transactions§8恢复入口以同recovery_key重入，不需要状态转换；普通入口仍拒绝。更新证据必须持scope门并重新验证绑定/原执行者排空。恢复键设置后不可改变，active保持0；状态已SEALED只能只读幂等返回。
+
+```sql
+CREATE TRIGGER mutation_recovery_key_immutable BEFORE UPDATE ON mutations
+WHEN OLD.recovery_key IS NOT NULL AND NEW.recovery_key IS NOT OLD.recovery_key
+BEGIN SELECT RAISE(ABORT,'recovery_key_immutable'); END;
+```

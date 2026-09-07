@@ -82,10 +82,18 @@ WHERE scope_id=:scope AND epoch=:epoch AND revision=:revision
 
 ## 8. 终审P1修订：UNCERTAIN恢复专用入口
 
-recover_uncertain(binding,recovery_key)是唯一允许UNCERTAIN→PREPARED的入口；普通回调、worker和超时器不得调用。先关闭该run active、阻止新回调并取得scope门，证明原执行者已排空/停止，逐源核对身份、当前revision、已确认事件与实际副作用记录。无法判定外部工具是否执行则保持UNCERTAIN，不执行工具重试。
+recover_uncertain(binding,recovery_key)是唯一允许UNCERTAIN→PREPARED及恢复专用PREPARED重入的入口；普通回调、归档worker和超时器不得调用。启动恢复协调器可调用此入口，但不能调用普通写接口绕过恢复模式。入口接受两种持久状态：(A) UNCERTAIN；(B) PREPARED且recovery_only=1。PREPARED且recovery_only=0不属于恢复重入，拒绝。先关闭该run active、阻止新回调并取得scope门，证明原执行者已排空/停止，逐源核对身份、当前revision、已确认事件与实际副作用记录。无法判定外部工具是否执行时，A保持UNCERTAIN；B在持门短事务中PREPARED→UNCERTAIN并保留恢复标志。若该事务失败则停止接入，原持久状态仍只能经本入口重入，不执行工具重试。
 
-核验只能恢复存储写入，不恢复推理/工具执行。入口建立恢复上下文(recovery_key,source_manifest_sha,原binding,待补偿对象清单)，在短事务校验仍为同一UNCERTAIN、epoch/revision/token未变后转PREPARED并记录恢复审计。run保持OPEN或TERMINAL_PENDING，active_allowed保持0。持scope门跨越后续补偿与终态/seal全过程，其他普通回调被入口级recovery_only标志拒绝；该标志必须持久化到mutations，不能仅内存维护。
+核验只能恢复存储写入，不恢复推理/工具执行。入口建立恢复上下文(recovery_key,source_manifest_sha,原binding,待补偿对象清单)，A路径在短事务校验仍为同一UNCERTAIN、epoch/revision/token未变后转PREPARED并记录恢复审计。B路径核对持久recovery_key与请求相同、recovery_only=1、原binding及证据结构完整，保持PREPARED不制造状态跃迁；复核后更新恢复证据并提交。已有recovery_key必须复用，冲突拒绝，不因重启分配新键。run保持OPEN或TERMINAL_PENDING，active_allowed保持0。持scope门跨越后续补偿与终态/seal全过程，其他普通回调被入口级recovery_only标志拒绝；该标志必须持久化到mutations，不能仅内存维护。
 
 OPEN时只允许从已持久事件和逐源读回证据生成缺失对象终态（未知执行结果只能明确unknown并INCOMPLETE，不能伪成功）；提交唯一terminal，run转TERMINAL_PENDING。已有terminal时原键读回，禁止第二terminal。幂等刷入旧源后seal；INCOMPLETE可封存稳定源但不可发布/active/完整回滚，job置BLOCKED。再次I/O未知则回到UNCERTAIN，保留recovery_only；重启只能继续本恢复入口。
 
 原binding不变是为维持events复合FK；排空原执行者及持久recovery_only共同撤销其实际使用权限。write_source/commit_event在recovery_only=1时必须匹配recovery_key且调用模式RECOVERY_STORAGE，仅允许恢复清单内对象；普通token即使相等也拒绝。T21/T23/T25新增OPEN+UNCERTAIN、已有terminal+UNCERTAIN、恢复中再次退出、旧回调穿插反例。失败回退保持UNCERTAIN/LEGACY，不绕trigger、不重跑工具。
+
+### 恢复专用PREPARED的崩溃重入门
+
+启动扫描同时枚举UNCERTAIN及PREPARED/recovery_only=1；扫描仅发现任务，不授予权限。每次重入均重新取得scope排他门，并证明原业务执行者和上次恢复执行者已停止/排空；不能根据租约到期直接夺取源写权限。无法证明则BLOCKED并保持active=0。全程持门，确保只有一个恢复执行者。
+
+从持久事件、终态和实际旧源重新计算剩余补偿，不信任崩溃前内存进度。已有事件使用原event_key幂等读回，已有terminal不再提交；未完成源刷写按已保存对象身份及版本幂等补偿，再按OPEN/TERMINAL_PENDING状态推进。恢复提交后、任意源写后、terminal后或seal响应前退出均可重新进入：前两种重读补偿，terminal后仅刷源与seal；若已SEALED则核对绑定及终态后只读返回原结果，绝不重获写权限。
+
+T21/T25恢复崩溃子例必须在UNCERTAIN→PREPARED提交后且首次源补偿前强制退出，确认重启读到PREPARED/recovery_only=1，能由同恢复键合法重入；再分别于源补偿、terminal提交、seal提交后退出验证幂等。并行旧回调、不同恢复键、新恢复进程未排空旧执行者均拒绝。风险是双恢复者重写旧源；措施是实际排他门和重复排空证明，失败保留状态/审计而非强制解锁。
