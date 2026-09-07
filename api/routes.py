@@ -9034,7 +9034,7 @@ def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None
         if not _display_merge_cache_entry_usable(entry, cache_key):
             return None
         _display_merge_cache.move_to_end(sid, last=True)
-        return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
+    return _display_merge_cache_messages(entry)
 
 
 _DISPLAY_STATE_SIGNATURE_UNSET = object()
@@ -9105,9 +9105,11 @@ def _limited_webui_messages_for_display_with_sidecar(
         sid = str(getattr(session, "session_id", "") or "")
         with _display_merge_cache_lock:
             entry = _display_merge_cache.get(sid)
-            if _display_merge_cache_entry_usable(entry, cache_key):
+            usable = _display_merge_cache_entry_usable(entry, cache_key)
+            if usable:
                 _display_merge_cache.move_to_end(sid, last=True)
-                return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
+        if usable:
+            return _display_merge_cache_messages(entry)
     merged = merge_session_messages_append_only(
         sidecar_messages,
         state_db_messages,
@@ -9131,11 +9133,25 @@ def _limited_webui_messages_for_display_with_sidecar(
             != state_db_signature
         ):
             cache_key = None
-    cache_size = (
-        _cache_json_size_bytes(merged, _DISPLAY_MERGE_CACHE_MAX_BYTES)
-        if cache_key is not None
-        else None
-    )
+    cache_value = _display_merge_cache_value(merged) if cache_key is not None else None
+    cache_size = cache_value.get("size_bytes") if cache_value is not None else None
+    # Encoding can be slow; do not publish under provenance that changed while
+    # serializing. The original read path remains the fallback on uncertainty.
+    if cache_key is not None and (
+        _display_merge_session_is_active(session)
+        or _display_merge_cache_key(
+            session, sidecar_messages, state_db_messages,
+            state_db_signature=(
+                _state_db_rows_fingerprint(state_db_messages)
+                if state_db_signature is _DISPLAY_STATE_SIGNATURE_UNSET
+                else _state_db_session_signature(
+                    getattr(session, "session_id", None),
+                    getattr(session, "profile", None) or None,
+                )
+            ),
+        ) != cache_key
+    ):
+        cache_key = None
     if (
         cache_key is not None
         and cache_size is not None
@@ -9145,9 +9161,8 @@ def _limited_webui_messages_for_display_with_sidecar(
         with _display_merge_cache_lock:
             _display_merge_cache[sid] = {
                 "key": cache_key,
-                "messages": merged,
+                **cache_value,
                 "stored_at": time.monotonic(),
-                "size_bytes": cache_size,
             }
             _display_merge_cache.move_to_end(sid, last=True)
             _trim_message_cache(
@@ -9163,6 +9178,63 @@ def _limited_webui_messages_for_display_with_sidecar(
 
 # perf: memoized sidecar↔state.db display merges for GET /api/session.
 # See _limited_webui_messages_for_display_with_sidecar for the validity rules.
+_DISPLAY_MERGE_CACHE_MAX_EXPANDED_BYTES = 128 * 1024 * 1024
+
+
+def _display_merge_cache_value(messages):
+    """Keep oversized JSON transcripts losslessly, with two hard byte ceilings.
+
+    This is a disposable read cache, not a persisted body format. Streaming
+    encoding avoids allocating a second complete serialized transcript.
+    """
+    import zlib
+
+    compressor = zlib.compressobj(level=1)
+    encoded = bytearray()
+    expanded = 0
+    try:
+        # Encode one row at a time using the C encoder, not millions of tiny
+        # Python iterencode tokens. Bound each row and the total before retain.
+        for index, message in enumerate(messages):
+            raw = (("[" if index == 0 else ",") + json.dumps(
+                message, ensure_ascii=False, separators=(",", ":")
+            )).encode("utf-8")
+            expanded += len(raw)
+            if expanded > _DISPLAY_MERGE_CACHE_MAX_EXPANDED_BYTES:
+                return None
+            encoded.extend(compressor.compress(raw))
+            if len(encoded) > _DISPLAY_MERGE_CACHE_MAX_BYTES:
+                return None
+        ending = b"]" if messages else b"[]"
+        expanded += len(ending)
+        if expanded > _DISPLAY_MERGE_CACHE_MAX_EXPANDED_BYTES:
+            return None
+        encoded.extend(compressor.compress(ending))
+        encoded.extend(compressor.flush())
+        if expanded <= _DISPLAY_MERGE_CACHE_MAX_BYTES:
+            return {"messages": messages, "size_bytes": expanded}
+        if len(encoded) > _DISPLAY_MERGE_CACHE_MAX_BYTES:
+            return None
+        # JSON must not normalize tuple/keys/other non-JSON values silently.
+        if json.loads(zlib.decompress(encoded)) != messages:
+            return None
+        return {"encoded_messages": bytes(encoded), "size_bytes": len(encoded)}
+    except (TypeError, ValueError, UnicodeError, OverflowError):
+        return None
+
+
+def _display_merge_cache_messages(entry):
+    if "messages" in entry:
+        return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
+    import zlib
+
+    decoder = zlib.decompressobj()
+    raw = decoder.decompress(entry["encoded_messages"], _DISPLAY_MERGE_CACHE_MAX_EXPANDED_BYTES + 1)
+    if len(raw) > _DISPLAY_MERGE_CACHE_MAX_EXPANDED_BYTES or not decoder.eof or decoder.unused_data:
+        raise ValueError("invalid display cache")
+    return json.loads(raw)
+
+
 _DISPLAY_MERGE_CACHE_MAX = 16
 _DISPLAY_MERGE_CACHE_MAX_BYTES = 32 * 1024 * 1024
 # Legacy streaming-freeze keys are still accepted defensively and remain

@@ -150,6 +150,7 @@ def test_display_merge_cache_enforces_byte_budget(routes_env, monkeypatch):
 def test_display_merge_cache_does_not_store_one_oversized_entry(routes_env, monkeypatch):
     routes = routes_env.routes
     monkeypatch.setattr(routes, "_DISPLAY_MERGE_CACHE_MAX_BYTES", 256)
+    monkeypatch.setattr(routes, "_DISPLAY_MERGE_CACHE_MAX_EXPANDED_BYTES", 256)
     session = _make_session(routes_env, sid="20260101_000000_oversized", n=2)
     rows = [{
         "role": "assistant",
