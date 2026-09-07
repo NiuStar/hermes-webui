@@ -4,6 +4,8 @@
 
 ## 1. 测试矩阵
 
+本表T01–T20保留；R1–R6屏障及新增风险验证见 `session-read-write-separation-test-addendum.md`。两份共同构成测试计划，所有新功能用例均为NOT_RUN。风险与用例双向映射见 `session-read-write-separation-risk-matrix.md`。
+
 | ID | 场景及操作 | 必须观察的结果 | 拟建测试文件 |
 |---|---|---|---|
 | T01 | 空/单/多profile建库，重复schema初始化 | 独立路径、版本一致、跨scope FK拒绝 | tests/test_display_store.py |

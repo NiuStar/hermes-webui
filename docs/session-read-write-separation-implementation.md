@@ -19,7 +19,9 @@ api/display_events.py：完整展示变更协议；不得把SSE预览伪装完�
 
 接口：begin_mutation(scope, expected_revision, mutation_id)；commit_event(scope, run_id, event_key, payload)；seal_mutation(mutation_id, source_manifest)；enqueue_projection(scope, revision)；claim_job(owner)；publish(job_id, fence, expected_revision, generation)；read_page(scope, generation, before, limit)。scope含规范化profile根标识、source和session_id，路径由受信profile解析器提供，不接受客户端路径。
 
-## 3. Schema协议
+## 3. Schema概念清单（非冻结DDL）
+
+下列为初版字段概览，不可据此直接生成迁移；R2–R6字段、接口和约束以 `session-read-write-separation-protocol-v2.md` 为准。各设计的风险和测试见 `session-read-write-separation-risk-matrix.md` 及测试扩展。
 
 所有表含scope_id，profile物理隔离外仍保留source/session_id唯一约束。整数序号非负，所有JSON有schema_version，SQL参数绑定。
 

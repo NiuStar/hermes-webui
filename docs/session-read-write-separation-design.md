@@ -1,6 +1,8 @@
 # 会话读写分离与后台增量整理设计
 
-状态：用户已确认设计；本文落盘不代表授权实施存储迁移或生产发布。
+状态：架构方向已确认；详细契约修订待复审，整体BLOCKED。本次不授权编码、存储迁移或生产发布。
+
+配套文件：编码详细设计 `session-read-write-separation-implementation.md`；R2–R6规范 `session-read-write-separation-protocol-v2.md`；逐项风险 `session-read-write-separation-risk-matrix.md`；测试主计划及 `session-read-write-separation-test-addendum.md`。后续详细约束收紧本文概念描述，不代表已实现。
 
 ## 1. 目标与依据
 
@@ -98,7 +100,7 @@ GET保留权限、必要脱敏、来源版本有效性检查及活动状态读�
 
 首选复用现有journal、进程内热缓冲、持久化整理任务以及SQLite展示表或分块文件。Redis不是前提，也不作为权威正文唯一存储。
 
-展示表与分块文件的最终选择、事务边界、跨进程锁及队列实现，待编码设计依据现有调用方和基准确定。若未来确有多进程共享缓存或吞吐需求，再单独评估Redis持久化、故障恢复及运维成本。
+编码详细设计选定独立SQLite派生库内的不可变行段及版本清单；不是额外分块文件服务。事务、跨进程写方资格与任务约束按protocol-v2规定，均待验证。若未来确有多进程共享缓存或吞吐需求，再单独评估Redis持久化、故障恢复及运维成本。
 
 ## 9. 实施顺序与门禁
 
