@@ -200,3 +200,35 @@ required_sources按run创建时固定：WebUI受控运行必需sidecar/state_db/
 回滚覆盖集合为全部已确认run的全部事件；逐run逐源无缺口，源后续变化使旧凭证不可复用。回滚屏障中重验所有目标，不能只查最大through_seq或verified_at。写成功凭证前退出重读；凭证前源失败保持UNCERTAIN；不重跑工具。
 
 风险/措施/验证/回退：完整对象与兼容扩展放大写入→未确认更新合并、字节预算→T24/T38→背压但不删已确认数据；旧schema能力不匹配→绑定版本和显式映射→T25/T42→LEGACY、保留恢复组件；多模态浮点不在v1规范域→保留原源并拒新能力，不转换正文→T09/T24→旧路径；上下文与展示不等价→双轨逐字段验证→T14/T25→不得宣称可独立模型恢复。
+
+## 6. 终审P1修订：映射版本mapping-v1的确定结构
+
+本节覆盖§4/5中待定的身份和字段集合。适配基线Agent 58472d803a32edd19773bb2ed7426490981a636e，hermes_state_common.py L456–481实际messages列；生产需精确版本/列清单匹配，不以本机源码冒充生产验证。恢复兼容镜像必须含mapping-v1适配器，不能回滚到不识别扩展的旧镜像。
+
+### 身份分配
+
+新对象在首次事件事务前生成服务端随机UUID并写入持久事件，所有重试复用。旧消息无ID：仅在无活动run、持源门的REWRITE bootstrap中，对固定原始sidecar快照每条记录分配独立UUID，原记录追加projection_object_id并与identity_map一次原子保存；重复正文也分配不同ID。快照序号仅用于这一次受锁迁移定位，不能用于以后身份推断。源变化/保存未确认则不启用；恢复读实际已保存UUID，不再次生成。有DB行对应时必须从实际持久化返回的messages.id建立映射，禁止按文本匹配；没有可靠对应的旧对象只作为历史展示身份，context_mapping明确UNMAPPED，不能取得需该关联的凭证。
+
+### projection_compat_v1精确结构
+
+必填：schema_version=1、mapping_version='mapping-v1'、scope_id/epoch/run_id、through_seq、objects数组、identity_map数组、todo_snapshot、terminal（未终态为null）、context_snapshot、source_manifest。所有数组稳定排序，禁止缺字段等同null。
+
+objects元素为{object_id,object_version,kind,anchor_id,display_order,payload,payload_hash}，按object_id排序，payload为本文件五类规范；terminal不放objects。identity_map元素为{object_id,sidecar_message_id,db_session_id,db_message_id,tool_call_id,anchor_id,context_mapping}；不适用值显式null，context_mapping为BOUND/NOT_CONTEXT/UNMAPPED，按object_id排序。sidecar_message_id就是原记录projection_object_id；db_message_id是实际数据库整数主键，不另造。todo_snapshot={object_id,object_version,todos}或未发生时null。terminal为完整terminal事件或null。
+
+context_snapshot={session_rows,message_rows,ordered_message_ids}：包含本run相关实际上下文链的所有消息及active=0记录，按session_id/id排序保存；ordered_message_ids由目标版本原恢复器输出，不按展示顺序推测。message_rows字段固定为id,session_id,role,content,tool_call_id,tool_calls,tool_name,effect_disposition,timestamp,token_count,finish_reason,reasoning,reasoning_content,reasoning_details,codex_reasoning_items,codex_message_items,platform_message_id,observed,_compressed_summary,active,compacted,api_content,display_kind,display_metadata。NULL保留，TEXT不解析重编码，REAL按读取到的IEEE754大端8字节hex编码为{f64_hex:string}，防止秒时间转毫秒丢精度。session_rows保留目标版本sessions完整列，列名排序、相同类型编码；新增/缺失列即版本不匹配，不自动忽略。
+
+source_manifest={mapping_version,agent_commit,webui_commit,sources}；sources按kind排序，每项{kind,identity,schema_fingerprint,revision,coverage_hash}。identity为受信文件身份/DB逻辑身份，revision为持门读回的内容指纹。sidecar自身指纹计算时排除source_manifest.sources中的revision/coverage_hash，避免自引用；journal指纹只覆盖through_seq对应的已提交记录前缀，不包括凭证记录自身。
+
+### 三源覆盖和hash输入
+
+C为§2规范编码；真实旧源的浮点只在context_snapshot类型编码层转换为f64_hex，不改原正文或数据库值。H为无前缀SHA256(C(input))。所有hash输入含mapping_version、scope_id、epoch、run_id、through_seq，且必须来自重新打开的旧恢复源，不能只hash新扩展自证。
+
+| source | 必须重建的coverage body | 对照与hash |
+|---|---|---|
+| sidecar | objects、identity_map、todo_snapshot、terminal、context_snapshot；另含原messages/tool_calls/anchor_activity_scenes/context_messages/truncation_watermark/truncation_boundary的类型编码完整值 | 通过projection_object_id逐条核对原messages角色/正文，tool_call_id核对完整调用结果，原scene按anchor核对，原context与context_snapshot交叉验证；hash输入body含上述全部值，不只扩展 |
+| state_db | context_snapshot完整三字段及identity_map中BOUND项的object_id/db_session_id/db_message_id/tool_call_id | 逐主键读取messages，role/content/tool_calls/tool_call_id/tool_name与对应上下文对象核对；原恢复器顺序与ordered_message_ids一致；不要求DB保存Todo/activity，但必须核对覆盖表明确的全部上下文字段 |
+| journal | 当前run截至through_seq的完整规范事件数组，及sidecar_dependency={identity,through_seq,coverage_hash} | 新增旧journal兼容记录projection_compat_v1_event，payload为完整规范事件；适配解码器按原journal顺序重建、逐event_key/hash对照；另重新打开所依赖sidecar验证coverage_hash，不以done metadata证明完整 |
+
+journal扩展由append_run_event兼容包装写入，未识别该kind的旧解码器不属于允许回滚版本。三源receipt.canonical_hash分别为上述不同coverage input的H，不要求彼此相同。through_seq推进前验证本run从首事件至目标事件每一个event_key都在journal和sidecar对象归约/版本历史对应集合中；sidecar另持久event_manifest数组，元素{event_key,session_seq,kind,object_id,object_version,payload_hash}，按seq排序，包含被后版本替换的旧版本。event_manifest是projection_compat_v1必填字段，hash也纳入sidecar body。state_db检查该前缀所涉及的全部BOUND上下文记录，NOT_CONTEXT事件明确由另两源负责；任何UNMAPPED相关记录阻断凭证。
+
+风险：扩展与原字段双写可能同错，必须用独立旧恢复器读回原字段并交叉验证；T25加入重复正文无ID、DB行错配、原字段被篡改而扩展不变、REAL精度、journal缺中间事件及列版本漂移反例。无法映射保持BLOCKED，不删字段或缩小required_sources。

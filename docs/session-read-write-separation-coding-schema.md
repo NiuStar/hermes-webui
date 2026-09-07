@@ -17,6 +17,7 @@ CREATE TABLE scopes(
 CREATE TABLE mutations(
  scope_id TEXT NOT NULL REFERENCES scopes(scope_id), mutation_id TEXT NOT NULL, operation_key TEXT NOT NULL, input_hash TEXT NOT NULL,
  epoch INTEGER NOT NULL CHECK(epoch>=0), actual_revision INTEGER NOT NULL CHECK(actual_revision>0),
+ recovery_only INTEGER NOT NULL DEFAULT 0 CHECK(recovery_only IN(0,1)), recovery_key TEXT, recovery_evidence_json TEXT CHECK(recovery_evidence_json IS NULL OR json_valid(recovery_evidence_json)),
  writer_token TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN('APPEND','REWRITE')),
  state TEXT NOT NULL CHECK(state IN('PREPARED','UNCERTAIN','SEALED')), source_manifest_sha TEXT,
  created_at INTEGER NOT NULL CHECK(created_at>=0), sealed_at INTEGER CHECK(sealed_at>=0),
@@ -205,7 +206,7 @@ CREATE TRIGGER scopes_monotonic BEFORE UPDATE ON scopes WHEN NEW.epoch<OLD.epoch
  BEGIN SELECT RAISE(ABORT,'scope_regression'); END;
 CREATE TRIGGER segments_seal BEFORE UPDATE ON segments WHEN OLD.sealed!=0 OR NEW.sealed!=1 OR NEW.scope_id IS NOT OLD.scope_id OR NEW.segment_id IS NOT OLD.segment_id OR NEW.row_count IS NOT OLD.row_count OR NEW.byte_count IS NOT OLD.byte_count OR NEW.content_sha IS NOT OLD.content_sha OR NEW.row_count!=(SELECT count(*) FROM rows WHERE scope_id=OLD.scope_id AND segment_id=OLD.segment_id)
  BEGIN SELECT RAISE(ABORT,'segment_mutation'); END;
-CREATE TRIGGER mutations_transition BEFORE UPDATE OF state ON mutations WHEN NEW.state!=OLD.state AND NOT((OLD.state='PREPARED' AND NEW.state IN('UNCERTAIN','SEALED')) OR (OLD.state='UNCERTAIN' AND NEW.state IN('SEALED'))) BEGIN SELECT RAISE(ABORT,'illegal_transition'); END;
+CREATE TRIGGER mutations_transition BEFORE UPDATE OF state ON mutations WHEN NEW.state!=OLD.state AND NOT((OLD.state='PREPARED' AND NEW.state IN('UNCERTAIN','SEALED')) OR (OLD.state='UNCERTAIN' AND NEW.state IN('PREPARED','SEALED'))) BEGIN SELECT RAISE(ABORT,'illegal_transition'); END;
 CREATE TRIGGER runs_transition BEFORE UPDATE OF state ON runs WHEN NEW.state!=OLD.state AND NOT((OLD.state='OPEN' AND NEW.state IN('TERMINAL_PENDING')) OR (OLD.state='TERMINAL_PENDING' AND NEW.state IN('SEALED'))) BEGIN SELECT RAISE(ABORT,'illegal_transition'); END;
 CREATE TRIGGER jobs_transition BEFORE UPDATE OF state ON jobs WHEN NEW.state!=OLD.state AND NOT((OLD.state='PENDING' AND NEW.state IN('LEASED')) OR (OLD.state='RETRY' AND NEW.state IN('LEASED')) OR (OLD.state='LEASED' AND NEW.state IN('RETRY','BLOCKED','SUPERSEDED','PUBLISHED')) OR (OLD.state='BLOCKED' AND NEW.state IN('PENDING')) OR (OLD.state='SUPERSEDED' AND NEW.state IN('PENDING'))) BEGIN SELECT RAISE(ABORT,'illegal_transition'); END;
 CREATE TRIGGER job_attempts_transition BEFORE UPDATE OF state ON job_attempts WHEN NEW.state!=OLD.state AND NOT((OLD.state='LEASED' AND NEW.state IN('RETRY','BLOCKED','SUPERSEDED','PUBLISHED'))) BEGIN SELECT RAISE(ABORT,'illegal_transition'); END;
@@ -283,3 +284,15 @@ CREATE TRIGGER barrier_members_initial BEFORE INSERT ON barrier_members WHEN NEW
 ```
 
 本轮数据库与应用责任边界：数据库负责FK、唯一键、序号、不可变、状态图及上述发布必要条件；源内容hash、工具ID语义、段偏移连续/场景完整、终态清单、成员全集、修复授权、owner/租约及全事务最终一致性由可信store入口检查，失败整事务回滚。数据库schema无法约束任意同UID发出的commit；无专用受控写权限则ELIGIBLE不得启用。不能把“应用负责”理解为异步检查或事后修补。
+
+## 6. UNCERTAIN恢复状态补充（覆盖§2旧状态图）
+
+允许UNCERTAIN→PREPARED仅用于transactions§8；recovery_only一旦为1不得清零。数据库检查凭证存在，实际凭证正确性及恢复调用身份由持源门可信入口验证。不能将普通写入口因状态重新PREPARED而自动开放。
+
+```sql
+CREATE TRIGGER mutation_recovery_guard BEFORE UPDATE ON mutations WHEN
+ (OLD.recovery_only=1 AND NEW.recovery_only!=1) OR
+ (OLD.state='UNCERTAIN' AND NEW.state='PREPARED' AND
+ (NEW.recovery_only!=1 OR NEW.recovery_key IS NULL OR NEW.recovery_evidence_json IS NULL))
+BEGIN SELECT RAISE(ABORT,'recovery_evidence_required'); END;
+```

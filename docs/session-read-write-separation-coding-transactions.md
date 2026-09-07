@@ -79,3 +79,13 @@ WHERE scope_id=:scope AND epoch=:epoch AND revision=:revision
 | 源门到发布提交 | 持锁期间响应延迟；构建在锁外，仅最终复核在锁内 | T16/T26；超预算停构建不杀服务 |
 
 尚未解决的完整交付门：全量DDL和trigger、字段级事件/恢复映射、实际OS排他及全部写方接入证据。本文不关闭这些门，不能单独提交为“编码设计终审通过”。
+
+## 8. 终审P1修订：UNCERTAIN恢复专用入口
+
+recover_uncertain(binding,recovery_key)是唯一允许UNCERTAIN→PREPARED的入口；普通回调、worker和超时器不得调用。先关闭该run active、阻止新回调并取得scope门，证明原执行者已排空/停止，逐源核对身份、当前revision、已确认事件与实际副作用记录。无法判定外部工具是否执行则保持UNCERTAIN，不执行工具重试。
+
+核验只能恢复存储写入，不恢复推理/工具执行。入口建立恢复上下文(recovery_key,source_manifest_sha,原binding,待补偿对象清单)，在短事务校验仍为同一UNCERTAIN、epoch/revision/token未变后转PREPARED并记录恢复审计。run保持OPEN或TERMINAL_PENDING，active_allowed保持0。持scope门跨越后续补偿与终态/seal全过程，其他普通回调被入口级recovery_only标志拒绝；该标志必须持久化到mutations，不能仅内存维护。
+
+OPEN时只允许从已持久事件和逐源读回证据生成缺失对象终态（未知执行结果只能明确unknown并INCOMPLETE，不能伪成功）；提交唯一terminal，run转TERMINAL_PENDING。已有terminal时原键读回，禁止第二terminal。幂等刷入旧源后seal；INCOMPLETE可封存稳定源但不可发布/active/完整回滚，job置BLOCKED。再次I/O未知则回到UNCERTAIN，保留recovery_only；重启只能继续本恢复入口。
+
+原binding不变是为维持events复合FK；排空原执行者及持久recovery_only共同撤销其实际使用权限。write_source/commit_event在recovery_only=1时必须匹配recovery_key且调用模式RECOVERY_STORAGE，仅允许恢复清单内对象；普通token即使相等也拒绝。T21/T23/T25新增OPEN+UNCERTAIN、已有terminal+UNCERTAIN、恢复中再次退出、旧回调穿插反例。失败回退保持UNCERTAIN/LEGACY，不绕trigger、不重跑工具。
