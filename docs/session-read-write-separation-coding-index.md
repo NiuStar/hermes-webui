@@ -35,3 +35,9 @@ deleg_5b1e5d04已针对固定8bc1fd18候选派发只读独立终审；返回前�
 1461f5ac修订：transactions§8/schema§6加入恢复专用持久标志、证据门和UNCERTAIN→PREPARED受控路径，保持普通回调撤权；events§6定义mapping-v1身份分配、扩展结构、Agent源码列清单和三源coverage/hash。两项当前均DOC_REVISED_PENDING_REVIEW，不是已关闭。
 
 独立复审deleg_d4d89faf针对1461f5ac已派发。返回并处理结论前整体CODING_DESIGN_BLOCKED。全部SQL/功能NOT_RUN；未改代码、部署或生产数据。
+
+## 第二轮复审与崩溃重入修订
+
+独立复审deleg_d4d89faf固定1461f5ac：旧恢复映射P1在文档设计层可关闭；恢复P1仍OPEN，原因是恢复短事务提交后退出留下PREPARED/recovery_only=1，缺合法重入。
+
+80139190459b3de1e0b6a0913cecf877394439fc补齐恢复入口A(UNCERTAIN)/B(PREPARED且recovery_only=1)，要求同持久恢复键、重新排空全部旧执行者、持实际源门、重新计算剩余幂等补偿，已SEALED只读返回；新增恢复键不可变trigger及提交后崩溃测试规格。恢复项仍DOC_REVISED_PENDING_REVIEW，独立终审deleg_50e82718针对该固定提交已派发，返回前整体CODING_DESIGN_BLOCKED。没有SQL或功能执行，生产LEGACY。
