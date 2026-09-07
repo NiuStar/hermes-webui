@@ -20,11 +20,11 @@ APPEND必须固定同epoch、来源有效的最近SEALED版本及base_covered_se
 
 ## 3. write_source与commit_event
 
-write_source(binding,source_kind,write_intent)取得scope门；短事务验证scope当前epoch/revision、run OPEN、mutation PREPARED、token有效、source已登记。退出短事务但保留门，执行旧源写并重新打开读取实际结果。源失败或结果未知时持久记UNCERTAIN，不能凭异常类型断言未写。无法记录UNCERTAIN时停止受控接入，不能继续发送成功确认。
+write_source(binding,source_kind,write_intent)取得scope门；短事务验证scope当前epoch/revision、run OPEN或TERMINAL_PENDING、mutation PREPARED、token有效、source已登记；TERMINAL_PENDING仅允许将既有已提交对象/终态幂等刷入旧源，禁止产生新内容。退出短事务但保留门，执行旧源写并重新打开读取实际结果。源失败或结果未知时持久记UNCERTAIN，不能凭异常类型断言未写。无法记录UNCERTAIN时停止受控接入，不能继续发送成功确认。
 
-commit_event(binding,event_key,envelope)取得同一scope门，在BEGIN IMMEDIATE验证绑定、schema和对象版本。重复键先查询原事件：同绑定同hash返回原seq，不分配新号、不恢复写权限；不同hash拒绝。新事件要求OPEN/PREPARED，在事务中分配seq、插入完整payload和对象版本索引。提交后方可对外确认该事件。此确认不等于旧源兼容完成；兼容缺口必须保留事件及新恢复组件。
+commit_event(binding,event_key,envelope)取得同一scope门，在BEGIN IMMEDIATE验证绑定、schema和对象版本。重复键先查询原事件：同绑定同hash返回原seq，不分配新号、不恢复写权限；不同hash拒绝。新事件要求OPEN/PREPARED，先读取last_seq+1作为候选seq，插入完整payload（events_advance触发器推进last_seq），再更新对象版本索引；不得在插入前手工推进seq。提交后方可对外确认该事件。此确认不等于旧源兼容完成；兼容缺口必须保留事件及新恢复组件。
 
-对象版本在单run内从1连续增长，终态清单中的hash是规范完整对象hash；event payload_hash包含事件语义字段而排除服务端分配seq及传输时间。精确规范编码及字段映射另文定义，未定义完整前不得实现互通。
+对象版本在单run内从1连续增长，终态清单中的hash是规范完整对象hash；event payload_hash仅覆盖规范payload；幂等检查另比较完整语义信封（排除服务端seq、传输时间及token）。精确规范编码及字段映射另文定义，未定义完整前不得实现互通。
 
 ## 4. terminal与seal
 
