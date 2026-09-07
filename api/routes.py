@@ -8925,6 +8925,36 @@ def _messages_for_limited_payload(messages) -> list:
     ]
 
 
+def _cache_json_size_bytes(value, max_bytes: int) -> int | None:
+    """Return compact JSON bytes up to ``max_bytes`` without one giant buffer."""
+    try:
+        limit = max(0, int(max_bytes))
+        size = 0
+        encoder = json.JSONEncoder(
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+        for chunk in encoder.iterencode(value):
+            size += len(chunk.encode("utf-8", errors="surrogatepass"))
+            if size > limit:
+                return size
+        return size
+    except Exception:
+        return None
+
+
+def _trim_message_cache(cache, *, max_entries: int, max_bytes: int) -> None:
+    """Evict oldest entries until both count and byte limits are satisfied."""
+    while cache:
+        sizes = [entry.get("size_bytes") for entry in cache.values()]
+        sizes_valid = all(isinstance(size, int) and size >= 0 for size in sizes)
+        total = sum(sizes) if sizes_valid else max_bytes + 1
+        if len(cache) <= max_entries and total <= max_bytes:
+            break
+        cache.popitem(last=False)
+
+
 def _limited_webui_messages_for_display(session, state_db_messages) -> list:
     """Return the display sidecar plus only necessary state.db rows for msg_limit.
 
@@ -9101,17 +9131,30 @@ def _limited_webui_messages_for_display_with_sidecar(
             != state_db_signature
         ):
             cache_key = None
-    if cache_key is not None:
+    cache_size = (
+        _cache_json_size_bytes(merged, _DISPLAY_MERGE_CACHE_MAX_BYTES)
+        if cache_key is not None
+        else None
+    )
+    if (
+        cache_key is not None
+        and cache_size is not None
+        and cache_size <= _DISPLAY_MERGE_CACHE_MAX_BYTES
+    ):
         sid = str(getattr(session, "session_id", "") or "")
         with _display_merge_cache_lock:
             _display_merge_cache[sid] = {
                 "key": cache_key,
                 "messages": merged,
                 "stored_at": time.monotonic(),
+                "size_bytes": cache_size,
             }
             _display_merge_cache.move_to_end(sid, last=True)
-            while len(_display_merge_cache) > _DISPLAY_MERGE_CACHE_MAX:
-                _display_merge_cache.popitem(last=False)
+            _trim_message_cache(
+                _display_merge_cache,
+                max_entries=_DISPLAY_MERGE_CACHE_MAX,
+                max_bytes=_DISPLAY_MERGE_CACHE_MAX_BYTES,
+            )
         # Same shallow-copy contract as the cache-hit path (and as the lineage
         # cache): callers may attach display metadata to the returned rows.
         return [dict(m) if isinstance(m, dict) else m for m in merged]
@@ -9121,6 +9164,7 @@ def _limited_webui_messages_for_display_with_sidecar(
 # perf: memoized sidecar↔state.db display merges for GET /api/session.
 # See _limited_webui_messages_for_display_with_sidecar for the validity rules.
 _DISPLAY_MERGE_CACHE_MAX = 16
+_DISPLAY_MERGE_CACHE_MAX_BYTES = 32 * 1024 * 1024
 # Legacy streaming-freeze keys are still accepted defensively and remain
 # tightly bounded. Production streaming keys now carry an exact target-session
 # digest, so unrelated deltas stay stable without hiding target mutations.
@@ -9601,6 +9645,7 @@ def _messages_start_with_visible_prefix(messages, prefix) -> bool:
 # signature and invalidates the entry. Bounded LRU — historical lineages are
 # few but their merges cost seconds each.
 _LINEAGE_DISPLAY_CACHE_MAX = 16
+_LINEAGE_DISPLAY_CACHE_MAX_BYTES = 32 * 1024 * 1024
 _lineage_display_cache: "OrderedDict[str, dict]" = OrderedDict()
 _lineage_display_cache_lock = threading.Lock()
 
@@ -9725,16 +9770,22 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
         and parent_sigs
         and parent_signatures_complete
     ):
-        with _lineage_display_cache_lock:
-            _lineage_display_cache[sid] = {
-                "self_sig": self_sig,
-                "parent_sigs": parent_sigs,
-                "provenance_complete": True,
-                "messages": merged,
-            }
-            _lineage_display_cache.move_to_end(sid, last=True)
-            while len(_lineage_display_cache) > _LINEAGE_DISPLAY_CACHE_MAX:
-                _lineage_display_cache.popitem(last=False)
+        cache_size = _cache_json_size_bytes(merged, _LINEAGE_DISPLAY_CACHE_MAX_BYTES)
+        if cache_size is not None and cache_size <= _LINEAGE_DISPLAY_CACHE_MAX_BYTES:
+            with _lineage_display_cache_lock:
+                _lineage_display_cache[sid] = {
+                    "self_sig": self_sig,
+                    "parent_sigs": parent_sigs,
+                    "provenance_complete": True,
+                    "messages": merged,
+                    "size_bytes": cache_size,
+                }
+                _lineage_display_cache.move_to_end(sid, last=True)
+                _trim_message_cache(
+                    _lineage_display_cache,
+                    max_entries=_LINEAGE_DISPLAY_CACHE_MAX,
+                    max_bytes=_LINEAGE_DISPLAY_CACHE_MAX_BYTES,
+                )
         # Hand out copies so caller-side metadata mutation cannot corrupt
         # the cached rows (same contract as the cache-hit path).
         return [dict(m) if isinstance(m, dict) else m for m in merged]

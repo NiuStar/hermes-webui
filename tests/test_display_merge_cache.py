@@ -117,3 +117,47 @@ def test_active_session_never_cached(routes_env):
     routes._display_merge_cache.clear()
     routes._limited_webui_messages_for_display_with_sidecar(s, None, rows)
     assert s.session_id not in routes._display_merge_cache
+
+
+def test_display_merge_cache_enforces_byte_budget(routes_env, monkeypatch):
+    routes = routes_env.routes
+    monkeypatch.setattr(routes, "_DISPLAY_MERGE_CACHE_MAX_BYTES", 900)
+
+    for idx in range(4):
+        session = _make_session(
+            routes_env,
+            sid=f"20260101_000000_bytes_{idx}",
+            n=2,
+        )
+        rows = [{
+            "role": "assistant",
+            "content": f"state-{idx}-" + ("x" * 300),
+            "timestamp": session.messages[-1]["timestamp"] + 100,
+        }]
+        result = routes._limited_webui_messages_for_display_with_sidecar(
+            session,
+            None,
+            rows,
+        )
+        assert result[-1]["content"].startswith(f"state-{idx}-")
+
+    with routes._display_merge_cache_lock:
+        total = sum(entry["size_bytes"] for entry in routes._display_merge_cache.values())
+        assert total <= routes._DISPLAY_MERGE_CACHE_MAX_BYTES
+        assert len(routes._display_merge_cache) < 4
+
+
+def test_display_merge_cache_does_not_store_one_oversized_entry(routes_env, monkeypatch):
+    routes = routes_env.routes
+    monkeypatch.setattr(routes, "_DISPLAY_MERGE_CACHE_MAX_BYTES", 256)
+    session = _make_session(routes_env, sid="20260101_000000_oversized", n=2)
+    rows = [{
+        "role": "assistant",
+        "content": "x" * 2000,
+        "timestamp": session.messages[-1]["timestamp"] + 100,
+    }]
+
+    result = routes._limited_webui_messages_for_display_with_sidecar(session, None, rows)
+
+    assert result[-1]["content"] == "x" * 2000
+    assert session.session_id not in routes._display_merge_cache

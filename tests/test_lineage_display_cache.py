@@ -325,3 +325,32 @@ def test_sessions_without_lineage_do_not_pollute_cache(lineage):
     out = routes._webui_sidecar_lineage_messages_for_display(solo)
     assert len(out) == 1
     assert "lineage_solo" not in routes._lineage_display_cache
+
+
+def test_lineage_cache_skips_one_entry_over_byte_budget(lineage, monkeypatch):
+    routes, _Session, child = lineage
+    monkeypatch.setattr(routes, "_LINEAGE_DISPLAY_CACHE_MAX_BYTES", 128)
+
+    merged = routes._webui_sidecar_lineage_messages_for_display(child)
+
+    assert len(merged) == 42
+    assert child.session_id not in routes._lineage_display_cache
+
+
+def test_lineage_cache_entries_report_and_obey_byte_budget(lineage, monkeypatch):
+    routes, Session, child = lineage
+    monkeypatch.setattr(routes, "_LINEAGE_DISPLAY_CACHE_MAX_BYTES", 12_000)
+
+    routes._webui_sidecar_lineage_messages_for_display(child)
+    parent = Session.load("lineage_parent")
+    child2 = Session(
+        session_id="lineage_child_bytes_two",
+        messages=[{"role": "assistant", "content": "second-child", "timestamp": 6000}],
+    )
+    child2.parent_session_id = parent.session_id
+    child2.save()
+    routes._webui_sidecar_lineage_messages_for_display(child2)
+
+    with routes._lineage_display_cache_lock:
+        total = sum(entry["size_bytes"] for entry in routes._lineage_display_cache.values())
+        assert total <= routes._LINEAGE_DISPLAY_CACHE_MAX_BYTES

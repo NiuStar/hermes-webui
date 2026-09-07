@@ -1536,6 +1536,10 @@ class Session:
         # defense-in-depth; the cached-side freshness check reads real records,
         # not this, so this is belt-and-suspenders).
         self._anchor_scene_index = dict(meta['anchor_scene_index'])
+        # Preserve the existing indented metadata prefix and top-level boundary.
+        # Only body JSON whitespace changes; all transcript/context values stay.
+        metadata_prefix = json.dumps(meta, ensure_ascii=False, indent=2)[:-2]
+        meta = {}
         meta['messages'] = self.messages
         meta['tool_calls'] = self.tool_calls
         meta['anchor_activity_scenes'] = self.anchor_activity_scenes if isinstance(self.anchor_activity_scenes, dict) else {}
@@ -1545,7 +1549,12 @@ class Session:
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
-        payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
+        body = ',\n'.join(
+            f'  {json.dumps(k, ensure_ascii=False)}: '
+            f'{json.dumps(v, ensure_ascii=False, separators=(",", ":"))}'
+            for k, v in {**meta, **extra}.items()
+        )
+        payload = metadata_prefix + ',\n' + body + '\n}'
 
         # ── #1558 backup safeguard ──────────────────────────────────────
         # Before overwriting the session file, copy the previous version to

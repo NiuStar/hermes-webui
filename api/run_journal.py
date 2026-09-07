@@ -5,11 +5,13 @@ the existing in-process streaming path without changing execution ownership.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
 import threading
 import time
+import zlib
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Iterable
@@ -62,6 +64,12 @@ _DEFAULT_MAX_CLOSED_RUNS = 8
 _DEFAULT_MAX_CLOSED_BYTES = 256 * 1024 * 1024
 _LEGACY_CLOSE_TAIL_BYTES = 64 * 1024
 _COMPACT_DONE_MARKER = "_journal_compact_done"
+# Disk-only, independently decodable rows: no cross-event references or buffers
+# that could lose crash recovery data or invalidate a reconnect cursor.
+_PROCESS_PAYLOAD_EVENTS = frozenset({"token", "reasoning", "interim_assistant", "tool", "tool_complete"})
+_PAYLOAD_ENCODING = "zlib-base64-json-v1"
+_PAYLOAD_COMPRESS_MIN_BYTES = 4096
+_PAYLOAD_DECODE_MAX_BYTES = 4 * 1024 * 1024
 _COMPACT_DONE_SESSION_FIELDS = (
     "session_id",
     "message_count",
@@ -169,6 +177,51 @@ def _discard_cached_summary(path: Path) -> None:
         _SUMMARY_CACHE.pop(str(path), None)
 
 
+def _encode_event_line(event: dict) -> str:
+    line = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+    payload = event.get("payload")
+    if (
+        os.environ.get("HERMES_WEBUI_JOURNAL_COMPRESSION", "1") == "0"
+        or event.get("event") not in _PROCESS_PAYLOAD_EVENTS
+        or not isinstance(payload, dict)
+        or payload.get("ephemeral") is True
+        or len(line) < _PAYLOAD_COMPRESS_MIN_BYTES
+    ):
+        return line
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if not _PAYLOAD_COMPRESS_MIN_BYTES <= len(raw) <= _PAYLOAD_DECODE_MAX_BYTES:
+        return line
+    encoded = base64.b64encode(zlib.compress(raw, level=1)).decode("ascii")
+    compact = json.dumps(
+        {**event, "payload": encoded, "payload_encoding": _PAYLOAD_ENCODING},
+        ensure_ascii=False, separators=(",", ":"),
+    ) + "\n"
+    # Account for the marker and base64 overhead; incompressible rows stay raw.
+    return compact if len(compact.encode("utf-8")) < len(line.encode("utf-8")) else line
+
+
+def _decode_event_payload(event):
+    if not isinstance(event, dict) or "payload_encoding" not in event:
+        return event
+    if event["payload_encoding"] != _PAYLOAD_ENCODING:
+        raise ValueError("unknown journal payload encoding")
+    try:
+        compressed = base64.b64decode(event["payload"], validate=True)
+        decoder = zlib.decompressobj()
+        raw = decoder.decompress(compressed, _PAYLOAD_DECODE_MAX_BYTES + 1)
+        if len(raw) > _PAYLOAD_DECODE_MAX_BYTES or not decoder.eof or decoder.unused_data:
+            raise ValueError("invalid or oversized journal payload")
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            raise ValueError("invalid journal payload")
+    except (TypeError, KeyError, zlib.error, UnicodeDecodeError) as exc:
+        raise ValueError("invalid journal payload encoding") from exc
+    decoded = dict(event)
+    decoded.pop("payload_encoding")
+    decoded["payload"] = payload
+    return decoded
+
+
 def _read_jsonl(path: Path) -> tuple[list[dict], list[dict]]:
     events: list[dict] = []
     malformed: list[dict] = []
@@ -180,8 +233,8 @@ def _read_jsonl(path: Path) -> tuple[list[dict], list[dict]]:
         if not raw.strip():
             continue
         try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
+            parsed = _decode_event_payload(json.loads(raw))
+        except ValueError:
             malformed.append({"line": line_no, "raw": raw})
             continue
         if isinstance(parsed, dict):
@@ -612,7 +665,7 @@ def append_run_event(
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         created_file = not path.exists()
-        line = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+        line = _encode_event_line(event)
         fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as fh:
             fh.write(line)
@@ -860,6 +913,7 @@ def read_session_run_events(
     runs: list[tuple[float, str, list[dict]]] = []
     retained_rows = 0
     retained_bytes = 0
+    expanded_bytes = 0
     for path in sorted(session_root.glob("*.jsonl")) if session_root.exists() else []:
         run_id = path.stem
         try:
@@ -879,9 +933,15 @@ def read_session_run_events(
                     continue
                 try:
                     event = json.loads(raw.decode("utf-8"))
+                    encoded = isinstance(event, dict) and "payload_encoding" in event
+                    event = _decode_event_payload(event)
+                    if encoded:
+                        expanded_bytes += max(0, len(json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) + 1 - len(raw))
                     seq = int(event.get("seq")) if isinstance(event, dict) else 0
                 except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
                     return {"session_id": sid, "cursor_run_id": cursor_run_id, "cursor_seq": cursor_seq, "status": "replay_malformed", "events": []}
+                if retained_bytes + expanded_bytes > max_bytes:
+                    return {"session_id": sid, "cursor_run_id": cursor_run_id, "cursor_seq": cursor_seq, "status": "replay_limit_bytes", "events": []}
                 if (
                     seq != expected_seq
                     or event.get("event_id") != f"{run_id}:{seq}"
