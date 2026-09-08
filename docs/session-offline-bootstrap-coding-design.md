@@ -70,7 +70,7 @@ BootstrapContext绑定pid、锁FD、各根目录FD、mount/namespace身份及策
 
 ### 4.1 V2-04：部署策略与摘要绑定
 
-新增DeploymentPolicy为持久严格类型，包含format_version=1、policy_id:CandidateId、creator_uid:int、approver_uid:int、roots:object、ancestors:list、lock_identity:FileIdentity、platform_requirements:object、resource_policy_id:CandidateId、resource_policy_sha:Digest。creator_uid不得等于approver_uid。
+新增DeploymentPolicy为持久严格类型，包含format_version=1、policy_id:CandidateId、creator_uid:int、approver_uid:int、roots:object、ancestors:list、lock_identity:FileIdentity、platform_requirements:object、resource_policy_id:CandidateId、resource_policy_sha:Digest、expected_ddl_sha:Digest。creator_uid不得等于approver_uid。
 
 roots的精确键为registry_root/approval_root/candidate_root/publish_root/lock_root，每项为{path:str,identity:DirectoryIdentity}。path仅来自root管理的可信配置，必须绝对路径、无NUL、无`.`/`..`分量，不适用CandidateId名称约束；禁止调用请求提供或覆盖。ancestors元素为{path:str,identity:DirectoryIdentity}，逐根列出到文件系统根的祖先，按path排序且不重复，缺任一祖先拒绝。
 
@@ -100,6 +100,16 @@ recover不接收批准ID：VERIFIED尚未绑定时返回BLOCKED/APPROVAL_MISMATC
 
 风险/对策/验证/回退：目录链接数误拒通过稳定DirectoryIdentity消除；证据丢失禁止合成；审批首次赋值与重入不可变分离。新增验收为test_directory_identity_lifecycle（合法子目录增减策略不变、inode/权限替换拒绝）、test_evidence_restart（创建进程退出后持久读回及丢失/损坏/同步故障拒绝）、test_initial_approval_binding（首次、同ID重入、换ID拒绝、记录失败零rename、未绑定恢复等待）。全部NOT_RUN；任一条件不成立保持BLOCKED，不删除文件。
 
+### 4.3 独立终审整改：固定DDL及确定失败分类
+
+DeploymentPolicy.expected_ddl_sha固定为`578f80789de98456324d430142631c7b7f984f80f3ffe30fc7c31d0634bdcd9d`，摘要对象是批准`api/_display_schema_ddl.py`内SQL常量的严格UTF-8字节，不含Python包装。构建前必须验证运行常量SHA等于该值；Manifest.ddl_sha及受信策略也必须等于该值。该值不能由当前实现运行时生成后自动填入策略。独立验收基准从既有批准coding-schema文档SQL fences恢复原样SQL并比对字节和目录，禁止用待测实现自身生成唯一预期。变更DDL必须单独设计/审批新版本，不允许自行刷新摘要。
+
+失败分类优先级固定：注册链损坏、身份替换或源/目标互相矛盾属于QUARANTINED/STATE_CONFLICT（明确文件身份变化用IDENTITY_CHANGED），尽力追加隔离，写失败quarantine_persisted=false仍拒绝；最新FAILED/QUARANTINED按终态处理。可信审批文件缺失、内容/schema/hash/策略不匹配但候选及注册身份没有冲突，一律BLOCKED/APPROVAL_MISMATCH，不追加终态记录，允许满足原不可变绑定后重新验证；这不是允许替换已绑定审批。审批目录本身权限或身份不可信则BLOCKED/ACCESS_BOUNDARY_UNPROVEN，不访问其中内容。
+
+BUILDING的DDL/空状态/完整性检查不合格一律追加FAILED并返回BLOCKED/UNKNOWN_SCHEMA；候选身份变化则优先隔离。BUILDING I/O或侧文件未归并一律FAILED，返回BLOCKED/IO_FAILURE或SIDECAR_REMAINS；审计记录无法持久则返回BLOCKED/AUDIT_UNAVAILABLE，保留可观察旧状态，恢复按中断构建失败处理。发布目录rename可能发生后I/O/同步不确定仍唯一UNCERTAIN，不追加FAILED；此时发现实际身份或状态冲突才隔离。追加APPROVED等记录失败不允许rename；不因记录可见但未同步而宣称持久成功。
+
+新增验收test_pinned_ddl：替换SQL常量、策略预期值或Manifest.ddl_sha任一项都拒绝；test_failure_classification：同一输入只产生上述唯一结果，覆盖PUBLISH_INTENT/S无/T有/审批不匹配→BLOCKED且无新终态、修复为原匹配批准后允许恢复。风险是实现自证结构或将暂时审批缺失变成永久隔离；对策为受信固定值与确定分类，未满足保持拒绝，所有实验仍NOT_RUN。
+
 ## 5. CD-02：注册表、状态与恢复
 
 介质选择：受保护registry_root下每候选一个目录，不新增业务SQLite表。记录以seq补零20位命名`00000000000000000001.json`，前一条规范字节SHA串链。原子追加：同目录O_EXCL临时文件→完整写/fsync→no-replace重命名为序号文件→fsync注册表目录→读回。临时文件残留不自动删除；记录缺号、重复冲突、hash不匹配即隔离。注册目录首次创建须同步父目录。记录追加失败禁止进入下一破坏性阶段；注册表不足以消除文件系统不确定状态。
@@ -108,7 +118,7 @@ recover不接收批准ID：VERIFIED尚未绑定时返回BLOCKED/APPROVAL_MISMATC
 |---|---|---|---|
 | NONE→RESERVED | 创建者，预算/保留数量合格 | 首记录持久化预算归属；目标名固定等于候选ID | 无候选；AUDIT_UNAVAILABLE |
 | RESERVED→BUILDING | 同锁，新候选目录不存在 | mkdir（已存在即拒绝）创建目录、O_EXCL创建主库；身份读回；记录持久 | FAILED；不复用 |
-| BUILDING→VERIFIED | DDL与完整性/空状态、WAL关闭、冻结复核通过 | manifest及候选目录同步，记录绑定manifest摘要 | FAILED或QUARANTINED |
+| BUILDING→VERIFIED | DDL与完整性/空状态、WAL关闭、冻结复核通过 | manifest及候选目录同步，记录绑定manifest摘要 | 校验不合格FAILED；身份/串链冲突QUARANTINED |
 | VERIFIED→APPROVED | 发布者，外部批准匹配 | 批准ID/摘要写注册记录并同步 | 保持VERIFIED/BLOCKED |
 | APPROVED→PUBLISH_INTENT | 发布者，目标缺失、候选再次核验 | 意图记录先持久化；固定目标/候选/批准 | 无rename，BLOCKED |
 | PUBLISH_INTENT→PUBLISHED_UNACTIVATED | 发布者 | 整目录no-replace rename；同步两父目录；完成记录持久；读回一致 | UNCERTAIN，不激活 |
@@ -121,7 +131,7 @@ recover不接收批准ID：VERIFIED尚未绑定时返回BLOCKED/APPROVAL_MISMATC
 
 | S | T | A | C | 行为 |
 |---|---|---|---|---|
-| 任意 | 任意 | 无/不匹配 | 任意 | BLOCKED或QUARANTINED，不打开SQLite、不rename；不因C绕过审批 |
+| 任意 | 任意 | 无/不匹配 | 任意 | BLOCKED/APPROVAL_MISMATCH，不追加隔离或失败记录，不打开SQLite、不rename；不因C绕过审批 |
 | 有 | 无 | 匹配 | 无 | 仅最新PUBLISH_INTENT允许重新验证后no-replace；禁止从较早状态或终态进入本行 |
 | 无 | 有 | 匹配 | 无 | 仅PUBLISH_INTENT且目标manifest/身份匹配：重新同步两个父目录，追加完成记录、读回；否则隔离 |
 | 无 | 有 | 匹配 | 有 | 最新完成记录ID/摘要与目标一致且后面没有任何有效记录，返回PUBLISHED_UNACTIVATED；不重新创建库 |
