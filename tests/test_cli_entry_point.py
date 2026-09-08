@@ -52,7 +52,26 @@ def _installed_entry_point():
     selected = importlib.metadata.entry_points().select(
         group="console_scripts", name=EXPECTED_SCRIPT
     )
-    return selected[0] if selected else None
+    return next(iter(selected), None)
+
+
+@pytest.mark.parametrize("matches", [0, 1, 2])
+def test_installed_entry_point_selects_real_metadata(monkeypatch, matches):
+    """Select by group/name, preserving the first match without integer indexing."""
+    entry_point = importlib.metadata.EntryPoint
+    expected = entry_point(
+        name=EXPECTED_SCRIPT, value=EXPECTED_TARGET, group="console_scripts"
+    )
+    entries = importlib.metadata.EntryPoints([
+        entry_point(name="other", value="other:main", group="console_scripts"),
+        entry_point(name=EXPECTED_SCRIPT, value="other:main", group="other"),
+        *([expected] if matches else []),
+        *([entry_point(name=EXPECTED_SCRIPT, value="other:main", group="console_scripts")]
+          if matches == 2 else []),
+    ])
+    monkeypatch.setattr(importlib.metadata, "entry_points", lambda: entries)
+
+    assert _installed_entry_point() is (expected if matches else None)
 
 
 def test_installed_entry_point_wiring():

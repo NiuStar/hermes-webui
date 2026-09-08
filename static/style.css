@@ -2874,7 +2874,7 @@
   #btnWorkspacePrefs .workspace-prefs-dot[hidden]{display:none;}
   #btnWorkspacePrefs.active{background:var(--accent-bg);color:var(--text);}
   /* Floating menu — pattern shared with .session-action-menu but scoped */
-  .workspace-prefs-menu{display:block;position:fixed;left:0;top:0;min-width:240px;max-width:min(280px,calc(100vw - 16px));background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.32);z-index:999;overflow:hidden;}
+  .workspace-prefs-menu{display:block;position:fixed;left:0;top:0;width:280px;max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.32);z-index:999;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;}
   .workspace-prefs-item{display:flex;align-items:flex-start;gap:10px;padding:10px 14px;color:var(--text);cursor:pointer;font-size:13px;line-height:1.35;user-select:none;transition:background .12s;}
   .workspace-prefs-item:hover{background:var(--hover-bg);}
   .workspace-prefs-item input{flex-shrink:0;width:14px;height:14px;margin:2px 0 0;accent-color:var(--accent-text);cursor:pointer;}

@@ -20553,14 +20553,16 @@ function _closeWorkspacePrefsMenu(){
 function _positionWorkspacePrefsMenu(anchorEl){
   if(!_workspacePrefsMenu||!anchorEl) return;
   const rect=anchorEl.getBoundingClientRect();
-  const menuW=Math.min(260, Math.max(220, _workspacePrefsMenu.scrollWidth||220));
+  // CSS fixes width before measuring so positioning cannot rewrap the menu.
+  const menuRect=_workspacePrefsMenu.getBoundingClientRect();
+  const menuW=menuRect.width;
   let left=rect.right-menuW;
   if(left<8) left=8;
   if(left+menuW>window.innerWidth-8) left=window.innerWidth-menuW-8;
   let top=rect.bottom+6;
-  const menuH=_workspacePrefsMenu.offsetHeight||0;
+  const menuH=menuRect.height;
   if(top+menuH>window.innerHeight-8 && rect.top>menuH+12) top=rect.top-menuH-6;
-  if(top<8) top=8;
+  top=Math.max(8, Math.min(top, window.innerHeight-menuH-8));
   _workspacePrefsMenu.style.left=left+'px';
   _workspacePrefsMenu.style.top=top+'px';
 }

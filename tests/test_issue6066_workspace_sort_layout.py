@@ -140,3 +140,56 @@ def test_prefs_menu_layout_locales(locale):
             context.close()
         finally:
             browser.close()
+
+
+@pytest.mark.parametrize("width", [320, 480])
+@pytest.mark.parametrize("locale", ["en", "de", "ru"])
+def test_prefs_menu_short_viewport_scroll_and_keyboard(width, locale):
+    sp = _require_playwright()
+    with sp() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        try:
+            context = browser.new_context(viewport={"width": width, "height": 600})
+            page = context.new_page()
+            menu = _open_workspace_prefs(page, "en")
+            page.evaluate("async () => { await skipOnboarding(); }")
+            # Boot settings can override localStorage; exercise the actual locale.
+            page.evaluate("locale => { _closeWorkspacePrefsMenu(); setLocale(locale); toggleWorkspacePrefsMenu(); }", locale)
+            assert page.evaluate("document.documentElement.lang").startswith(locale)
+            assert menu.locator(".workspace-prefs-grouplabel").inner_text() == page.evaluate("t('workspace_sort_by').toUpperCase()")
+            page.set_viewport_size({"width": width, "height": 320})
+            page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+            _assert_menu_inside_viewport(page, menu)
+            page.set_viewport_size({"width": width, "height": 160})
+            page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+            _assert_menu_inside_viewport(page, menu)
+            assert menu.evaluate("el => el.scrollHeight > el.clientHeight")
+            first = page.locator("#workspaceSort_name-asc")
+            first.focus()
+            page.keyboard.press("ArrowDown")
+            assert page.locator("#workspaceSort_name-desc").is_checked()
+            page.keyboard.press("Tab")
+            hidden = page.locator("#workspaceShowHiddenFiles")
+            assert hidden.evaluate("el => el === document.activeElement")
+            assert menu.evaluate("el => el.scrollTop > 0")
+            box = hidden.bounding_box()
+            assert 0 <= box["y"] < box["y"] + box["height"] <= 160
+            page.keyboard.press("Space")
+            assert hidden.is_checked()
+            # Wheel scrolling reaches both ends, without moving the document.
+            menu.hover()
+            page.mouse.wheel(0, -1000)
+            page.wait_for_function("() => document.querySelector('.workspace-prefs-menu').scrollTop === 0")
+            page.mouse.wheel(0, 1000)
+            page.wait_for_function("""() => { const m=document.querySelector('.workspace-prefs-menu');
+                return m.scrollTop + m.clientHeight >= m.scrollHeight - 1; }""")
+            assert page.evaluate("window.scrollY") == 0
+            page.set_viewport_size({"width": width, "height": 600})
+            page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+            _assert_menu_inside_viewport(page, menu)
+            assert menu.evaluate("el => el.scrollHeight === el.clientHeight")
+            page.keyboard.press("Escape")
+            assert menu.count() == 0
+            context.close()
+        finally:
+            browser.close()
