@@ -1,4 +1,4 @@
-# 离线初始化编码设计候选 v3
+# 离线初始化编码设计候选 v4
 
 状态：CODING_DESIGN_REVISED / REVIEW_PENDING。针对93b7599f449c5d65078a6b807e5f1edf00d828c3所记录V2-01—V2-04整改，保留CD-01—CD-06闭包。方案接受记录沿用a36ab6cd2bfb1f527e73c0051917482f946dca31，不撤销用户方案确认；本文件替代旧编码提纲，不覆盖历史审查证据。当前仅文档调整，未授权功能编码、UID/权限变更、SQL执行、部署、激活或删除。
 
@@ -72,7 +72,7 @@ BootstrapContext绑定pid、锁FD、各根目录FD、mount/namespace身份及策
 
 新增DeploymentPolicy为持久严格类型，包含format_version=1、policy_id:CandidateId、creator_uid:int、approver_uid:int、roots:object、ancestors:list、lock_identity:FileIdentity、platform_requirements:object、resource_policy_id:CandidateId、resource_policy_sha:Digest。creator_uid不得等于approver_uid。
 
-roots的精确键为registry_root/approval_root/candidate_root/publish_root/lock_root，每项为{path:str,identity:FileIdentity}。path仅来自root管理的可信配置，必须绝对路径、无NUL、无`.`/`..`分量，不适用CandidateId名称约束；禁止调用请求提供或覆盖。ancestors元素为{path:str,identity:FileIdentity}，逐根列出到文件系统根的祖先，按path排序且不重复，缺任一祖先拒绝。
+roots的精确键为registry_root/approval_root/candidate_root/publish_root/lock_root，每项为{path:str,identity:DirectoryIdentity}。path仅来自root管理的可信配置，必须绝对路径、无NUL、无`.`/`..`分量，不适用CandidateId名称约束；禁止调用请求提供或覆盖。ancestors元素为{path:str,identity:DirectoryIdentity}，逐根列出到文件系统根的祖先，按path排序且不重复，缺任一祖先拒绝。
 
 platform_requirements精确字段：kernel:str、sqlite_version:str、compile_options:list[str]、vfs:str、filesystem:str、mount_id:int、mount_options:list[str]、namespace_id:str；列表按字典序排序且去重，运行读回必须逐项匹配，无法确认即拒绝。此处是固定部署范围，不支持自动迁移到另一namespace。策略键和通用值规则沿用§2。
 
@@ -80,11 +80,25 @@ platform_requirements精确字段：kernel:str、sqlite_version:str、compile_op
 
 记D=DeploymentPolicy规范字节SHA，R=ResourcePolicy规范字节SHA，E=PlatformEvidence规范字节SHA，M=Manifest规范字节SHA。DeploymentPolicy.resource_policy_sha必须=R；PlatformEvidence.approved_policy_sha=D；Manifest.resource_policy_sha=R且platform_evidence_sha=E。PlatformEvidence不包含自身摘要；DeploymentPolicy不含D，避免循环自哈希。
 
-发布必须同时满足：当前ctx重新读取的D与创建时证据中的D相等；当前R与DeploymentPolicy及Manifest中的R相等；当前平台与platform_requirements匹配；候选目录名称=Manifest.candidate_id=请求candidate_id=ApprovalRecord.candidate_id=ApprovalRecord.target_name=注册target_name；ApprovalRecord.manifest_sha=M=最新VERIFIED及后续注册记录绑定摘要；ApprovalRecord.policy_sha=D；批准scope精确PUBLISH_EMPTY_UNACTIVATED；approval_id与文件名及注册绑定相等。M须由当前只读文件重新计算，不用调用者缓存值；主库字节/身份仍需再次核验。
+发布必须同时满足：当前ctx重新读取的D与创建时证据中的D相等；当前R与DeploymentPolicy及Manifest中的R相等；当前平台与platform_requirements匹配；候选目录名称=Manifest.candidate_id=请求candidate_id=ApprovalRecord.candidate_id=ApprovalRecord.target_name=注册target_name；ApprovalRecord.manifest_sha=M=最新VERIFIED及后续注册记录绑定摘要；ApprovalRecord.policy_sha=D；批准scope精确PUBLISH_EMPTY_UNACTIVATED；approval_id与文件名相等；首次VERIFIED→APPROVED及后续注册绑定按§4.2执行。M须由当前只读文件重新计算，不用调用者缓存值；主库字节/身份仍需再次核验。
 
 创建到发布期间D或R变化，旧候选返回BLOCKED/APPROVAL_MISMATCH，不允许改manifest、重新签批同候选来绕过；只有管理者明确恢复完全相同受信策略并重新验证，或另建新候选才可走新流程。新建是否获准仍受预算和授权限制，旧候选保留。批准记录创建后不可更新/替换；重建批准属于单独管理流程，不由发布API代办。审批主体为可信管理者，发布器不把approver_reference文本本身当身份认证。
 
 风险：摘要字段混用使旧批准跨策略生效。对策：上列等式逐项验证、无自动修复；验证见test_policy_digest_binding；回退：不匹配零rename，保留原候选和审批证据。
+
+### 4.2 v4：目录身份、证据持久化与首次批准
+
+DirectoryIdentity精确字段为dev:int、ino:positive、uid:int、gid:int、mode:int；必须是真实目录，无符号链接，五字段逐项匹配。目录nlink/size/mtime/ctime因正常子项变化而变化，只作审计观测，不写入固定策略或用于相等判断。ACL和挂载检查仍单独执行，不因排除nlink而省略。主库及锁文件继续使用FileIdentity，常规文件nlink=1。合法创建/发布不得重写部署策略摘要；根inode替换、权限弱化或主库硬链接仍拒绝。
+
+创建时PlatformEvidence规范全文持久放在`registry_root/<candidate_id>/evidence/<E>.json`，E为其规范字节SHA；evidence目录在同权限域内，必须创建并同步父目录。写入规则为同目录随机O_EXCL临时文件、写完整字节、fsync、no-replace重命名到E.json、fsync evidence目录、读回解析/hash校验。E证据必须在manifest写入和VERIFIED记录之前持久确认；失败返回AUDIT_UNAVAILABLE且不能VERIFIED。证据不放入候选目录，不改变主库+manifest白名单，计入audit_reserve_bytes，所有残留保留。
+
+发布/恢复按Manifest.platform_evidence_sha定位上述受保护文件，无跟随、限长、严格解析、验hash，再验证其中D与当前策略；缺失/损坏返回BLOCKED/APPROVAL_MISMATCH，禁止根据当前平台重新生成历史E。新的运行观测可作单独审计，但不能代替创建证据。证据文件同名已存在时只允许字节完全相同且权限/身份合格的幂等读回，否则隔离；不得覆盖。
+
+首次publish在最新VERIFIED且注册approval_id=null时，读取请求明确指定的批准文件，验证所有非注册审批绑定等式；通过后追加APPROVED（首次写入approval_id），同步并读回，再执行非空审批绑定检查及PUBLISH_INTENT。最新APPROVED/PUBLISH_INTENT/PUBLISHED_UNACTIVATED必须有非空、与请求及批准文件完全相同的approval_id；即使另一个批准候选/摘要相同也禁止替换。FAILED/QUARANTINED仍优先拒绝。
+
+recover不接收批准ID：VERIFIED尚未绑定时返回BLOCKED/APPROVAL_MISMATCH（等待显式发布批准），不扫描批准目录挑选文件；APPROVED及之后只从有效注册链的不可变绑定读取批准，丢失/不一致拒绝。APPROVED记录追加失败无发布rename；重启若发现该记录完整但此前同步结果未知，先重新同步注册目录并读回验证，再继续；临时记录不晋升为正式记录。RESERVED/BUILDING中断不恢复构建，记FAILED并保留；不把完整候选外观当VERIFIED。
+
+风险/对策/验证/回退：目录链接数误拒通过稳定DirectoryIdentity消除；证据丢失禁止合成；审批首次赋值与重入不可变分离。新增验收为test_directory_identity_lifecycle（合法子目录增减策略不变、inode/权限替换拒绝）、test_evidence_restart（创建进程退出后持久读回及丢失/损坏/同步故障拒绝）、test_initial_approval_binding（首次、同ID重入、换ID拒绝、记录失败零rename、未绑定恢复等待）。全部NOT_RUN；任一条件不成立保持BLOCKED，不删除文件。
 
 ## 5. CD-02：注册表、状态与恢复
 
@@ -93,7 +107,7 @@ platform_requirements精确字段：kernel:str、sqlite_version:str、compile_op
 | 原状态→新状态 | 唯一执行者/前置 | 持久动作及成功条件 | 失败 |
 |---|---|---|---|
 | NONE→RESERVED | 创建者，预算/保留数量合格 | 首记录持久化预算归属；目标名固定等于候选ID | 无候选；AUDIT_UNAVAILABLE |
-| RESERVED→BUILDING | 同锁，新候选目录不存在 | O_EXCL创建目录/主库；身份读回；记录持久 | FAILED；不复用 |
+| RESERVED→BUILDING | 同锁，新候选目录不存在 | mkdir（已存在即拒绝）创建目录、O_EXCL创建主库；身份读回；记录持久 | FAILED；不复用 |
 | BUILDING→VERIFIED | DDL与完整性/空状态、WAL关闭、冻结复核通过 | manifest及候选目录同步，记录绑定manifest摘要 | FAILED或QUARANTINED |
 | VERIFIED→APPROVED | 发布者，外部批准匹配 | 批准ID/摘要写注册记录并同步 | 保持VERIFIED/BLOCKED |
 | APPROVED→PUBLISH_INTENT | 发布者，目标缺失、候选再次核验 | 意图记录先持久化；固定目标/候选/批准 | 无rename，BLOCKED |
