@@ -29,6 +29,8 @@
 
 最新补充：注册表字段/状态约束、Manifest字段及PlatformEvidence字段已追加RED→GREEN；截至platform-schema-green-01.xml合同测试30通过。最近一次邻域全组合neighbors-05.xml为126通过（在最后新增平台证据测试之前）。这些均不代表注册串链/真实发布恢复完成。
 
+最后前台增量：DeploymentPolicy/anchor/active合同测试32通过；Linux no-replace及原子记录写入12项通过；注册串链与非法跃迁4项通过，合计邻域neighbors-06.xml实跑145通过。随后完成→隔离→试图恢复完成的串链反例补充通过，terminal-chain-01.xml为5通过。未实现候选构建与发布恢复入口，不能将这些基础层测试称为生命周期通过。Binding独立前台审查PASS，见session-formal-binding-slice.md及会话20260908_120021_6c953c，已核验45项及固定代码SHA。
+
 ## 剩余与门禁
 
 完整DeploymentPolicy/ResourcePolicy/Manifest/Registry/结果联合严格验证、可信上下文与ACL/挂载/VFS/硬限制实证、候选构建冻结、审批绑定、no-replace发布、注册串链和崩溃恢复尚未实现完成。旧schema测试迁移、完整回归、Binding及实现独立终审、代码提交仍待完成。当前只有局部通过，整项NOT_ACCEPTED。
