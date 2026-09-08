@@ -24,7 +24,7 @@
 | FileIdentity | dev:int, ino:positive, uid:int, gid:int, mode:int, nlink:positive | fstat读取；主库nlink必须1；不接受客户端提供值代替读回 |
 | PlatformEvidence | format_version, evidence_id:CandidateId, kernel:str, sqlite_version:str, compile_options:list[str], vfs:str, filesystem:str, mount_id:int, mount_options:list[str], namespace_id:str, approved_policy_sha:Digest | 受控预检输出；只作审计，不作为跨运行权限凭证；vfs等不能确认则拒绝 |
 | ResourcePolicy | format_version, max_candidate_bytes:positive, min_free_bytes:positive, max_retained_candidates:positive, max_rss_bytes:positive, max_elapsed_seconds:positive, check_interval_ms:positive, audit_reserve_bytes:positive, hard_limit_profile_id:CandidateId | 受保护策略文件；具体数值实施前测量批准，无默认值 |
-| Manifest | format_version, candidate_id, ddl_sha:Digest, sqlite_version:str, platform_evidence_sha:Digest, resource_policy_sha:Digest, db_bytes:positive, db_sha:Digest, db_identity:FileIdentity, connection_policy:{foreign_keys:1,synchronous:2}, verification:{integrity_check:"ok",foreign_key_violations:0,empty_state:true}, creator_commit:str | 冻结后生成；creator_commit为完整40或64位小写Git对象ID；manifest不包含自身hash |
+| Manifest | format_version, candidate_id, ddl_sha:Digest, sqlite_version:str, platform_evidence_sha:Digest, resource_policy_sha:Digest, db_bytes:positive, db_sha:Digest, db_identity:FileIdentity, candidate_directory_identity:DirectoryIdentity, connection_policy:{foreign_keys:1,synchronous:2}, verification:{integrity_check:"ok",foreign_key_violations:0,empty_state:true}, creator_commit:str | 冻结后生成；creator_commit为完整40或64位小写Git对象ID；manifest不包含自身hash |
 | ApprovalRecord | format_version, approval_id:CandidateId, candidate_id, manifest_sha:Digest, target_name:CandidateId, policy_sha:Digest, scope:"PUBLISH_EMPTY_UNACTIVATED", approver_reference:str | 独立受信管理入口创建；调用者不能提交dict自行批准；创建后不可改写 |
 | RegistryRecord | format_version, candidate_id, seq:positive, previous_sha:Digest或首条null, state:enum, target_name:CandidateId, manifest_sha:Digest或null, approval_id:CandidateId或null, error_code:enum或null | 当前锁所有者原子追加；可空字段只在尚未产生或无错误时为空 |
 | OperationResult | §3带status判别的严格联合类型 | 不含数据库连接；拒绝分支允许尚无候选ID，不使用空字符串占位 |
@@ -93,6 +93,8 @@ platform_requirements精确字段：kernel:str、sqlite_version:str、compile_op
 ### 4.2 v4：目录身份、证据持久化与首次批准
 
 DirectoryIdentity精确字段为dev:int、ino:positive、uid:int、gid:int、mode:int；必须是真实目录，无符号链接，五字段逐项匹配。目录nlink/size/mtime/ctime因正常子项变化而变化，只作审计观测，不写入固定策略或用于相等判断。ACL和挂载检查仍单独执行，不因排除nlink而省略。主库及锁文件继续使用FileIdentity，常规文件nlink=1。合法创建/发布不得重写部署策略摘要；根inode替换、权限弱化或主库硬链接仍拒绝。
+
+创建时目录FD的DirectoryIdentity在本进程内保持到冻结，冻结时重新比对并写入Manifest.candidate_directory_identity，随M绑定注册链及外部批准；VERIFIED前必须完成清单同步。BUILDING中断不恢复使用，故其内存身份丢失只导致FAILED，不根据外观重建证据。VERIFIED及之后每次发布/恢复，源目录或rename后的目标目录都必须与该持久身份五字段完全相同；同文件系统目录rename保留dev/ino，内容相同但目录被替换也返回QUARANTINED/IDENTITY_CHANGED。先验注册链绑定的M，再验清单，再从打开的目录FD读回身份；不得用当前目录值改写清单。test_directory_identity_lifecycle须覆盖创建进程退出后替换内容相同目录仍拒绝、正常rename后身份一致，以及清单身份篡改使M失败。风险是重启遗忘原目录，固定摘要绑定解决，未验证不得发布。
 
 创建时PlatformEvidence规范全文持久放在`registry_root/<candidate_id>/evidence/<E>.json`，E为其规范字节SHA；evidence目录在同权限域内，必须创建并同步父目录。写入规则为同目录随机O_EXCL临时文件、写完整字节、fsync、no-replace重命名到E.json、fsync evidence目录、读回解析/hash校验。E证据必须在manifest写入和VERIFIED记录之前持久确认；失败返回AUDIT_UNAVAILABLE且不能VERIFIED。证据不放入候选目录，不改变主库+manifest白名单，计入audit_reserve_bytes，所有残留保留。
 
