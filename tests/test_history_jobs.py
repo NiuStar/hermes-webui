@@ -2,9 +2,11 @@
 import importlib.util
 import json
 import multiprocessing
+from pathlib import Path
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import sqlite3
+import sys
 
 import pytest
 
@@ -91,24 +93,53 @@ def _child_claim(path, result):
     result.put(store.claim(scope, job, owner='child', now=1, lease_seconds=10))
 
 
-def test_fresh_process_exit_then_restart_recovers_without_tools(tmp_path):
+def test_fresh_process_exit_then_restart_recovers_without_tools(tmp_path, monkeypatch):
     from api.history_jobs import HistoryJobStore
     ctx = multiprocessing.get_context('spawn')
     result = ctx.Queue()
     path = tmp_path / 'jobs.sqlite'
     process = ctx.Process(target=_child_claim, args=(path, result))
-    process.start()
-    first = result.get(timeout=20)
-    process.join(timeout=20)
-    assert process.exitcode == 0
-    result.close()
-    result.join_thread()
+    # spawn resolves the pickled target in a fresh interpreter. The shared
+    # fixture restores an agent-first sys.path after earlier tests, where the
+    # agent's own `tests` package hides this one. Pin only the spawn snapshot;
+    # never change the shared fixture or the caller's lasting import order.
+    try:
+        with monkeypatch.context() as child_imports:
+            child_imports.syspath_prepend(str(Path(__file__).resolve().parents[1]))
+            process.start()
+        # This single small claim fits in the queue pipe. Check process failure
+        # before receiving so an import crash reports its exit code and stderr,
+        # rather than hiding behind Queue.Empty twenty seconds later.
+        process.join(timeout=20)
+        assert process.exitcode == 0, f'claim child exited with {process.exitcode}'
+        first = result.get(timeout=20)
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=20)
+        if process.pid is not None:
+            process.close()
+        result.close()
+        result.join_thread()
     restarted = HistoryJobStore(path)
     scope = ScopeKey('profile', 'session')
     assert restarted.ready(scope, now=11) == [first['job_id']]
     second = restarted.claim(scope, first['job_id'], owner='restart', now=11, lease_seconds=10)
     assert second['fence'] == 2
     assert json.loads(restarted.get(scope, first['job_id'])['input_json']) == observation()
+
+
+def test_restart_with_shadowing_tests_package_preserves_parent_path(tmp_path, monkeypatch):
+    shadow = tmp_path / 'other-checkout'
+    package = shadow / 'tests'
+    package.mkdir(parents=True)
+    (package / '__init__.py').write_text('', encoding='utf-8')
+    monkeypatch.syspath_prepend(str(shadow))
+    before = list(sys.path)
+    children_before = {p.pid for p in multiprocessing.active_children()}
+    test_fresh_process_exit_then_restart_recovers_without_tools(tmp_path, monkeypatch)
+    assert sys.path == before
+    assert {p.pid for p in multiprocessing.active_children()} == children_before
 
 
 @pytest.mark.parametrize('terminal', ['normal', 'cancelled', 'failed'])
