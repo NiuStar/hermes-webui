@@ -286,15 +286,15 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
     try:
         if _mode == 'zip':
             with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
-                for member in zf.infolist():
-                    # Skip directories
-                    if member.is_dir():
-                        continue
-                    if len(extracted_files) >= _MAX_ARCHIVE_MEMBERS:
-                        raise ValueError(
-                            f'Archive has too many files (> {_MAX_ARCHIVE_MEMBERS}). '
-                            f'Possible archive bomb.'
-                        )
+                # Reject metadata before creating any member files. Counting while
+                # extracting spends the inode budget before rejecting the archive.
+                members = [member for member in zf.infolist() if not member.is_dir()]
+                if len(members) > _MAX_ARCHIVE_MEMBERS:
+                    raise ValueError(
+                        f'Archive has too many files (> {_MAX_ARCHIVE_MEMBERS}). '
+                        f'Possible archive bomb.'
+                    )
+                for member in members:
                     # Zip-slip protection
                     member_path = (dest_dir / member.filename).resolve()
                     if not member_path.is_relative_to(dest_dir.resolve()):
@@ -329,14 +329,13 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
 
         elif _mode == 'tar':
             with tarfile.open(fileobj=io.BytesIO(file_bytes)) as tf:
-                for member in tf.getmembers():
-                    if not member.isfile():
-                        continue
-                    if len(extracted_files) >= _MAX_ARCHIVE_MEMBERS:
-                        raise ValueError(
-                            f'Archive has too many files (> {_MAX_ARCHIVE_MEMBERS}). '
-                            f'Possible archive bomb.'
-                        )
+                members = [member for member in tf.getmembers() if member.isfile()]
+                if len(members) > _MAX_ARCHIVE_MEMBERS:
+                    raise ValueError(
+                        f'Archive has too many files (> {_MAX_ARCHIVE_MEMBERS}). '
+                        f'Possible archive bomb.'
+                    )
+                for member in members:
                     # Tar-slip protection
                     member_path = (dest_dir / member.name).resolve()
                     if not member_path.is_relative_to(dest_dir.resolve()):

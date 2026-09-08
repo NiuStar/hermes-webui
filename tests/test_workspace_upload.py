@@ -747,6 +747,52 @@ class TestWorkspaceUploadArchive:
         assert not (ws / "many").exists()
 
 
+@pytest.mark.parametrize("archive_format", ["zip", "tar"])
+def test_archive_member_cap_rejects_before_member_creation(tmp_path, monkeypatch, archive_format):
+    """Reject over-limit metadata without spending the inode budget first."""
+    import api.upload as upload
+
+    members = {f"f{i}.txt": b"x" for i in range(10001)}
+    data = _make_zip(members) if archive_format == "zip" else _make_tar(members)
+
+    def unexpected_create(*args, **kwargs):
+        pytest.fail("over-limit archive attempted to create a member before rejection")
+
+    monkeypatch.setattr(upload, "open_anchored_create_fd", unexpected_create)
+    with pytest.raises(ValueError, match="too many files"):
+        upload.extract_archive(data, f"many.{archive_format}", tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("archive_format", ["zip", "tar"])
+@pytest.mark.parametrize("file_count", [0, 1, 10000])
+def test_archive_member_cap_accepts_boundary(tmp_path, archive_format, file_count):
+    """The limit is inclusive and directories do not consume the file budget."""
+    import tarfile
+    from api.upload import extract_archive
+
+    buf = io.BytesIO()
+    if archive_format == "zip":
+        with zipfile.ZipFile(buf, "w") as archive:
+            archive.writestr("folder/", b"")
+            for i in range(file_count):
+                archive.writestr(f"folder/f{i}", b"x")
+    else:
+        with tarfile.open(fileobj=buf, mode="w") as archive:
+            directory = tarfile.TarInfo("folder")
+            directory.type = tarfile.DIRTYPE
+            archive.addfile(directory)
+            for i in range(file_count):
+                member = tarfile.TarInfo(f"folder/f{i}")
+                member.size = 1
+                archive.addfile(member, io.BytesIO(b"x"))
+    result = extract_archive(buf.getvalue(), f"boundary.{archive_format}", tmp_path)
+    assert result["extracted"] == file_count
+    assert len(result["files"]) == file_count
+    if file_count:
+        assert (tmp_path / result["files"][-1]).read_bytes() == b"x"
+
+
 # ── Hardening regression tests (v0.51.208 hotfix) ──────────────────────────
 
 def test_parse_multipart_rejects_negative_content_length():

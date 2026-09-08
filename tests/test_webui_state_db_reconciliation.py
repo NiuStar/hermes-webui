@@ -1401,8 +1401,9 @@ def test_metadata_poll_uses_sidecar_message_count_for_external_updates(monkeypat
     assert session["last_message_at"] == 1001.0
 
 
-def test_deferred_session_model_resolution_uses_profile_provider(monkeypatch, tmp_path):
-    """Deferred GET /api/session resolution must repair against profile config."""
+@pytest.fixture
+def deferred_model_session(monkeypatch, tmp_path):
+    """Historical identity and a conflicting, real profile config."""
     import api.profiles as profiles
     import api.routes as routes
 
@@ -1443,17 +1444,91 @@ def test_deferred_session_model_resolution_uses_profile_provider(monkeypatch, tm
     )
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "anthropic")
 
-    session_path = tmp_path / "sessions" / f"{sid}.json"
-    before = session_path.read_text(encoding="utf-8")
+    return session
 
-    handler = _GetHandler(f"/api/session?session_id={sid}&messages=0&resolve_model=1")
-    routes.handle_get(handler, urlparse(handler.path))
 
-    assert handler.status == 200
-    payload = handler.response_json["session"]
-    assert payload["model"] == "claude-sonnet-4.6"
-    assert payload["model_provider"] == "anthropic"
-    assert session_path.read_text(encoding="utf-8") == before
+@pytest.mark.parametrize("messages,resolve_model", [(0, 0), (0, 1), (1, 1)])
+def test_deferred_session_model_resolution_preserves_history(
+    monkeypatch, tmp_path, deferred_model_session, messages, resolve_model,
+):
+    """A profile change is not permission to rewrite historical GET identity."""
+    import api.models as models
+    import api.routes as routes
+
+    session = deferred_model_session
+    sid = session.session_id
+    _make_state_db(tmp_path / "state.db", sid, [])
+    paths = [tmp_path / "sessions" / f"{sid}.json",
+             tmp_path / "sessions" / "_index.json", tmp_path / "state.db"]
+    before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in paths}
+
+    def forbidden_save(*args, **kwargs):
+        pytest.fail("GET must not save a session")
+
+    monkeypatch.setattr(models.Session, "save", forbidden_save)
+    for active_profile in ("anthropic", "default", "anthropic"):
+        monkeypatch.setattr(routes, "_get_active_profile_name", lambda name=active_profile: name)
+        handler = _GetHandler(
+            f"/api/session?session_id={sid}&messages={messages}&resolve_model={resolve_model}"
+        )
+        routes.handle_get(handler, urlparse(handler.path))
+        if active_profile == "default":
+            assert handler.status == 409
+            assert handler.response_json["code"] == "session_profile_mismatch"
+            assert handler.response_json["profile"] == "anthropic"
+        else:
+            assert handler.status == 200
+            payload = handler.response_json["session"]
+            assert payload["model"] == "openai/gpt-5.4-mini"
+            # A slash namespace is not explicit @provider: routing provenance.
+            assert payload["model_provider"] is None
+            assert payload["profile"] == "anthropic"
+        assert {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in paths} == before
+        assert (session.model, session.model_provider) == ("openai/gpt-5.4-mini", None)
+
+
+def test_deferred_session_chat_start_still_repairs_from_profile(
+    monkeypatch, tmp_path, deferred_model_session,
+):
+    """The real chat handler, unlike GET, hands a runnable profile pair to the runner."""
+    import api.routes as routes
+
+    session = deferred_model_session
+    captured = {}
+
+    def start_run(s, **kwargs):
+        captured.update(kwargs)
+        routes._prepare_chat_start_session_for_stream(
+            s, msg=kwargs["msg"], attachments=kwargs["attachments"],
+            workspace=kwargs["workspace"], model=kwargs["model"],
+            model_provider=kwargs["model_provider"], stream_id="profile-repair-test",
+        )
+        return {"stream_id": "profile-repair-test"}
+
+    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda *_a, **_k: session)
+    monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda *_: str(tmp_path))
+    monkeypatch.setattr(routes, "_start_run", start_run)
+    monkeypatch.setattr(routes, "j", lambda _h, payload, status=200: payload)
+    routes._handle_chat_start(None, {"session_id": session.session_id, "message": "continue"})
+    assert (captured["model"], captured["model_provider"]) == ("claude-sonnet-4.6", "anthropic")
+    stored = json.loads((tmp_path / "sessions" / f"{session.session_id}.json").read_text())
+    assert (stored["model"], stored["model_provider"]) == ("claude-sonnet-4.6", "anthropic")
+
+
+def test_deferred_session_missing_model_uses_profile_default(
+    monkeypatch, deferred_model_session,
+):
+    """The history guard must not suppress the existing missing-model fallback."""
+    import api.routes as routes
+
+    session = deferred_model_session
+    session.model = ""
+    monkeypatch.setattr(routes, "get_available_models", lambda **_k: {
+        "active_provider": "openai-codex", "default_model": "gpt-5.5", "groups": [],
+    })
+    assert routes._resolve_effective_session_model_for_display(session) == "claude-sonnet-4.6"
+    assert routes._resolve_effective_session_model_provider_for_display(session) == "anthropic"
+    assert (session.model, session.model_provider) == ("", None)
 
 
 def test_metadata_poll_prefers_sidecar_count_when_index_is_stale(monkeypatch, tmp_path):
