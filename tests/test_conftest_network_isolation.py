@@ -97,34 +97,74 @@ def test_public_ipv4_is_blocked():
     assert _conftest._hermes_addr_is_local("204.0.113.0") is False  # outside
 
 
-def test_allow_outbound_network_fixture_unswaps_the_wrappers(allow_outbound_network):
-    """When a test opts in to the fixture, socket.create_connection and
-    socket.socket.connect are restored to their real (unwrapped) implementations
-    for this test only.
+def test_allow_outbound_network_fixture_unswaps_the_wrappers(
+    allow_outbound_network, monkeypatch,
+):
+    """Reach DNS for a public destination without making a real connection."""
+    class ReachedResolver(Exception):
+        pass
 
-    Check by qname so this is robust against pytest re-importing conftest
-    under multiple roots (which produces two distinct function objects with
-    the same __qualname__ but different `is` identity).
-    """
-    # Inside the fixture, the symbol should NOT be the blocked wrapper.
-    assert "_hermes_blocked_create_connection" not in getattr(
-        socket.create_connection, "__qualname__", ""
-    ), "allow_outbound_network fixture did not restore the real create_connection"
-    assert "_hermes_blocked_socket_connect" not in getattr(
-        socket.socket.connect, "__qualname__", ""
-    ), "allow_outbound_network fixture did not restore the real socket.connect"
+    def resolver(host, port, *args, **kwargs):
+        assert (host, port) == ("8.8.8.8", 53)
+        raise ReachedResolver
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolver)
+    with pytest.raises(ReachedResolver):
+        socket.create_connection(("8.8.8.8", 53), timeout=1)
 
 
 def test_block_is_active_outside_the_fixture():
-    """Sanity: a test that does NOT request the fixture has the wrapped
-    socket.create_connection installed.
+    """Collection may add server.py's guard; enforce behavior, not its name."""
+    with pytest.raises(OSError, match="hermes test network isolation"):
+        socket.create_connection(("8.8.8.8", 53), timeout=1)
+    with socket.socket() as client:
+        with pytest.raises(OSError, match="hermes test network isolation"):
+            client.connect(("8.8.8.8", 53))
 
-    Check by qname so this is robust against pytest re-importing conftest
-    under multiple roots (which produces two distinct function objects with
-    the same __qualname__ but different `is` identity)."""
-    assert "_hermes_blocked_create_connection" in getattr(
-        socket.create_connection, "__qualname__", ""
-    ), "default state should have the blocked wrapper installed on socket.create_connection"
-    assert "_hermes_blocked_socket_connect" in getattr(
-        socket.socket.connect, "__qualname__", ""
-    ), "default state should have the blocked wrapper installed on socket.socket.connect"
+
+@pytest.mark.parametrize("fail_in_body", [False, True])
+def test_opt_in_restores_exact_wrapper_chain(fail_in_body):
+    """Preserve even an additional collection-installed guard on every exit."""
+    import tests.conftest as conftest
+
+    before = (socket.create_connection, socket.socket.connect)
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            fixture = conftest.allow_outbound_network.__wrapped__(patch)
+            next(fixture)
+            try:
+                assert socket.create_connection is conftest._REAL_CREATE_CONNECTION
+                assert socket.socket.connect is conftest._REAL_SOCKET_CONNECT
+                if fail_in_body:
+                    raise RuntimeError("simulated test failure")
+            finally:
+                with pytest.raises(StopIteration):
+                    next(fixture)
+    except RuntimeError as exc:
+        assert str(exc) == "simulated test failure"
+    assert (socket.create_connection, socket.socket.connect) == before
+    test_block_is_active_outside_the_fixture()
+    test_loopback_v4_is_allowed()
+
+
+@pytest.mark.parametrize("host", ["10.0.0.5", "172.16.5.1", "192.168.1.22", "169.254.169.254"])
+def test_private_destinations_reach_transport(monkeypatch, host):
+    """Both installed wrapper chains allow private IPs, without LAN traffic."""
+    import tests.conftest as conftest
+
+    calls = []
+    marker = object()
+
+    def create(address, *args, **kwargs):
+        calls.append(address)
+        return marker
+
+    def connect(client, address):
+        calls.append(address)
+
+    monkeypatch.setattr(conftest, "_REAL_CREATE_CONNECTION", create)
+    monkeypatch.setattr(conftest, "_REAL_SOCKET_CONNECT", connect)
+    assert socket.create_connection((host, 443), timeout=1) is marker
+    with socket.socket() as client:
+        client.connect((host, 443))
+    assert calls == [(host, 443), (host, 443)]

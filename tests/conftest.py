@@ -593,9 +593,12 @@ def allow_outbound_network(monkeypatch):
     than a module-global toggle on CI runners where wrapper-closure
     lookup semantics can surprise.
 
-    Use sparingly. Today zero tests in the repo call this — the previous
-    test_dns_resolution_failure case was rewritten to mock socket.getaddrinfo
-    instead, which is fully hermetic.
+    opt-in = original transports; teardown = exact pre-test wrapper chain,
+    which may include server.py's collection-installed network guard. Do not
+    replace that chain with a guessed wrapper based on its function name.
+
+    Use sparingly. The fixture's own regression checks reach a stub resolver,
+    never a public service; other outbound tests should mock their transport.
     """
     monkeypatch.setattr(_hermes_test_socket, "create_connection", _REAL_CREATE_CONNECTION)
     monkeypatch.setattr(_hermes_test_socket.socket, "connect", _REAL_SOCKET_CONNECT)
@@ -1118,31 +1121,45 @@ def base_url():
     return TEST_BASE
 
 
-# ── Per-test model cache invalidation ────────────────────────────────────────
-# The TTL cache for get_available_models() persists across tests within the
-# same process. Tests that modify cfg in-memory won't trigger the mtime path,
-# so the cache must be explicitly invalidated after each test that exercises
-# provider/model detection.
+# ── Per-test config snapshot and model cache invalidation ───────────────────
+# The disk-loaded dictionary and its path/mtime/fingerprint form one cache.
+# Keep them together across test teardown; the model TTL is derived state.
 
 @pytest.fixture(autouse=True)
-def _invalidate_models_cache_after_test():
-    """Force the TTL cache to be cleared before and after every test.
+def _invalidate_models_cache_after_test(
+    _isolate_hermes_config_path, _restore_profile_home_globals,
+):
+    """Own the config cache and its disk identity for one test.
 
-    This prevents state bleed where a test that calls get_available_models()
-    populates the cache with a particular config, and the next test sees stale
-    results even though it has mutated _cfg_cache in-memory.
+    Run after the home/path guards, but before test-local monkeypatch fixtures.
+    Restoring only the model TTL is insufficient: reload_config() mutates the
+    shared dictionary AND its path/mtime/fingerprint. A finally block inside a
+    test still sees its patched path, so reloading there leaks that identity.
+    Restore the complete snapshot without disk IO, after test-local teardown;
+    leave same-test path changes and reload behavior entirely intact.
     """
+    import copy
+    import api.config as config
+
+    cache = config._cfg_cache
+    saved_cache = copy.deepcopy(cache)
+    saved_cfg = config.cfg
+    saved_override = copy.deepcopy(saved_cfg) if isinstance(saved_cfg, dict) and saved_cfg is not cache else None
+    identity = (config._cfg_path, config._cfg_mtime, config._cfg_fingerprint)
+    config.invalidate_models_cache()
     try:
-        from api.config import invalidate_models_cache
-        invalidate_models_cache()
-    except Exception:
-        pass
-    yield
-    try:
-        from api.config import invalidate_models_cache
-        invalidate_models_cache()
-    except Exception:
-        pass
+        yield
+    finally:
+        with config._cfg_lock:
+            cache.clear()
+            cache.update(saved_cache)
+            config._cfg_cache = cache
+            if saved_override is not None:
+                saved_cfg.clear()
+                saved_cfg.update(saved_override)
+            config.cfg = saved_cfg
+            config._cfg_path, config._cfg_mtime, config._cfg_fingerprint = identity
+        config.invalidate_models_cache()
 
 
 # ── Per-test hermes_cli module integrity guard ───────────────────────────────
