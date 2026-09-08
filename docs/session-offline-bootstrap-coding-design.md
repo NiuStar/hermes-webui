@@ -76,6 +76,8 @@ roots的精确键为registry_root/approval_root/candidate_root/publish_root/lock
 
 platform_requirements精确字段：kernel:str、sqlite_version:str、compile_options:list[str]、vfs:str、filesystem:str、mount_id:int、mount_options:list[str]、namespace_id:str；列表按字典序排序且去重，运行读回必须逐项匹配，无法确认即拒绝。此处是固定部署范围，不支持自动迁移到另一namespace。策略键和通用值规则沿用§2。
 
+全部署唯一锁固定为`/etc/hermes-display-bootstrap/bootstrap.lock`，根目录root所有且creator不可写。root预置常规锁文件，creator仅获打开及flock所需权限，无父目录写权限。不可切换的root管理`anchor.json`严格包含format_version=1、lock_path（上述固定值）、lock_identity:FileIdentity；身份由部署前实证写入。所有策略lock_root及lock_identity必须与此锚点精确匹配，否则拒绝；不得由active或调用者选锁。上下文先读验anchor并打开同一固定锁，再持锁读取active/策略；管理员切换、恢复active也持这把锁直到文件及父目录fsync和读回结束。新旧策略执行者因此竞争同一锁，不能在同步前进入。anchor/锁inode/根身份在运行期间不可替换；锁迁移只可在另获授权、停止全部执行者并排空后离线重新部署，不在本协议支持，发现变化即拒绝。新增test_global_anchor_lock覆盖D0/L0与D1/L1配置拒绝、管理端active替换与目录同步期间执行器LOCK_BUSY、回退同锁、锁inode替换拒绝。风险是换策略绕开互斥；固定不可变锚点防止，未验证不得运行。
+
 当前生效锚点固定为`/etc/hermes-display-bootstrap/active.json`，root管理、creator只读；严格字段format_version=1、policy_id:CandidateId、deployment_policy_sha:Digest。管理员使用临时写/fsync/原子替换/fsync父目录更新；此为独立管理授权操作，不由本切片执行。acquire参数policy_id只能断言与active一致，不能选择历史策略；读取策略规范SHA必须等于active.deployment_policy_sha。每个发布入口和rename前重新读回active，变化返回BLOCKED/APPROVAL_MISMATCH；管理者变更active必须遵守相同全局锁协议，专用执行者持锁期间禁止管理者替换，排除检查到rename窗口。保留旧策略文件不使其可加载；只有管理者明确将active恢复到该ID与摘要且持久确认才算允许回退。active缺失/损坏或权限不可信失败关闭；当前用户提供ID、历史批准均不能建立active资格。新增test_active_policy_anchor覆盖保留D0文件但active=D1时指定D0拒绝、审批匹配也拒绝、管理变更锁竞争及授权恢复D0。
 
 可信管理预置策略根`/etc/hermes-display-bootstrap/policies/`：root所有且不可由creator_uid写入，策略文件`<policy_id>.json`，资源文件`resources/<resource_policy_id>.json`；均无跟随读取且验证祖先权限。路径是拟实施配置，不在本轮创建。任何元数据总大小仍受65536字节限制，超限拒绝，不截断祖先清单。
