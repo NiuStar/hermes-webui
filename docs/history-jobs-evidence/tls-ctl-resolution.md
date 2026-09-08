@@ -76,6 +76,8 @@ tests/test_ctl_foreign_server_guard.py tests/test_ctl_bash32_compat.py
 并以 `parent-60-gate` 重跑两个完整目标模块：返回码0，24通过、0跳过，
 回收7个后代、remaining_children=[]。这不是增加超时规避原失败：原失败根因为
 响应边界和子进程回收，修复前后的断言保持不变。
+另以明确故意失败的执行器自测 `parent-exit-probe` 验证：内部pytest返回1，
+外层执行器也返回1、remaining_children=[]；不把此负对照计入产品失败数。
 `.venv/bin/python -m ruff check tests/run_tls_ctl.py tests/test_tls_aware_probe.py`
 实际返回 `All checks passed!`；`git diff --check` 通过。
 
