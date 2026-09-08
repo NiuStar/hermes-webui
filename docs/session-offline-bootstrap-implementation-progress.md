@@ -27,6 +27,8 @@
 
 限容负对照真实写入55988224字节后ENOSPC(errno28)，独立审计卷仍能fsync并读回审计JSON；审批根真实O_CREAT被拒。证据为.10 /opt/hermes-bootstrap-tests/audit-volume-01/registry/quota-negative-01.json。候选volume-01已被负对照填满，保留文件，不删除腾空间；后续功能测试须另建隔离卷并重新绑定身份，不能沿用此满卷。首次脚本因root默认文件权限不可读失败，仅将该无秘密测试脚本改为0644后执行，不放宽审批或数据权限。
 
+最新补充：注册表字段/状态约束、Manifest字段及PlatformEvidence字段已追加RED→GREEN；截至platform-schema-green-01.xml合同测试30通过。最近一次邻域全组合neighbors-05.xml为126通过（在最后新增平台证据测试之前）。这些均不代表注册串链/真实发布恢复完成。
+
 ## 剩余与门禁
 
 完整DeploymentPolicy/ResourcePolicy/Manifest/Registry/结果联合严格验证、可信上下文与ACL/挂载/VFS/硬限制实证、候选构建冻结、审批绑定、no-replace发布、注册串链和崩溃恢复尚未实现完成。旧schema测试迁移、完整回归、Binding及实现独立终审、代码提交仍待完成。当前只有局部通过，整项NOT_ACCEPTED。
