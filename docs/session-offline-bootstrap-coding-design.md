@@ -1,6 +1,6 @@
-# 离线初始化编码设计候选 v2
+# 离线初始化编码设计候选 v3
 
-状态：CODING_DESIGN_REVISED / REVIEW_PENDING。针对93a8101bb5295966b3d5b7bde50bec63f4bb4137所记录CD-01—CD-06修订。方案接受记录沿用a36ab6cd2bfb1f527e73c0051917482f946dca31，不撤销用户方案确认；本文件替代旧编码提纲，不覆盖历史审查证据。当前仅文档调整，未授权功能编码、UID/权限变更、SQL执行、部署、激活或删除。
+状态：CODING_DESIGN_REVISED / REVIEW_PENDING。针对93b7599f449c5d65078a6b807e5f1edf00d828c3所记录V2-01—V2-04整改，保留CD-01—CD-06闭包。方案接受记录沿用a36ab6cd2bfb1f527e73c0051917482f946dca31，不撤销用户方案确认；本文件替代旧编码提纲，不覆盖历史审查证据。当前仅文档调整，未授权功能编码、UID/权限变更、SQL执行、部署、激活或删除。
 
 ## 1. 最小交付与模块
 
@@ -27,7 +27,7 @@
 | Manifest | format_version, candidate_id, ddl_sha:Digest, sqlite_version:str, platform_evidence_sha:Digest, resource_policy_sha:Digest, db_bytes:positive, db_sha:Digest, db_identity:FileIdentity, connection_policy:{foreign_keys:1,synchronous:2}, verification:{integrity_check:"ok",foreign_key_violations:0,empty_state:true}, creator_commit:str | 冻结后生成；creator_commit为完整40或64位小写Git对象ID；manifest不包含自身hash |
 | ApprovalRecord | format_version, approval_id:CandidateId, candidate_id, manifest_sha:Digest, target_name:CandidateId, policy_sha:Digest, scope:"PUBLISH_EMPTY_UNACTIVATED", approver_reference:str | 独立受信管理入口创建；调用者不能提交dict自行批准；创建后不可改写 |
 | RegistryRecord | format_version, candidate_id, seq:positive, previous_sha:Digest或首条null, state:enum, target_name:CandidateId, manifest_sha:Digest或null, approval_id:CandidateId或null, error_code:enum或null | 当前锁所有者原子追加；可空字段只在尚未产生或无错误时为空 |
-| PublishResult | status:enum, code:enum, candidate_id, target_name, registry_seq:int, evidence_sha:Digest或null | 结果不含数据库连接；仅PUBLISHED_UNACTIVATED表示发布持久确认，不表示激活 |
+| OperationResult | §3带status判别的严格联合类型 | 不含数据库连接；拒绝分支允许尚无候选ID，不使用空字符串占位 |
 
 字符串必须非空、严格UTF-8可编码，普通元数据字符串最多4096编码字节；无Unicode归一化、无替换。名称字段只用CandidateId，不接受斜杠、点、URI或绝对路径。每份元数据最大65536字节；数组最多256项，每项遵守字符串限制。
 
@@ -38,14 +38,23 @@
 以下是待实现的签名规范，不是已存在接口：
 
 - `acquire_bootstrap_context(policy_id: CandidateId) -> BootstrapContext`：仅服务端入口，读取受保护部署策略并实时预检；私有构造器、不可序列化、不可跨进程使用、退出context后失效。不能把它当作抵御进程内任意Python执行的密码学能力；专用进程及OS隔离是信任边界。
-- `create_candidate(ctx) -> CandidateResult`：ctx内生成ID、保留预算、排他创建；不接受已有连接/自定义路径。成功返回VERIFIED候选ID和manifest摘要，不自动批准。
+- `create_candidate(ctx) -> OperationResult`：ctx内生成ID、保留预算、排他创建；不接受已有连接/自定义路径。成功返回VERIFIED候选ID和manifest摘要，不自动批准。
 - `load_approval(ctx, approval_id) -> ApprovalRecord`：只从固定批准根无跟随读取，核验权限与内容；调用API本身不生成批准。
-- `publish_candidate(ctx, candidate_id, approval_id) -> PublishResult`：持锁读回身份/注册表/批准，精确匹配后发布。
-- `recover_candidate(ctx, candidate_id) -> PublishResult`：同锁和同身份验证；按§5判断，不创建新业务库、不删除。
+- `publish_candidate(ctx, candidate_id, approval_id) -> OperationResult`：持锁读回身份/注册表/批准，精确匹配后发布。
+- `recover_candidate(ctx, candidate_id) -> OperationResult`：同锁和同身份验证；按§5判断，不创建新业务库、不删除。
 
-CandidateResult同PublishResult字段，成功status=VERIFIED。发布返回status仅PUBLISHED_UNACTIVATED、BLOCKED、QUARANTINED、UNCERTAIN；绝无ELIGIBLE/ACTIVE。错误码：INVALID_INPUT、NONCANONICAL_RECORD、UNSUPPORTED_PLATFORM、ACCESS_BOUNDARY_UNPROVEN、LOCK_BUSY、POLICY_MISSING、RESOURCE_LIMIT、AUDIT_UNAVAILABLE、UNKNOWN_SCHEMA、SIDECAR_REMAINS、IDENTITY_CHANGED、APPROVAL_MISMATCH、TARGET_CONFLICT、STATE_CONFLICT、IO_FAILURE、DURABILITY_UNCERTAIN、LEGACY_INITIALIZER_DISABLED。
+所有API先验证输入，再验证ctx/pid/锁，再检查运行前提，最后执行状态判断。`acquire_bootstrap_context`和`load_approval`失败抛`BootstrapRejected(code)`；前者失败不返回ctx，后者失败不返回批准对象。三项操作API返回以下OperationResult联合类型；无有效ctx时返回BLOCKED而非创建新ctx。操作API内可预见的BootstrapRejected转换为BLOCKED，意外程序错误不伪装成功；KeyboardInterrupt/SystemExit仍按下文传播。
 
-输入校验失败不得创建目录或打开SQLite。SQLite错误映射UNKNOWN_SCHEMA或IO_FAILURE并保留原异常类型于受保护审计，不输出敏感内容；OSError保留errno。任何rename之后的同步/记录错误返回UNCERTAIN/DURABILITY_UNCERTAIN，不能返回普通可重试失败。KeyboardInterrupt/SystemExit不吞掉：finally关闭连接/FD释放锁，尽力记录；重启以磁盘状态判定，不能依赖异常处理一定运行。
+各分支均有format_version=1，禁止跨分支额外字段：
+- VERIFIED：status="VERIFIED", code="OK", candidate_id:CandidateId, target_name:CandidateId, registry_seq:positive, manifest_sha:Digest。仅create成功使用。
+- PUBLISHED_UNACTIVATED：status同名，code="OK"，candidate_id、target_name、registry_seq、manifest_sha与上同，另有completion_record_sha:Digest，覆盖最新持久完成记录的规范字节。只在最新状态确为完成且所有读回通过时使用。
+- BLOCKED：status同名，code为下列拒绝码，candidate_id:CandidateId|null, target_name:CandidateId|null, registry_seq:int|null。尚未生成/验证ID时两ID均null；已验证ID时target_name必须与其相等。registry_seq仅在注册链读回成功时有值，否则null。不含成功摘要。
+- QUARANTINED：status同名，code="STATE_CONFLICT"或"IDENTITY_CHANGED"，ID字段同BLOCKED；registry_seq同上，quarantine_persisted:bool，只有隔离记录同步并读回才为true，false同样禁止继续操作。
+- UNCERTAIN：status同名，code="DURABILITY_UNCERTAIN"，candidate_id和target_name非null且相等，registry_seq:int|null。仅发布目录rename可能发生之后使用，不携带完成成功证据。
+
+拒绝码：INVALID_INPUT、NONCANONICAL_RECORD、UNSUPPORTED_PLATFORM、ACCESS_BOUNDARY_UNPROVEN、LOCK_BUSY、POLICY_MISSING、RESOURCE_LIMIT、AUDIT_UNAVAILABLE、UNKNOWN_SCHEMA、SIDECAR_REMAINS、IDENTITY_CHANGED、APPROVAL_MISMATCH、TARGET_CONFLICT、STATE_CONFLICT、IO_FAILURE、LEGACY_INITIALIZER_DISABLED。OK只能用于成功分支；FAILED最新状态映射BLOCKED/STATE_CONFLICT，QUARANTINED最新状态映射QUARANTINED/STATE_CONFLICT。废除未定义的evidence_sha字段，manifest_sha与completion_record_sha不得混用。
+
+输入校验失败不得创建目录或打开SQLite。SQLite错误映射UNKNOWN_SCHEMA或IO_FAILURE并保留原异常类型于受保护审计，不输出敏感内容；OSError保留errno。发布目录rename成功或结果不确定之后的同步/记录错误返回UNCERTAIN/DURABILITY_UNCERTAIN，不能返回普通可重试失败。KeyboardInterrupt/SystemExit不吞掉：finally关闭连接/FD释放锁，尽力记录；重启以磁盘状态判定，不能依赖异常处理一定运行。
 
 ## 4. CD-03：权限、锁和证据寿命
 
@@ -58,6 +67,24 @@ CandidateResult同PublishResult字段，成功status=VERIFIED。发布返回stat
 BootstrapContext绑定pid、锁FD、各根目录FD、mount/namespace身份及策略摘要；每个入口验证ctx未关闭且pid一致。持锁跨越预算预留、候选创建、SQLite打开到关闭、hash、验证、批准读回、rename及同步/恢复。审批可以在创建退出锁后发生；发布重新获取新ctx并全量核验，不沿用旧证据。每次进入预检及阶段边界重查身份/策略；边界检查只能发现变化，防止中间替换依赖持续OS权限与可信管理者不并发改变部署的前提。无法保证此前提即不运行，不把检查快照当证明。
 
 关闭路径：SQLite rollback/close尽力执行，不执行清理DELETE；随后关闭所有候选/根FD，最后解锁并关闭锁FD。失败文件保留；OS进程退出释放锁不代表候选已安全。
+
+### 4.1 V2-04：部署策略与摘要绑定
+
+新增DeploymentPolicy为持久严格类型，包含format_version=1、policy_id:CandidateId、creator_uid:int、approver_uid:int、roots:object、ancestors:list、lock_identity:FileIdentity、platform_requirements:object、resource_policy_id:CandidateId、resource_policy_sha:Digest。creator_uid不得等于approver_uid。
+
+roots的精确键为registry_root/approval_root/candidate_root/publish_root/lock_root，每项为{path:str,identity:FileIdentity}。path仅来自root管理的可信配置，必须绝对路径、无NUL、无`.`/`..`分量，不适用CandidateId名称约束；禁止调用请求提供或覆盖。ancestors元素为{path:str,identity:FileIdentity}，逐根列出到文件系统根的祖先，按path排序且不重复，缺任一祖先拒绝。
+
+platform_requirements精确字段：kernel:str、sqlite_version:str、compile_options:list[str]、vfs:str、filesystem:str、mount_id:int、mount_options:list[str]、namespace_id:str；列表按字典序排序且去重，运行读回必须逐项匹配，无法确认即拒绝。此处是固定部署范围，不支持自动迁移到另一namespace。策略键和通用值规则沿用§2。
+
+可信管理预置策略根`/etc/hermes-display-bootstrap/policies/`：root所有且不可由creator_uid写入，策略文件`<policy_id>.json`，资源文件`resources/<resource_policy_id>.json`；均无跟随读取且验证祖先权限。路径是拟实施配置，不在本轮创建。任何元数据总大小仍受65536字节限制，超限拒绝，不截断祖先清单。
+
+记D=DeploymentPolicy规范字节SHA，R=ResourcePolicy规范字节SHA，E=PlatformEvidence规范字节SHA，M=Manifest规范字节SHA。DeploymentPolicy.resource_policy_sha必须=R；PlatformEvidence.approved_policy_sha=D；Manifest.resource_policy_sha=R且platform_evidence_sha=E。PlatformEvidence不包含自身摘要；DeploymentPolicy不含D，避免循环自哈希。
+
+发布必须同时满足：当前ctx重新读取的D与创建时证据中的D相等；当前R与DeploymentPolicy及Manifest中的R相等；当前平台与platform_requirements匹配；候选目录名称=Manifest.candidate_id=请求candidate_id=ApprovalRecord.candidate_id=ApprovalRecord.target_name=注册target_name；ApprovalRecord.manifest_sha=M=最新VERIFIED及后续注册记录绑定摘要；ApprovalRecord.policy_sha=D；批准scope精确PUBLISH_EMPTY_UNACTIVATED；approval_id与文件名及注册绑定相等。M须由当前只读文件重新计算，不用调用者缓存值；主库字节/身份仍需再次核验。
+
+创建到发布期间D或R变化，旧候选返回BLOCKED/APPROVAL_MISMATCH，不允许改manifest、重新签批同候选来绕过；只有管理者明确恢复完全相同受信策略并重新验证，或另建新候选才可走新流程。新建是否获准仍受预算和授权限制，旧候选保留。批准记录创建后不可更新/替换；重建批准属于单独管理流程，不由发布API代办。审批主体为可信管理者，发布器不把approver_reference文本本身当身份认证。
+
+风险：摘要字段混用使旧批准跨策略生效。对策：上列等式逐项验证、无自动修复；验证见test_policy_digest_binding；回退：不匹配零rename，保留原候选和审批证据。
 
 ## 5. CD-02：注册表、状态与恢复
 
@@ -74,16 +101,16 @@ BootstrapContext绑定pid、锁FD、各根目录FD、mount/namespace身份及策
 | 任意未完成→FAILED | 可明确归因且未rename | 持久错误记录；禁止沿用创建/发布 | 保留文件 |
 | 任意→QUARANTINED | 身份/状态冲突 | 尽力持久隔离标记；读回失败也禁止继续 | 人工处理 |
 
-FAILED/QUARANTINED为终态，不重试同候选构建；PUBLISHED_UNACTIVATED只可幂等读回，不改主库。UNCERTAIN是调用结果；持久权威可能仍是PUBLISH_INTENT，恢复不能要求一定有UNCERTAIN记录。
+先验证注册串链，再取最大连续seq的最新记录判定状态：FAILED/QUARANTINED为不可恢复终态，在任何S/T/A/C组合下分别返回BLOCKED/STATE_CONFLICT或QUARANTINED/STATE_CONFLICT，不再进入发布恢复表；历史完成记录不得覆盖后续隔离。PUBLISHED_UNACTIVATED只可幂等读回，不改主库；如发现身份/状态冲突可追加QUARANTINED，随后永久以该最新终态为准。UNCERTAIN是调用结果；持久权威可能仍是PUBLISH_INTENT，恢复不能要求一定有UNCERTAIN记录。
 
-恢复表中S=候选源目录，T=发布目标，A=批准记录精确匹配，C=完成记录。所有判断先持新ctx锁并验证注册串链与文件身份；表覆盖发布意图及完成后的全部组合：
+恢复表中S=候选源目录，T=发布目标，A=批准记录精确匹配，C=最新有效记录是否为PUBLISHED_UNACTIVATED；历史完成记录不算C。只有最新状态为PUBLISH_INTENT或PUBLISHED_UNACTIVATED才进入下表，其余未完成状态必须按转换表处理，不能借文件组合跳级。所有判断先持新ctx锁并验证注册串链与文件身份；表覆盖发布意图及完成后的全部组合：
 
 | S | T | A | C | 行为 |
 |---|---|---|---|---|
 | 任意 | 任意 | 无/不匹配 | 任意 | BLOCKED或QUARANTINED，不打开SQLite、不rename；不因C绕过审批 |
-| 有 | 无 | 匹配 | 无 | 仅最新PUBLISH_INTENT允许重新验证后no-replace；较早状态按正常批准流程；FAILED/隔离禁止 |
+| 有 | 无 | 匹配 | 无 | 仅最新PUBLISH_INTENT允许重新验证后no-replace；禁止从较早状态或终态进入本行 |
 | 无 | 有 | 匹配 | 无 | 仅PUBLISH_INTENT且目标manifest/身份匹配：重新同步两个父目录，追加完成记录、读回；否则隔离 |
-| 无 | 有 | 匹配 | 有 | 完成记录ID/摘要与目标一致返回PUBLISHED_UNACTIVATED；不重新创建库 |
+| 无 | 有 | 匹配 | 有 | 最新完成记录ID/摘要与目标一致且后面没有任何有效记录，返回PUBLISHED_UNACTIVATED；不重新创建库 |
 | 有 | 有 | 匹配 | 任意 | 冲突，QUARANTINED；不猜正确副本，不删除 |
 | 无 | 无 | 匹配 | 任意 | 丢失/未决，QUARANTINED；不重建原ID |
 | 有 | 无 | 匹配 | 有 | 完成记录与磁盘矛盾，QUARANTINED |
@@ -125,8 +152,12 @@ PUBLISHED_UNACTIVATED目录仅用于发布验收，不交给业务连接工厂�
 | contract/test_exact_empty_schema | 新候选、同版本批准DDL参考；逐表插行/多trigger/缺index负对照 | 正常VERIFIED；异常UNKNOWN_SCHEMA并FAILED；目录精确比较 |
 | platform/test_wal_freeze | 私有SQLite保留读连接使checkpoint busy、残余WAL/SHM/journal | SIDECAR_REMAINS/BLOCKED；不手删，不能VERIFIED |
 | platform/test_immutable_snapshot | 无sidecar冻结候选只读事务；前后hash/身份/文件集合 | 正常不变；替换条件被OS拒绝或IDENTITY_CHANGED；不外推活动库 |
-| contract/test_approval_binding | 六字段分别变更、未知审批根、请求自带批准dict | APPROVAL_MISMATCH；无rename，目标不变 |
-| platform/test_publish_no_replace | 自有源/目标同FS；两个候选竞争同目标；目标预存sentinel | 一次成功，另一TARGET_CONFLICT；sentinel字节/身份不变；不覆盖 |
+| contract/test_approval_binding | §4.1每条匹配等式分别破坏、未知审批根、请求自带批准dict | APPROVAL_MISMATCH；无rename，目标不变 |
+| platform/test_publish_no_replace | 低层系统调用封装测试：两个自有目录竞争一个名称；另测预存sentinel | 原语只一次rename成功、另一EEXIST；预存sentinel不变。仅验证低层，不是合法不同候选同目标的业务场景 |
+| platform/test_same_candidate_publish | 两真实进程发布同候选/同批准；第一持全局锁 | 第二LOCK_BUSY；首完成后重试返回同完成记录摘要，不再rename；不同候选指定同目标在输入/审批层拒绝 |
+| recovery/test_completed_then_quarantined | 完成seq=n→隔离seq=n+1→文件重新匹配 | 仍QUARANTINED，零rename、无新成功记录，历史完成记录不能翻转终态 |
+| contract/test_result_union | 未生成ID输入错误、LOCK_BUSY、VERIFIED、发布成功、隔离写失败 | 按§3唯一分支序列化；null仅用于允许字段，OK不出现在拒绝分支，摘要不混用 |
+| contract/test_policy_digest_binding | 部署/资源/批准/manifest各摘要逐个变化，创建后策略更新 | APPROVAL_MISMATCH，零rename；旧候选不重签、不改manifest |
 | platform/test_unsupported_publish | 封装注入EXDEV/ENOSYS；真实平台另验证 | UNSUPPORTED_PLATFORM；源保留、无目标、无降级rename |
 | recovery/test_each_crash_boundary | 自有候选在每次记录fsync、manifest同步、intent同步、rename、两父目录fsync、完成记录前后终止专用测试进程 | 新进程按§5表恢复；不激活、不覆盖；进程故障不标断电PASS |
 | recovery/test_state_matrix | §5所有S/T/A/C组合，追加串链缺号/损坏/孤儿 | 精确表中结果；冲突保留；只匹配意图能补完成 |
@@ -150,3 +181,9 @@ PUBLISHED_UNACTIVATED目录仅用于发布验收，不交给业务连接工厂�
 | CD-06 | §8逐测试夹具/故障/状态及证据 | 所有新用例NOT_RUN，不使用旧105通过替代 |
 
 作者侧修订已覆盖六项缺口，状态统一DOC_REVISED_PENDING_REVIEW，不自行将历史OPEN改成独立关闭。下一步针对本文件新固定SHA复审；编码设计接受之后还须明确实施授权及实际平台前提。无功能代码变更、无新库、无UID操作、无部署。
+
+## 10. v3整改核对
+
+V2-01：最新隔离/失败终态优先，历史完成记录不能复活候选；新增针对性恢复反例。V2-02：统一结果判别联合、早期失败null、成功OK及两个独立摘要；获取ctx和读取批准使用明确拒绝异常。V2-03：同候选业务幂等与低层不同目录no-replace分层，目标名约束不放宽。V2-04：定义DeploymentPolicy、可信路径及D/R/E/M匹配等式，策略变化拒绝旧批准。
+
+本轮仅DOC_REVISED_PENDING_REVIEW；上述风险分别由新增测试规格验证，新测试全部NOT_RUN。没有功能实现或生产变更，不能把文档整改称为缺陷实测关闭或独立终审通过。
