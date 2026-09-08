@@ -76,6 +76,8 @@ roots的精确键为registry_root/approval_root/candidate_root/publish_root/lock
 
 platform_requirements精确字段：kernel:str、sqlite_version:str、compile_options:list[str]、vfs:str、filesystem:str、mount_id:int、mount_options:list[str]、namespace_id:str；列表按字典序排序且去重，运行读回必须逐项匹配，无法确认即拒绝。此处是固定部署范围，不支持自动迁移到另一namespace。策略键和通用值规则沿用§2。
 
+当前生效锚点固定为`/etc/hermes-display-bootstrap/active.json`，root管理、creator只读；严格字段format_version=1、policy_id:CandidateId、deployment_policy_sha:Digest。管理员使用临时写/fsync/原子替换/fsync父目录更新；此为独立管理授权操作，不由本切片执行。acquire参数policy_id只能断言与active一致，不能选择历史策略；读取策略规范SHA必须等于active.deployment_policy_sha。每个发布入口和rename前重新读回active，变化返回BLOCKED/APPROVAL_MISMATCH；管理者变更active必须遵守相同全局锁协议，专用执行者持锁期间禁止管理者替换，排除检查到rename窗口。保留旧策略文件不使其可加载；只有管理者明确将active恢复到该ID与摘要且持久确认才算允许回退。active缺失/损坏或权限不可信失败关闭；当前用户提供ID、历史批准均不能建立active资格。新增test_active_policy_anchor覆盖保留D0文件但active=D1时指定D0拒绝、审批匹配也拒绝、管理变更锁竞争及授权恢复D0。
+
 可信管理预置策略根`/etc/hermes-display-bootstrap/policies/`：root所有且不可由creator_uid写入，策略文件`<policy_id>.json`，资源文件`resources/<resource_policy_id>.json`；均无跟随读取且验证祖先权限。路径是拟实施配置，不在本轮创建。任何元数据总大小仍受65536字节限制，超限拒绝，不截断祖先清单。
 
 记D=DeploymentPolicy规范字节SHA，R=ResourcePolicy规范字节SHA，E=PlatformEvidence规范字节SHA，M=Manifest规范字节SHA。DeploymentPolicy.resource_policy_sha必须=R；PlatformEvidence.approved_policy_sha=D；Manifest.resource_policy_sha=R且platform_evidence_sha=E。PlatformEvidence不包含自身摘要；DeploymentPolicy不含D，避免循环自哈希。
@@ -127,11 +129,11 @@ BUILDING的DDL/空状态/完整性检查不合格一律追加FAILED并返回BLOC
 
 先验证注册串链，再取最大连续seq的最新记录判定状态：FAILED/QUARANTINED为不可恢复终态，在任何S/T/A/C组合下分别返回BLOCKED/STATE_CONFLICT或QUARANTINED/STATE_CONFLICT，不再进入发布恢复表；历史完成记录不得覆盖后续隔离。PUBLISHED_UNACTIVATED只可幂等读回，不改主库；如发现身份/状态冲突可追加QUARANTINED，随后永久以该最新终态为准。UNCERTAIN是调用结果；持久权威可能仍是PUBLISH_INTENT，恢复不能要求一定有UNCERTAIN记录。
 
-恢复表中S=候选源目录，T=发布目标，A=批准记录精确匹配，C=最新有效记录是否为PUBLISHED_UNACTIVATED；历史完成记录不算C。只有最新状态为PUBLISH_INTENT或PUBLISHED_UNACTIVATED才进入下表，其余未完成状态必须按转换表处理，不能借文件组合跳级。所有判断先持新ctx锁并验证注册串链与文件身份；表覆盖发布意图及完成后的全部组合：
+恢复表入口先检查结构冲突：S/T同时存在、同时缺失，或最新完成状态但S有/T无，一律QUARANTINED/STATE_CONFLICT，优先于审批不匹配；无法可靠stat并非缺失，返回IO_FAILURE（发布结果可能不确定则UNCERTAIN），不猜存在性。剩余仅意图状态S有/T无或S无/T有、完成状态S无/T有进入审批行。恢复表中S=候选源目录，T=发布目标，A=批准记录精确匹配，C=最新有效记录是否为PUBLISHED_UNACTIVATED；历史完成记录不算C。只有最新状态为PUBLISH_INTENT或PUBLISHED_UNACTIVATED才进入下表，其余未完成状态必须按转换表处理，不能借文件组合跳级。所有判断先持新ctx锁并验证注册串链与文件身份；表覆盖发布意图及完成后的全部组合：
 
 | S | T | A | C | 行为 |
 |---|---|---|---|---|
-| 任意 | 任意 | 无/不匹配 | 任意 | BLOCKED/APPROVAL_MISMATCH，不追加隔离或失败记录，不打开SQLite、不rename；不因C绕过审批 |
+| 无结构/身份冲突 | 无结构/身份冲突 | 无/不匹配 | 任意 | 仅在下述结构冲突预检通过后BLOCKED/APPROVAL_MISMATCH，不追加终态；不因C绕过审批 |
 | 有 | 无 | 匹配 | 无 | 仅最新PUBLISH_INTENT允许重新验证后no-replace；禁止从较早状态或终态进入本行 |
 | 无 | 有 | 匹配 | 无 | 仅PUBLISH_INTENT且目标manifest/身份匹配：重新同步两个父目录，追加完成记录、读回；否则隔离 |
 | 无 | 有 | 匹配 | 有 | 最新完成记录ID/摘要与目标一致且后面没有任何有效记录，返回PUBLISHED_UNACTIVATED；不重新创建库 |
