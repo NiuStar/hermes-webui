@@ -21,6 +21,12 @@
 
 环境设置后读回：hermes-webui-optimized容器d8726140de4a379e2b7a9d14bcb1c03ce17aebe6035d83dba86ec43a7d04af64，wechat-content-studio容器9744a94e962257c796fd35e7572c7483a532c206ee957969b1771217fde58586；两者重启数0且启动时间与变更前相同。未部署或切换GET。
 
+## 最新前台增量（仍未完成）
+
+身份与资源策略测试新增后合同测试26通过（identity/resource RED与GREEN XML在同一证据根）。专用UID实测可写候选/注册，不可写审批/锁父目录。systemd前台探针读回memory.max=67108864、memory.swap.max=0、pids.max=4；尚非内存/墙钟超限负对照。
+
+限容负对照真实写入55988224字节后ENOSPC(errno28)，独立审计卷仍能fsync并读回审计JSON；审批根真实O_CREAT被拒。证据为.10 /opt/hermes-bootstrap-tests/audit-volume-01/registry/quota-negative-01.json。候选volume-01已被负对照填满，保留文件，不删除腾空间；后续功能测试须另建隔离卷并重新绑定身份，不能沿用此满卷。首次脚本因root默认文件权限不可读失败，仅将该无秘密测试脚本改为0644后执行，不放宽审批或数据权限。
+
 ## 剩余与门禁
 
 完整DeploymentPolicy/ResourcePolicy/Manifest/Registry/结果联合严格验证、可信上下文与ACL/挂载/VFS/硬限制实证、候选构建冻结、审批绑定、no-replace发布、注册串链和崩溃恢复尚未实现完成。旧schema测试迁移、完整回归、Binding及实现独立终审、代码提交仍待完成。当前只有局部通过，整项NOT_ACCEPTED。
