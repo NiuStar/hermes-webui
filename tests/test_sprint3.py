@@ -1,6 +1,8 @@
 """Sprint 3 tests: cron API, skills API, memory API, input validation."""
 import json, pathlib, shutil, tempfile, urllib.request, urllib.error
 
+import pytest
+
 from tests._pytest_port import BASE
 
 
@@ -78,64 +80,71 @@ def test_crons_run_nonexistent():
     result, status = post("/api/crons/run", {"job_id": "doesnotexist999"})
     assert status == 404
 
-def test_skills_list():
-    """Verify /api/skills returns built-in skills.
+@pytest.fixture
+def owned_skills(test_server):
+    """Own a fresh profile, never write through conftest's real-skills symlink.
 
-    Resilient to test-isolation pollution: the threshold checks > 0 with a
-    skip-on-empty escape hatch. The original > 0 threshold was correct on
-    a clean test server (which symlinks the real ~/.hermes/skills with 100+
-    entries) but flaky in the full suite because some sibling test
-    can shift the server's SKILLS_DIR resolution mid-suite (sprint29
-    test-security-skill cleanup, sprint31 profile create/switch, etc.).
+    The server pins HERMES_BASE_HOME to TEST_STATE_DIR. Request cookies select
+    this profile without changing the server default or any client's profile.
     """
-    data, status = get("/api/skills")
+    from tests.conftest import TEST_STATE_DIR
+
+    profiles = TEST_STATE_DIR / "profiles"
+    assert not profiles.is_symlink(), "refusing a redirected test profiles root"
+    profiles.mkdir(exist_ok=True)
+    assert profiles.resolve().parent == TEST_STATE_DIR.resolve()
+    with tempfile.TemporaryDirectory(prefix="sprint3-skills-", dir=profiles) as home:
+        profile = pathlib.Path(home).name
+        expected = {
+            "sprint3-owned-alpha": ("sprint3-selected", "Deterministic alpha lookup."),
+            "sprint3-owned-beta": ("sprint3-other", "Deterministic beta lookup."),
+        }
+        contents = {}
+        for name, (category, description) in expected.items():
+            content = f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n\nOwned fixture body for {name}.\n"
+            target = pathlib.Path(home) / "skills" / category / name / "SKILL.md"
+            target.parent.mkdir(parents=True)
+            target.write_text(content, encoding="utf-8")
+            contents[name] = content
+
+        def request(path):
+            req = urllib.request.Request(
+                BASE + path, headers={"Cookie": f"hermes_profile={profile}"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as response:
+                return json.loads(response.read()), response.status
+
+        yield request, expected, contents
+
+
+def test_skills_list(owned_skills):
+    request, expected, _ = owned_skills
+    data, status = request("/api/skills")
     assert status == 200
-    skills = data.get("skills", [])
-    if not skills:
-        import pytest
-        pytest.skip("No skills visible (likely profile-switch pollution from sibling test)")
-    assert len(skills) > 0
+    assert {s["name"] for s in data["skills"]} == set(expected)
+    assert len(data["skills"]) == len(expected)
 
-def test_skills_list_has_required_fields():
-    """Verify each skill has the required fields.
 
-    Resilient to test-isolation pollution: skip on empty list rather than
-    IndexError. See test_skills_list for the polluter list.
-    """
-    data, _ = get("/api/skills")
-    skills = data.get("skills", [])
-    if not skills:
-        import pytest
-        pytest.skip("No skills visible (likely profile-switch pollution from sibling test)")
-    skill = skills[0]
-    assert "name" in skill and "description" in skill
+def test_skills_list_has_required_fields(owned_skills):
+    request, expected, _ = owned_skills
+    data, status = request("/api/skills")
+    assert status == 200
+    assert {s["name"] for s in data["skills"]} == set(expected)
+    for skill in data["skills"]:
+        category, description = expected[skill["name"]]
+        assert skill["description"] == description
+        assert skill["category"] == category
+        assert skill["disabled"] is False
 
-def test_skills_content_known():
-    """Verify a known built-in skill is fetchable from /api/skills/content.
 
-    Resilient to test-isolation pollution: pick any skill from the live list
-    rather than hardcoding 'dogfood'. Some tests in the suite (sprint29,
-    sprint31) create/delete skills or switch profiles, which can change
-    which skills are visible by the time this test runs.
-    """
-    skills_data, _ = get("/api/skills")
-    skills = skills_data.get("skills", [])
-    if not skills:
-        # Profile-switch pollution from another test left this server pointing
-        # at a profile with no skills. Skip rather than fail — root cause is
-        # in the polluting test, not the API contract under test here.
-        import pytest
-        pytest.skip("No skills visible (likely profile-switch pollution from sibling test)")
-    skill_name = skills[0].get("name")
-    data, status = get(f"/api/skills/content?name={skill_name}")
-    assert status == 200, f"Failed to fetch known skill {skill_name!r}: {data}"
-    # Endpoint may return the content under 'content' key OR an error key
-    if "content" in data:
-        assert len(data["content"]) > 0
-    else:
-        # Skill might have been deleted between the list and content calls
-        # (test concurrency edge). Accept the not-found shape.
-        assert "error" in data, f"Unexpected response for skill {skill_name!r}: {data}"
+def test_skills_content_known(owned_skills):
+    request, _, contents = owned_skills
+    for name, content in contents.items():
+        data, status = request(f"/api/skills/content?name={name}")
+        assert status == 200
+        assert "error" not in data
+        assert data["content"] == content
+
 
 def test_skills_content_requires_name():
     try:
@@ -144,24 +153,22 @@ def test_skills_content_requires_name():
     except urllib.error.HTTPError as e:
         assert e.code == 400
 
-def test_skills_search_returns_subset():
-    """Verify /api/skills returns multiple built-in skills.
 
-    Resilient to test-isolation pollution: the threshold checks > 0 with a
-    skip-on-empty escape hatch. The original > 5 threshold was correct on
-    a clean test server (which symlinks the real ~/.hermes/skills with 100+
-    entries) but flaky in the full suite because some sibling test
-    (sprint29 saves a skill, sprint31 creates a profile, etc.) can shift
-    the server's SKILLS_DIR resolution mid-suite.
-    """
-    data, _ = get("/api/skills")
-    skills = data.get("skills", [])
-    if not skills:
-        import pytest
-        pytest.skip("No skills visible (likely profile-switch pollution from sibling test)")
-    # Without pollution we expect 5+ built-in skills; under pollution we may see
-    # only a handful left. The functional contract is non-empty.
-    assert len(skills) > 0, "/api/skills must return at least one skill"
+def test_skills_search_returns_subset(owned_skills):
+    """Exercise the API's category filter; text search is client-side."""
+    request, expected, _ = owned_skills
+    all_data, status = request("/api/skills")
+    assert status == 200
+    all_names = {s["name"] for s in all_data["skills"]}
+    assert all_names == set(expected)
+    data, status = request("/api/skills?category=sprint3-selected")
+    assert status == 200
+    names = {s["name"] for s in data["skills"]}
+    assert names == {"sprint3-owned-alpha"}
+    assert names < all_names
+    missing, status = request("/api/skills?category=sprint3-no-match")
+    assert status == 200
+    assert missing["skills"] == []
 
 def test_memory_returns_both_files():
     data, status = get("/api/memory")
