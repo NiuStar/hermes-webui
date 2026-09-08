@@ -19,9 +19,6 @@ resolve from the cache-only path and never reach the live-rebuild seam
 carries a model_provider.
 """
 
-import ast
-import inspect
-
 import pytest
 
 import api.config as cfg
@@ -43,6 +40,11 @@ def cold_models_cache(monkeypatch):
     Cold cache is what makes the regression observable: a warm cache short-
     circuits before any rebuild decision, hiding the prefer_cache contract.
     """
+    # A different active family must not rewrite historical display metadata.
+    monkeypatch.setattr(cfg, "cfg", {"model": {"provider": "ollama", "default": "qwen3:8b"}})
+    monkeypatch.setattr(cfg, "_cfg_path", cfg._get_config_path())
+    monkeypatch.setattr(cfg, "_cfg_mtime", 0.0)
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda *_: (None, None, None))
     monkeypatch.setattr(cfg, "_available_models_cache", None, raising=False)
     monkeypatch.setattr(cfg, "_available_models_cache_ts", 0.0, raising=False)
     monkeypatch.setattr(
@@ -95,39 +97,21 @@ def test_session_display_resolvers_never_trigger_live_rebuild(
     provider = routes._resolve_effective_session_model_provider_for_display(session)
 
     assert model == "claude-opus-4-7"
+    assert session.model == model
+    assert session.model_provider == model_provider
     # provider is best-effort; the contract under test is "no live rebuild",
     # not a specific provider string. It must at least be None or a str.
     assert provider is None or isinstance(provider, str)
     assert rebuild_seam_tripwire["n"] == 0
 
 
-def _has_prefer_cached_catalog_true_call(fn) -> bool:
-    tree = ast.parse(inspect.getsource(fn))
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        if not isinstance(node.func, ast.Name):
-            continue
-        if node.func.id != "_resolve_compatible_session_model_state":
-            continue
-        for keyword in node.keywords:
-            if keyword.arg == "prefer_cached_catalog" and isinstance(
-                keyword.value, ast.Constant
-            ):
-                return keyword.value.value is True
-    return False
-
-
-def test_resolver_signature_passes_prefer_cached_catalog():
-    """Static guard: both resolvers must opt into the cache-only catalog.
-
-    A pure behavioural test can be satisfied by an unrelated short-circuit;
-    this pins the explicit contract at the call site so the intent survives
-    refactors.
-    """
-    assert _has_prefer_cached_catalog_true_call(
-        routes._resolve_effective_session_model_for_display
-    )
-    assert _has_prefer_cached_catalog_true_call(
-        routes._resolve_effective_session_model_provider_for_display
-    )
+@pytest.mark.parametrize("model", [None, ""])
+def test_missing_model_uses_cache_only_default(
+    cold_models_cache, rebuild_seam_tripwire, model
+):
+    session = _FakeSession(model, None)
+    assert routes._resolve_effective_session_model_for_display(session) == "qwen3:8b"
+    routes._resolve_effective_session_model_provider_for_display(session)
+    assert session.model == model
+    assert session.model_provider is None
+    assert rebuild_seam_tripwire["n"] == 0

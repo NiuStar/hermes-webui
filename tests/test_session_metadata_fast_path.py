@@ -5,16 +5,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_messages_zero_skips_effective_model_resolution():
-    src = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
+def test_messages_zero_skips_effective_model_resolution(monkeypatch):
+    from unittest.mock import Mock
+    import api.routes as routes
+    from tests.history_route_harness import session_probe
+    session, request = session_probe(monkeypatch)
+    model = Mock(side_effect=AssertionError("metadata must skip model resolution"))
+    provider = Mock(side_effect=AssertionError("metadata must skip provider resolution"))
+    monkeypatch.setattr(routes, "_resolve_effective_session_model_for_display", model)
+    monkeypatch.setattr(routes, "_resolve_effective_session_model_provider_for_display", provider)
+    result = request()["session"]
+    assert result["model"] == session.model
+    assert result["messages"] == []
+    model.assert_not_called()
+    provider.assert_not_called()
 
-    assert re.search(
-        r"effective_model\s*=\s*\(\s*"
-        r"_resolve_effective_session_model_for_display\(s\)\s*"
-        r"if resolve_model\s*else None\s*\)",
-        src,
-    ), "messages=0 metadata requests must not resolve the model catalog"
-    assert 'resolve_model_default = "1" if load_messages else "0"' in src
 
 
 def test_full_message_load_updates_viewed_count_after_metadata_fast_path():

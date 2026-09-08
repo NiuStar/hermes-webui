@@ -1457,7 +1457,9 @@ def test_session_model_display_resolver_is_read_only(monkeypatch):
     session = DummySession()
     effective = routes._resolve_effective_session_model_for_display(session)
 
-    assert effective == "gpt-5.4-mini"
+    # Historical display identity is authoritative even when today's runnable
+    # default differs. Compatibility repair belongs to inference, not GET.
+    assert effective == "gemini-3.1-pro-preview"
     assert session.model == "gemini-3.1-pro-preview"
     assert save_calls == []
 

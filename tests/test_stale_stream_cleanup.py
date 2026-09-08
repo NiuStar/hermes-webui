@@ -68,11 +68,24 @@ def test_stale_stream_cleanup_does_not_refresh_sidebar_timestamp():
     assert session.saved_touch_updated_at == [False]
 
 
-def test_session_load_clears_stale_stream_before_response():
-    load_pos = ROUTES_SRC.index("s = get_session(sid, metadata_only=(not load_messages))")
-    cleanup_pos = ROUTES_SRC.index("_clear_stale_stream_state(s)", load_pos)
-    response_pos = ROUTES_SRC.index('"active_stream_id": getattr(s, "active_stream_id", None)', cleanup_pos)
-    assert load_pos < cleanup_pos < response_pos
+def test_session_load_clears_stale_stream_before_response(monkeypatch):
+    from tests.history_route_harness import session_probe
+    session, request = session_probe(monkeypatch, stream_id="stale-stream")
+    compact = session.compact
+    observed = []
+    def observe_compact(*args, **kwargs):
+        observed.append(session.active_stream_id)
+        return compact(*args, **kwargs)
+    monkeypatch.setattr(session, "compact", observe_compact)
+    result = request()["session"]
+    assert observed == [None]
+    assert result["active_stream_id"] is None
+    assert result["is_streaming"] is False
+    assert result["pending_user_message"] is None
+    assert session.pending_attachments == []
+    assert session.pending_started_at is None
+    session.save.assert_called_once_with(touch_updated_at=False)
+
 
 
 def test_chat_start_clears_stale_pending_state_not_only_active_id():

@@ -7735,11 +7735,13 @@ def _normalize_session_model_in_place(session) -> str:
 def _resolve_effective_session_model_for_display(session) -> str:
     """Resolve the model a session should display without mutating persisted state.
 
-    `GET /api/session` should stay side-effect free. If a stale persisted model
-    needs normalization for the current provider configuration, return the
-    effective model for the response payload only and leave disk state alone.
+    Historical model identity is not a request to select a runnable model under
+    today's provider config. Only missing models need a cache-only default;
+    inference compatibility repair remains on the chat/start path.
     """
     original_model = getattr(session, "model", None) or ""
+    if original_model:
+        return original_model
     requested_provider = getattr(session, "model_provider", None)
     _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(session, requested_provider)
     effective_model, _provider, _changed = _resolve_compatible_session_model_state(
@@ -7765,6 +7767,11 @@ def _resolve_effective_session_model_for_display(session) -> str:
 def _resolve_effective_session_model_provider_for_display(session) -> str | None:
     original_model = getattr(session, "model", None) or ""
     requested_provider = getattr(session, "model_provider", None)
+    if original_model:
+        # Unknown historical routing stays unknown, rather than borrowing the
+        # current profile's provider for a different model.
+        _bare_model, explicit_provider = _split_provider_qualified_model(original_model)
+        return explicit_provider or _clean_session_model_provider(requested_provider)
     _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(session, requested_provider)
     _model, provider, _changed = _resolve_compatible_session_model_state(
         original_model or None,
