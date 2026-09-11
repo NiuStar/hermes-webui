@@ -138,6 +138,7 @@ COPY --chown=root:root . /apptoo
 # Local builds that omit the arg get "unknown" as the fallback.
 ARG HERMES_VERSION=unknown
 RUN echo "__version__ = '${HERMES_VERSION}'" > /apptoo/api/_version.py
+LABEL org.opencontainers.image.version="${HERMES_VERSION}"
 
 # Default to binding all interfaces (required for container networking)
 ENV HERMES_WEBUI_HOST=0.0.0.0

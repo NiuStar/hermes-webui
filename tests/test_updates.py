@@ -174,9 +174,9 @@ def test_check_repo_reports_manual_update_for_baked_webui_version(tmp_path, monk
             return self._body
 
     payload = [
-        {'name': 'v0.51.833', 'commit': {'sha': 'current-sha'}},
-        {'name': 'v0.51.914-rc1', 'commit': {'sha': 'prerelease-sha'}},
-        {'name': 'v0.51.914', 'commit': {'sha': 'stable-sha'}},
+        {'tag_name': 'v0.51.833', 'draft': False, 'prerelease': False},
+        {'tag_name': 'v0.51.914-rc1', 'draft': False, 'prerelease': True},
+        {'tag_name': 'v0.51.914', 'draft': False, 'prerelease': False},
     ]
     seen = {}
 
@@ -197,12 +197,12 @@ def test_check_repo_reports_manual_update_for_baked_webui_version(tmp_path, monk
     assert info['behind'] == 1
     assert info['current_version'] == 'v0.51.833'
     assert info['latest_version'] == 'v0.51.914'
-    assert info['current_sha'] == 'current-sha'
-    assert info['latest_sha'] == 'stable-sha'
+    assert info['current_sha'] == 'v0.51.833'
+    assert info['latest_sha'] == 'v0.51.914'
     assert info['compare_url'] == (
-        'https://github.com/nesquena/hermes-webui/compare/current-sha...stable-sha'
+        'https://github.com/NiuStar/hermes-webui/compare/v0.51.833...v0.51.914'
     )
-    assert seen['url'] == 'https://api.github.com/repos/nesquena/hermes-webui/tags?per_page=100'
+    assert seen['url'] == 'https://api.github.com/repos/NiuStar/hermes-webui/releases?per_page=100'
     assert seen['timeout'] == 3.0
 
 
@@ -214,7 +214,10 @@ def test_check_repo_webui_no_git_falls_back_to_old_payload_on_tags_failure(tmp_p
 
     info = updates._check_repo(tmp_path, 'webui')
 
-    assert info == {'name': 'webui', 'behind': None, 'no_git': True}
+    assert info == {
+        'name': 'webui', 'behind': None, 'no_git': True,
+        'deployment_online_update': False,
+    }
 
 
 def test_check_repo_no_git_agent_stays_cant_check(tmp_path):
@@ -222,7 +225,10 @@ def test_check_repo_no_git_agent_stays_cant_check(tmp_path):
 
     info = updates._check_repo(tmp_path, 'agent')
 
-    assert info == {'name': 'agent', 'behind': None, 'no_git': True}
+    assert info == {
+        'name': 'agent', 'behind': None, 'no_git': True,
+        'deployment_online_update': False,
+    }
 
 
 def test_check_repo_fetch_failure_without_tags_is_not_up_to_date(tmp_path):

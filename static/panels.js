@@ -9065,6 +9065,14 @@ async function loadSettingsPanel(){
       const agentVersion = (settings.agent_version || 'not detected').toString().trim() || 'not detected';
       agentBadge.textContent = `Agent: ${agentVersion}`;
     }
+    const deploymentBadge=$('settings-deployment-badge');
+    if(deploymentBadge){
+      const deployment=settings.deployment||{};
+      deploymentBadge.textContent=`Deployment: ${deployment.label||deployment.type||'unknown'}`;
+      deploymentBadge.title=deployment.online_update
+        ? 'Online updates available'
+        : 'Docker updater sidecar is unavailable';
+    }
     // Hydrate appearance controls first so a slow /api/models request
     // cannot overwrite an in-progress theme/skin selection.
     const themeSel=$('settingsTheme');
@@ -12195,6 +12203,11 @@ async function checkUpdatesNow(channelOverride){
     const _checkBody={force:true};
     if(channelOverride==='stable'||channelOverride==='experimental') _checkBody.channel=channelOverride;
     const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:300000});
+    const latestBadge=$('settings-latest-version-badge');
+    if(latestBadge){
+    const latest=data&&data.webui&&data.webui.latest_version;
+    latestBadge.textContent=`Latest: ${latest||'not detected'}`;
+    }
     if(data.disabled){
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
     } else {

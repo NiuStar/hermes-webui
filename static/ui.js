@@ -10039,7 +10039,7 @@ async function refreshSession() {
 }
 // ── Update banner ──
 function _formatUpdateTargetStatus(label,info){
-  const manualNoGit=!!(info&&info.no_git&&info.manual_update&&info.behind>0);
+  const manualNoGit=!!(info&&info.no_git&&info.manual_update&&info.behind>0&&!info.deployment_online_update);
   if(!info||(info.no_git&&!manualNoGit)||!(info.behind>0)) return null;
   const release=(info.release_based&&info.latest_version)
     ?` (${info.current_version||'unknown'} -> ${info.latest_version})`
@@ -10048,8 +10048,8 @@ function _formatUpdateTargetStatus(label,info){
   return `${label}${release}: ${info.behind} ${noun}${info.behind>1?'s':''}`;
 }
 function _formatManualUpdateInstruction(info){
-  if(!(info&&info.no_git&&info.manual_update&&info.behind>0)) return null;
-  return t('settings_update_manual_docker','docker pull ghcr.io/nesquena/hermes-webui:latest');
+  if(!(info&&info.no_git&&info.manual_update&&info.behind>0&&!info.deployment_online_update)) return null;
+  return t('settings_update_manual_docker','One-click Docker update is disabled for this deployment.');
 }
 function _formatUpdateCheckError(label,info){
   if(!info||!info.error) return null;
@@ -10351,6 +10351,11 @@ function _renderUpdateWhatsNewLinks(data){
   _appendUpdateDiffLinks(container,targets,"What's new: ");
 }
 function _showUpdateBanner(data){
+  const latestBadge=$('settings-latest-version-badge');
+  if(latestBadge){
+    const latest=data&&data.webui&&data.webui.latest_version;
+    latestBadge.textContent=`Latest: ${latest||'not detected'}`;
+  }
   const parts=[];
   const webuiPart=_formatUpdateTargetStatus('WebUI',data.webui);
   const agentPart=_formatUpdateTargetStatus('Agent',data.agent);
@@ -10360,7 +10365,8 @@ function _showUpdateBanner(data){
   const btnApply=$('btnApplyUpdate');
   if(btnApply){
     const webuiManual=!!(data&&data.webui&&data.webui.manual_update&&data.webui.behind>0);
-    const webuiUpdatable=!!(data&&data.webui&&data.webui.behind>0&&!webuiManual);
+    const webuiOnline=!!(data&&data.webui&&data.webui.deployment_online_update);
+    const webuiUpdatable=!!(data&&data.webui&&data.webui.behind>0&&(!webuiManual||webuiOnline));
     const agentUpdatable=!!(data&&data.agent&&data.agent.behind>0);
     const hasApplyTargets=webuiUpdatable||agentUpdatable;
     btnApply.disabled=!hasApplyTargets;
@@ -10433,7 +10439,7 @@ async function applyUpdates(){
   if(forceBtnReset){forceBtnReset.style.display='none';forceBtnReset.dataset.target='';}
   const targets=[];
   if(window._updateData?.agent?.behind>0) targets.push('agent');
-  if(window._updateData?.webui?.behind>0&&!window._updateData?.webui?.manual_update) targets.push('webui');
+  if(window._updateData?.webui?.behind>0&&(!window._updateData?.webui?.manual_update||window._updateData?.webui?.deployment_online_update)) targets.push('webui');
   if(!targets.length){
     const msg=updateText('update_no_target','No update target selected. Refresh update status and retry.');
     if(errEl){errEl.textContent=msg;errEl.style.display='block';}
@@ -10465,7 +10471,7 @@ async function applyUpdates(){
       }
     }
     const stashConflictMessage=stashConflictMessages.join('\n\n');
-    showToast(stashConflictMessage||'Update applied — restarting…',stashConflictMessages.length?10000:undefined,stashConflictMessages.length?'warning':undefined);
+    showToast(stashConflictMessage||'Update started — waiting for restart…',stashConflictMessages.length?10000:undefined,stashConflictMessages.length?'warning':undefined);
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
     _waitForServerThenReload({baselineServerIdentity});

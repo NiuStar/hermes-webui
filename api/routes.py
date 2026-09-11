@@ -13495,6 +13495,8 @@ def handle_get(handler, parsed) -> bool:
             from api.updates import AGENT_VERSION, WEBUI_VERSION
             settings["webui_version"] = WEBUI_VERSION
             settings["agent_version"] = AGENT_VERSION
+            from api.updates import deployment_info
+            settings["deployment"] = deployment_info()
         except Exception:
             pass
         # Channel-scoped display badge — SEPARATE from webui_version (which is
@@ -17451,7 +17453,9 @@ def handle_post(handler, parsed) -> bool:
         _apply_channel = body.get("channel") if isinstance(body, dict) else None
         if _apply_channel not in ("stable", "experimental"):
             _apply_channel = None
-        from api.updates import apply_update
+        from api.updates import apply_docker_update, apply_update, deployment_info
+        if deployment_info().get("type") == "docker" and target == "webui":
+            return j(handler, apply_docker_update(_apply_channel))
 
         return j(handler, apply_update(target, _apply_channel))
 

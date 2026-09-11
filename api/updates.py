@@ -25,6 +25,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from api.agent_health import get_active_profile_gateway_running_pid
+from api.docker_self_update import CONTROL_SOCKET, request_update
 from api.gateway_restart import restart_active_profile_gateway
 from api.profiles import get_active_profile_name
 from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
@@ -64,6 +65,66 @@ _FETCH_NETWORK_FAILURE_SIGNATURES = (
     'ssl certificate problem',
 )
 _RELEASE_TAG_RE = re.compile(r'^v[0-9][0-9A-Za-z.+-]*$')
+
+
+def deployment_info() -> dict:
+    """Describe the installed WebUI and whether this process can update it."""
+    explicit = os.getenv('HERMES_WEBUI_DEPLOYMENT_TYPE', '').strip().lower()
+    if explicit in {'docker', 'binary'}:
+        kind = explicit
+    elif Path('/.dockerenv').exists():
+        kind = 'docker'
+    else:
+        kind = 'binary'
+    binary_online_update = kind == 'binary' and (REPO_ROOT / '.git').exists()
+    docker_command_configured = (
+        kind == 'docker'
+        and os.getenv('HERMES_WEBUI_DOCKER_SELF_UPDATE', '').strip() == '1'
+        and Path(CONTROL_SOCKET).exists()
+        and os.access(CONTROL_SOCKET, os.R_OK | os.W_OK)
+    )
+    return {
+        'type': kind,
+        'label': 'Docker' if kind == 'docker' else 'Binary',
+        'online_update': docker_command_configured if kind == 'docker' else binary_online_update,
+        'update_mode': 'docker_engine' if kind == 'docker' and docker_command_configured else ('git' if binary_online_update else 'manual'),
+        'docker_update_configured': docker_command_configured,
+    }
+
+
+def apply_docker_update(channel=None) -> dict:
+    """Ask the mounted host updater to deploy the current latest release."""
+    blocker_snapshot = _restart_blocker_snapshot()
+    if blocker_snapshot.get('restart_blocked'):
+        return _restart_blocked_response('webui', blocker_snapshot)
+    if not _apply_lock.acquire(blocking=False):
+        return {'ok': False, 'message': 'Update already in progress'}
+    try:
+        return _apply_docker_update_inner(channel)
+    finally:
+        _apply_lock.release()
+
+
+def _apply_docker_update_inner(channel=None) -> dict:
+    if deployment_info().get('online_update') is not True:
+        return {'ok': False, 'message': 'Docker updater sidecar is unavailable for this deployment.', 'deployment': deployment_info()}
+    channel = _normalize_channel(channel or _read_update_channel())
+    status = check_for_updates(force=True, include_agent=False, channel=channel)
+    info = status.get('webui') or {}
+    latest_version = str(info.get('latest_version') or '').strip()
+    latest_sha = str(info.get('latest_sha') or '').strip() or latest_version
+    valid_release = (
+        bool(_RELEASE_TAG_RE.fullmatch(latest_version))
+        if channel == 'stable'
+        else bool(re.fullmatch(r'exp-v[0-9][0-9A-Za-z.+-]*', latest_version))
+    )
+    if not valid_release:
+        return {'ok': False, 'message': 'Latest WebUI release could not be verified.', 'deployment': deployment_info()}
+    try:
+        return request_update(channel, latest_version, latest_sha)
+    except Exception:
+        logger.exception("Docker self-update worker launch failed")
+        return {'ok': False, 'message': 'Docker self-update worker could not be started.', 'deployment': deployment_info()}
 # Phrases git emits when its own short-lived index/refs lock files block a
 # subsequent operation. Tuned to match only the true "lock file already exists"
 # semantics that warrant a lock-conflict response -- v2 deliberately drops the
@@ -823,14 +884,26 @@ def _is_stable_release_tag(tag):
     return bool(_RELEASE_TAG_RE.fullmatch(raw) and '-' not in raw[1:])
 
 
-def _github_release_tags(url='https://api.github.com/repos/nesquena/hermes-webui/tags?per_page=100', *, timeout=3.0):
-    """Return GitHub release tags newest-first, including commit SHAs when available."""
+def _release_api_url() -> str:
+    repository = os.getenv('HERMES_WEBUI_RELEASE_REPOSITORY', 'NiuStar/hermes-webui').strip()
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository):
+        repository = 'NiuStar/hermes-webui'
+    return f'https://api.github.com/repos/{repository}/releases?per_page=100'
+
+
+def _github_release_tags(url=None, *, timeout=3.0, channel=DEFAULT_UPDATE_CHANNEL):
+    """Return published GitHub Release tags newest-first."""
+    headers = {
+        'Accept': 'application/vnd.github+json',
+        'User-Agent': 'hermes-webui',
+        'X-GitHub-Api-Version': '2022-11-28',
+    }
+    token = os.getenv('HERMES_WEBUI_GITHUB_TOKEN', '').strip() or os.getenv('GITHUB_TOKEN', '').strip()
+    if token:
+        headers['Authorization'] = f'Bearer {token}'
     request = urllib.request.Request(
-        url,
-        headers={
-            'Accept': 'application/vnd.github+json',
-            'User-Agent': 'hermes-webui',
-        },
+        url or _release_api_url(),
+        headers=headers,
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
         payload = json.loads(response.read().decode('utf-8'))
@@ -840,50 +913,46 @@ def _github_release_tags(url='https://api.github.com/repos/nesquena/hermes-webui
     for item in payload:
         if not isinstance(item, dict):
             continue
-        name = item.get('name')
+        if item.get('draft'):
+            continue
+        prerelease = bool(item.get('prerelease'))
+        if channel == 'stable' and prerelease:
+            continue
+        if channel == 'experimental' and not prerelease:
+            continue
+        name = item.get('tag_name') or item.get('name')
         if not isinstance(name, str):
             continue
         name = name.strip()
-        if not _is_stable_release_tag(name):
+        valid = bool(_RELEASE_TAG_RE.fullmatch(name)) if channel == 'stable' else bool(re.fullmatch(r'exp-v[0-9][0-9A-Za-z.+-]*', name))
+        if not valid:
             continue
-        commit = item.get('commit')
-        sha = None
-        if isinstance(commit, dict):
-            commit_sha = commit.get('sha')
-            if isinstance(commit_sha, str):
-                commit_sha = commit_sha.strip()
-                if commit_sha:
-                    sha = commit_sha
+        sha = name
         tags.append({'name': name, 'sha': sha})
     return sorted(tags, key=lambda item: _release_tag_sort_key(item['name']), reverse=True)
 
 
-def _check_webui_published_release_update():
+def _check_webui_published_release_update(channel=DEFAULT_UPDATE_CHANNEL):
     """Return a manual-update payload when the baked WebUI version trails GitHub tags."""
     current_version = str(WEBUI_VERSION or '').strip()
-    if not _RELEASE_TAG_RE.fullmatch(current_version):
-        return None
+
     try:
-        tags = _github_release_tags()
+        tags = _github_release_tags(channel=channel)
     except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
         return None
     if not tags:
         return None
 
     tag_names = [item['name'] for item in tags]
-    if current_version not in tag_names:
-        return None
-
     latest = tags[0]
     latest_version = latest['name']
     behind = _release_gap(tag_names, current_version, latest_version)
-    if behind <= 0:
-        return None
-
+    if current_version not in tag_names:
+        behind = 0 if current_version == latest_version else 1
     current = next((item for item in tags if item['name'] == current_version), None) or {}
-    current_ref = current.get('sha') or current_version
+    current_ref = current.get('sha') or (current_version if _RELEASE_TAG_RE.fullmatch(current_version) else None)
     latest_ref = latest.get('sha') or latest_version
-    repo_url = 'https://github.com/nesquena/hermes-webui'
+    repo_url = _release_api_url().split('/releases?', 1)[0].replace('api.github.com/repos/', 'github.com/')
     return {
         'name': 'webui',
         'behind': behind,
@@ -894,7 +963,7 @@ def _check_webui_published_release_update():
         'release_based': True,
         'current_version': current_version,
         'latest_version': latest_version,
-        'compare_url': _build_compare_url(repo_url, current_ref, latest_ref),
+        'compare_url': _build_compare_url(repo_url, current_ref, latest_ref) if current_ref else None,
         'manual_update': True,
     }
 
@@ -1225,15 +1294,17 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     channel = _normalize_channel(channel)
     if path is None or not (path / '.git').exists():
         if name == 'webui':
-            release_info = _check_webui_published_release_update()
+            release_info = _check_webui_published_release_update(channel)
             if release_info is not None:
                 release_info = dict(release_info)
                 release_info['no_git'] = True
+                release_info['deployment_online_update'] = deployment_info()['online_update']
                 return release_info
         return {
             'name': name,
             'behind': None,
             'no_git': True,
+            'deployment_online_update': deployment_info()['online_update'] if name == 'webui' else False,
         }
 
     # Fetch tags first so update prompts track published releases, not every

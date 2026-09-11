@@ -2328,7 +2328,7 @@ class TestUpdateBannerUx:
         instruction_fn = extract_js_function(src, '_formatManualUpdateInstruction')
         script = f"""
 function t(key, ...args) {{
-  const values = {{ settings_update_manual_docker: 'Manual update required: run {{0}}, then recreate the container.' }};
+  const values = {{ settings_update_manual_docker: 'One-click Docker update is disabled for this deployment.' }};
   return (values[key] || key).replace(/\{{(\d+)\}}/g, (_, i) => args[Number(i)] ?? '');
 }}
 {format_fn}
@@ -2343,7 +2343,7 @@ const manual=_formatUpdateTargetStatus('WebUI', {{
 }});
 if(manual !== 'WebUI (v0.51.833 -> v0.51.913): 1 release') throw new Error('manual webui update must be bannerable: '+manual);
 const instruction=_formatManualUpdateInstruction({{ no_git: true, manual_update: true, behind: 1 }});
-if(!instruction || instruction.indexOf('docker pull ghcr.io/nesquena/hermes-webui:latest') === -1) throw new Error('manual webui update must include pull guidance: '+instruction);
+if(!instruction || instruction.indexOf('One-click Docker update is disabled') === -1) throw new Error('manual webui update must include pull guidance: '+instruction);
 if(_formatManualUpdateInstruction({{ no_git: true, behind: 1 }}) !== null) throw new Error('plain no-git webui must not show manual guidance');
 if(_formatUpdateTargetStatus('WebUI', {{ no_git: true, behind: 1 }}) !== null) throw new Error('plain no-git webui must stay hidden');
 """.strip()
@@ -2367,7 +2367,7 @@ global.window = {{}};
 global.$ = (id) => state[id] || null;
 global._renderUpdateWhatsNewLinks = () => {{}};
 global.t = (key, ...args) => {{
-  const values = {{ settings_update_manual_docker: 'Manual update required: run {{0}}, then recreate the container.' }};
+  const values = {{ settings_update_manual_docker: 'One-click Docker update is disabled for this deployment.' }};
   return (values[key] || key).replace(/\{{(\d+)\}}/g, (_, i) => args[Number(i)] ?? '');
 }};
 {format_fn}
@@ -2386,7 +2386,7 @@ _showUpdateBanner({{
   agent: null,
 }});
 if(state.updateMsg.textContent.indexOf('WebUI') === -1) throw new Error('manual update must still render banner text');
-if(state.updateMsg.textContent.indexOf('docker pull ghcr.io/nesquena/hermes-webui:latest') === -1) throw new Error('manual update must render pull guidance');
+if(state.updateMsg.textContent.indexOf('One-click Docker update is disabled') === -1) throw new Error('manual update must render pull guidance');
 if(state.btnApplyUpdate.style.display !== 'none') throw new Error('manual webui update must hide the apply button');
 if(state.btnApplyUpdate.disabled !== true) throw new Error('manual webui update must disable the apply button');
 if(state.btnForceUpdate.style.display !== 'none') throw new Error('manual webui update must hide the force button');
@@ -2429,7 +2429,7 @@ function t(key, ...args) {{
     settings_check_now: 'Check now',
     settings_updates_available: '{{count}} update(s) available',
     settings_update_no_git: 'Cannot check for updates',
-    settings_update_manual_docker: 'Manual update required: run {{0}}, then recreate the container.',
+    settings_update_manual_docker: 'One-click Docker update is disabled for this deployment.',
     settings_up_to_date: 'Up to date',
     settings_update_check_failed: 'Check failed',
   }};
@@ -2443,7 +2443,7 @@ function _showUpdateBanner() {{}}
 {check_fn}
 (async () => {{
   await checkUpdatesNow();
-  if(state.checkUpdatesStatus.textContent.indexOf('docker pull ghcr.io/nesquena/hermes-webui:latest') === -1) throw new Error('settings manual update must render pull guidance: '+state.checkUpdatesStatus.textContent);
+  if(state.checkUpdatesStatus.textContent.indexOf('One-click Docker update is disabled') === -1) throw new Error('settings manual update must render pull guidance: '+state.checkUpdatesStatus.textContent);
   if(state.checkUpdatesStatus.style.color !== 'var(--accent)') throw new Error('manual update should stay in available state');
   apiData = {{ webui: {{ no_git: true, behind: 1 }}, agent: null }};
   state.checkUpdatesStatus.textContent = '';

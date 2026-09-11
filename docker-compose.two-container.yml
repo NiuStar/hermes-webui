@@ -90,7 +90,8 @@ services:
       - hermes-net
 
   hermes-webui:
-    image: ghcr.io/nesquena/hermes-webui:latest
+    image: 24802117/hermes-webui:latest
+    pull_policy: always
     container_name: hermes-webui
     depends_on:
       - hermes-agent
@@ -110,6 +111,7 @@ services:
       # ${HOME} is used rather than `~` so the default resolves the same way
       # across Linux, macOS, WSL2, and Docker Desktop on Windows.
       - ${HERMES_WORKSPACE:-${HOME}/workspace}:/workspace
+      - updater-control:/run/hermes-webui-updater
     environment:
       - HERMES_WEBUI_HOST=0.0.0.0
       - HERMES_WEBUI_PORT=8787
@@ -132,6 +134,11 @@ services:
       # Optional: enable password auth. Set HERMES_WEBUI_PASSWORD in .env
       # (required if you expose the port beyond 127.0.0.1).
       - HERMES_WEBUI_PASSWORD=${HERMES_WEBUI_PASSWORD:-}
+      - HERMES_WEBUI_DOCKER_SELF_UPDATE=${HERMES_WEBUI_DOCKER_SELF_UPDATE:-0}
+      - HERMES_WEBUI_DOCKER_IMAGE=${HERMES_WEBUI_DOCKER_IMAGE:-24802117/hermes-webui}
+      - HERMES_WEBUI_RELEASE_REPOSITORY=${HERMES_WEBUI_RELEASE_REPOSITORY:-NiuStar/hermes-webui}
+      - HERMES_WEBUI_GITHUB_TOKEN=${HERMES_WEBUI_GITHUB_TOKEN:-}
+      - HERMES_WEBUI_CONTAINER_NAME=${HERMES_WEBUI_CONTAINER_NAME:-hermes-webui}
       # Bind-mount permission handling for the WebUI (fixes #1389, #1399).
       # NOTE: WebUI's HERMES_HOME_MODE is a credential-file threshold (allow
       # group bits on .env/.signing_key/etc.), DIFFERENT from the agent's
@@ -142,6 +149,25 @@ services:
     restart: unless-stopped
     networks:
       - hermes-net
+
+  hermes-webui-updater:
+    profiles: ["self-update"]
+    image: 24802117/hermes-webui:latest
+    pull_policy: always
+    entrypoint: ["/usr/local/bin/python", "/apptoo/api/docker_self_update.py", "--serve", "/run/hermes-webui-updater/control.sock"]
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    environment:
+      - HERMES_WEBUI_DOCKER_SELF_UPDATE=${HERMES_WEBUI_DOCKER_SELF_UPDATE:-0}
+      - HERMES_WEBUI_UPDATE_TARGET=${HERMES_WEBUI_CONTAINER_NAME:-hermes-webui}
+      - HERMES_WEBUI_DOCKER_IMAGE=${HERMES_WEBUI_DOCKER_IMAGE:-24802117/hermes-webui}
+      - HERMES_WEBUI_RELEASE_REPOSITORY=${HERMES_WEBUI_RELEASE_REPOSITORY:-NiuStar/hermes-webui}
+      - HERMES_WEBUI_UPDATE_SOCKET_GID=${GID:-1000}
+    volumes:
+      - ${HERMES_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+      - updater-control:/run/hermes-webui-updater
+    restart: unless-stopped
 
 networks:
   hermes-net:
@@ -162,3 +188,4 @@ volumes:
   #   The full procedure (and why) is documented in docs/docker.md.
   hermes-home:
   hermes-agent-src:
+  updater-control:

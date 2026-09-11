@@ -13,7 +13,7 @@ This is the comprehensive Docker reference. For a 5-minute quickstart, see the [
 
 ### Available Docker tags
 
-The WebUI Docker image is published to `ghcr.io/nesquena/hermes-webui` with these tags:
+The WebUI Docker image is published to `24802117/hermes-webui` with these tags:
 
 | Tag | Channel | Description |
 |---|---|---|
@@ -27,10 +27,13 @@ To track experimental builds in Docker Compose, use the `:experimental` tag:
 ```yaml
 services:
   hermes-webui:
-    image: ghcr.io/nesquena/hermes-webui:experimental
+    image: 24802117/hermes-webui:experimental
 ```
 
-> **Note:** updating between `:experimental` builds requires `docker compose pull` followed by `docker compose up -d` — the floating tag is updated only when a new `exp-v*` release is pushed. Experimental builds are not pushed on every commit to the default branch.
+> **Note:** the **Update** button handles this after the explicit self-update
+> profile is enabled. The floating tag is updated only when a new `exp-v*`
+> release is pushed. Experimental builds are not pushed on every commit to the
+> default branch.
 
 > **Note (v0.14+):** If you use `docker-compose.three-container.yml`, both
 > `hermes-agent` and `hermes-dashboard` initialise from the same image and write
@@ -59,6 +62,50 @@ are owner-only (`0700` directory, `0600` files), not world-writable.
 For multi-tenant or hostile-container environments, rebuild with your own runtime user, mount policy,
 and supervisor assumptions. Development images that need package-manager convenience should add
 those tools in a dev-only Dockerfile instead of reintroducing passwordless sudo to production.
+
+### One-click Docker updates
+
+The supplied Compose files define a restricted updater sidecar from the same image.
+Only that sidecar mounts `/var/run/docker.sock`; the WebUI and its agent tools do
+not receive Docker daemon access. It is disabled by default. To enable it, set
+both values in `.env`, then recreate the stack once:
+
+```dotenv
+COMPOSE_PROFILES=self-update
+HERMES_WEBUI_DOCKER_SELF_UPDATE=1
+```
+
+After that one-time opt-in, the
+**Update** button checks the
+latest published GitHub Release and starts the updater baked into the image. No
+extra updater program or Docker CLI is installed on the host.
+
+The updater pulls the release image through the Docker Engine API, recreates the
+current container with its existing mounts, ports, environment and restart
+policy, waits for the replacement to become healthy, and rolls back on failure.
+Active WebUI runs and concurrent updates block the operation.
+
+The updater sidecar deliberately remains on the image that started the current
+Compose stack. Its control protocol is kept backward-compatible; recreating the
+Compose stack upgrades the sidecar itself. A WebUI button update replaces only
+the WebUI container so the process performing rollback cannot replace itself.
+
+The updater sidecar still controls the host Docker daemon, but its local control
+socket accepts only a fixed WebUI replacement action for the configured
+container and image repository. Remove `self-update` from `COMPOSE_PROFILES` and
+set `HERMES_WEBUI_DOCKER_SELF_UPDATE=0` to disable one-click Docker updates. Direct
+source-checkout deployments continue to use the existing Git-based updater.
+
+For a private GitHub release repository, set `HERMES_WEBUI_GITHUB_TOKEN` on the
+WebUI service with read-only repository access. The token is used only for the
+GitHub Releases API and is not passed to the Docker updater sidecar. Set
+`HERMES_WEBUI_RELEASE_REPOSITORY` and `HERMES_WEBUI_DOCKER_IMAGE` together when
+using a fork so release detection and image deployment stay on the same source.
+
+Direct source-checkout deployments update through Git. A packaged install with
+no `.git` directory still displays its current and latest release versions but
+does not claim an online replacement path unless that distribution publishes a
+supported platform artifact.
 
 ## 5-minute quickstart (single container)
 
@@ -269,7 +316,7 @@ The three-service pattern uses two containers:
 | Service | Image | Ports |
 |---|---|---|
 | `hermes-agent` | `nousresearch/hermes-agent:latest` | 8642 (gateway), 9119 (dashboard) |
-| `hermes-webui` | `ghcr.io/nesquena/hermes-webui:latest` | 8787 (chat UI) |
+| `hermes-webui` | `24802117/hermes-webui:latest` | 8787 (chat UI) |
 
 Example compose snippet (save as `docker-compose.three-service.yml` or inline into your own file):
 
@@ -296,7 +343,7 @@ services:
       - hermes-net
 
   hermes-webui:
-    image: ghcr.io/nesquena/hermes-webui:latest
+    image: 24802117/hermes-webui:latest
     container_name: hermes-webui
     depends_on:
       - hermes-agent

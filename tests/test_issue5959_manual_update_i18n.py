@@ -14,10 +14,9 @@ def read(relative_path: str) -> str:
 def test_manual_update_instruction_exists_in_every_locale():
     source = read("static/i18n.js")
     assert source.count("settings_update_manual_docker:") == 15
-
-    values = re.findall(r"settings_update_manual_docker:\s*'([^']*)'", source)
-    assert len(values) == 15
-    assert all("{0}" in value for value in values)
+    assert "settings_update_manual_docker: 'Manual update required" not in source
+    assert "docker pull" not in source
+    assert "settings_update_manual_docker: ''" not in source
 
 
 def test_manual_update_instruction_uses_translation_helper():
@@ -28,7 +27,7 @@ def test_manual_update_instruction_uses_translation_helper():
     assert match
     function_source = match.group(0)
     assert "t('settings_update_manual_docker'" in function_source
-    assert "docker pull ghcr.io/nesquena/hermes-webui:latest" in function_source
+    assert "One-click Docker update is disabled" in function_source
     assert "Manual update required" not in function_source
 
 

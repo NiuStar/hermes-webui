@@ -13,7 +13,9 @@
 
 services:
   hermes-webui:
-    build: .
+    image: ${HERMES_WEBUI_RUNTIME_IMAGE:-24802117/hermes-webui:latest}
+    pull_policy: always
+    container_name: ${HERMES_WEBUI_CONTAINER_NAME:-hermes-webui}
     ports:
     # select only one; use 127.0.0.1 version to expose to localhost only
       - "127.0.0.1:8787:8787"
@@ -27,6 +29,7 @@ services:
       - ${HERMES_HOME:-${HOME}/.hermes}:/home/hermeswebui/.hermes
       # Your workspace directory shown on first launch (adapt if yours is different, the container will use the mounted /workspace)
       - ${HERMES_WORKSPACE:-${HOME}/workspace}:/workspace
+      - updater-control:/run/hermes-webui-updater
     environment:
       # Set to your host user ID: run `id -u` and `id -g` to find them.
       # On macOS, UIDs start at 501 (not 1000), so set UID and GID in a .env file:
@@ -45,6 +48,11 @@ services:
       # Optional: enable password auth. Set HERMES_WEBUI_PASSWORD in .env
       # (required if you expose the port beyond 127.0.0.1).
       - HERMES_WEBUI_PASSWORD=${HERMES_WEBUI_PASSWORD:-}
+      - HERMES_WEBUI_DOCKER_SELF_UPDATE=${HERMES_WEBUI_DOCKER_SELF_UPDATE:-0}
+      - HERMES_WEBUI_DOCKER_IMAGE=${HERMES_WEBUI_DOCKER_IMAGE:-24802117/hermes-webui}
+      - HERMES_WEBUI_RELEASE_REPOSITORY=${HERMES_WEBUI_RELEASE_REPOSITORY:-NiuStar/hermes-webui}
+      - HERMES_WEBUI_GITHUB_TOKEN=${HERMES_WEBUI_GITHUB_TOKEN:-}
+
       #
       # Bind-mount permission handling (fixes #1389, #1399):
       #   When you mount an EXISTING ~/.hermes directory (the common case),
@@ -56,3 +64,25 @@ services:
       # - HERMES_SKIP_CHMOD=1
       # - HERMES_HOME_MODE=0640
     restart: unless-stopped
+
+  hermes-webui-updater:
+    profiles: ["self-update"]
+    image: ${HERMES_WEBUI_RUNTIME_IMAGE:-24802117/hermes-webui:latest}
+    pull_policy: always
+    entrypoint: ["/usr/local/bin/python", "/apptoo/api/docker_self_update.py", "--serve", "/run/hermes-webui-updater/control.sock"]
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    environment:
+      - HERMES_WEBUI_DOCKER_SELF_UPDATE=${HERMES_WEBUI_DOCKER_SELF_UPDATE:-0}
+      - HERMES_WEBUI_UPDATE_TARGET=${HERMES_WEBUI_CONTAINER_NAME:-hermes-webui}
+      - HERMES_WEBUI_DOCKER_IMAGE=${HERMES_WEBUI_DOCKER_IMAGE:-24802117/hermes-webui}
+      - HERMES_WEBUI_RELEASE_REPOSITORY=${HERMES_WEBUI_RELEASE_REPOSITORY:-NiuStar/hermes-webui}
+      - HERMES_WEBUI_UPDATE_SOCKET_GID=${GID:-1000}
+    volumes:
+      - ${HERMES_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+      - updater-control:/run/hermes-webui-updater
+    restart: unless-stopped
+
+volumes:
+  updater-control:
