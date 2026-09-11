@@ -26,6 +26,7 @@ from __future__ import annotations
 import importlib
 import uuid
 
+from tests._approval_entry_compat import approval_entry
 from tests.conftest import requires_agent_modules
 
 pytestmark = requires_agent_modules
@@ -37,7 +38,7 @@ def _seed_gateway_entry(ta, sid, pattern_key):
     Mirrors the local in-process agent path: a guarded command blocks on an
     ``_ApprovalEntry`` in ``_gateway_queues`` waiting for the user's choice.
     """
-    entry = ta._ApprovalEntry({
+    entry = approval_entry({
         "command": "rm -rf /tmp/6017",
         "pattern_key": pattern_key,
         "pattern_keys": [pattern_key],

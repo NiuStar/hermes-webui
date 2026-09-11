@@ -2126,6 +2126,23 @@ function _dispatchExtensionTurnLifecycle(type,sessionId,streamId,details={}){
   }
 }
 
+function _settledSessionForCurrentWindow(session){
+  if(!session || !S.session || session.session_id!==S.session.session_id) return session;
+  const result={...session};
+  // Poll summaries are not in the merged transcript's pagination coordinates.
+  if(S.session._metadataMessageCount!=null) result._metadataMessageCount=S.session._metadataMessageCount;
+  if(typeof _messagesTruncated!=='undefined' && _messagesTruncated &&
+      !result._messages_truncated && Array.isArray(result.messages)){
+    // Keep the already-loaded prefix boundary, including all newly appended
+    // rows. Clamp after a genuine shrink so the newest answer is never lost.
+    const offset=Math.max(0,Math.min(Number(_oldestIdx)||0,Math.max(0,result.messages.length-30)));
+    result.messages=result.messages.slice(offset);
+    result._messages_offset=offset;
+    result._messages_truncated=offset>0;
+  }
+  return result;
+}
+
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
   const reconnecting=!!options.reconnecting;
@@ -6099,9 +6116,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('done',e=>{
-      if(_streamFinalized) return;
+      if(_streamFinalized){window.webuiTiming?.mark('done_skipped',{session_id:activeSid,stream_id:streamId,stage:'already_finalized'});return;}
       _clearStreamEndRecovery();
-      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
+      if(_bailOutOfTerminalEventsFromStaleStream(source)){window.webuiTiming?.mark('done_skipped',{session_id:activeSid,stream_id:streamId,stage:'stale_stream'});return;}
       // Set _streamFinalized IMMEDIATELY — before any fade delay. Without this,
       // a stream_end event arriving during the fade window sees
       // _streamFinalized=false, calls _restoreSettledSession(), and overwrites
@@ -6110,9 +6127,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _cancelThrottledSnapshotTimer();
+      const _probeParseStarted=performance.now();
       const _doneData=JSON.parse(e.data);
+      window.webuiTiming?.mark('done_json_parsed',{session_id:activeSid,stream_id:streamId,ms:performance.now()-_probeParseStarted});
       const _doneEvent=e;
       const _finishDone=()=>{
+        window.webuiTiming?.mark('settle_begin',{session_id:activeSid,stream_id:streamId,ms:performance.now()-_probeParseStarted});
         // Bug A fix: cancel any pending rAF and mark stream finalized before
         // the DOM is settled by renderMessages, so no trailing token/reasoning rAF
         // can reintroduce a stale thinking card or duplicate content.
@@ -6134,6 +6154,62 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           _smdEndParser();
         }
         const d=_doneData;
+        if(d.notification_only){
+          if(_isSessionCurrentPane(activeSid)){
+            const text=_streamDisplay();
+            const lastUser=S.messages.map(m=>m.role).lastIndexOf('user');
+            const last=S.messages[S.messages.length-1];
+            if(text){
+              if(last&&last.role==='assistant'&&S.messages.length-1>lastUser) last.content=text;
+              else S.messages.push({role:'assistant',content:text,reasoning:reasoningText||undefined,_ts:Date.now()/1000});
+            }
+            _flushReasoningToAnchor();
+            _applyToAnchor('done',{status:'completed'},_doneEvent,null,{render:false});
+            _attachProjectedAnchorSceneToLastAssistant(S.messages);
+            // Activity projection hides legacy prose sources. The notice path
+            // keeps this exact streamed final segment instead of rebuilding it.
+            if(assistantRow&&text){
+              // Retain one owner for the final prose: the original stream node.
+              // Remove only matching projected prose in this same turn, before
+              // exposing the source; preserve intermediate worklog narration.
+              const turn=assistantRow.closest('.assistant-turn');
+              const segmentSeq=assistantRow.getAttribute('data-live-segment-seq');
+              const finalLocalId=segmentSeq?`live-prose:${streamId}:${segmentSeq}`:'';
+              if(turn&&finalLocalId){
+                turn.querySelectorAll('[data-anchor-scene-prose="1"]').forEach(node=>{
+                  if(node!==assistantRow&&node.getAttribute('data-anchor-local-id')===finalLocalId) node.remove();
+                });
+              }
+              _clearAnchorProseIncrementalNode();
+              assistantRow.removeAttribute('data-live-assistant');
+              assistantRow.hidden=false;
+              assistantRow.removeAttribute('aria-hidden');
+              assistantRow.classList.remove('assistant-segment-worklog-source');
+            }
+            S.session._retainStreamView=true;
+            S.session.active_stream_id=null;
+            S.session.pending_started_at=null;
+            S.activeStreamId=null;
+            S.toolCalls.forEach(tc=>{tc.done=true;});
+            _clearOwnerInflightState();
+            _clearApprovalForOwner();
+            _clearClarifyForOwner('terminal');
+            if(_pendingGoalContinuation&&typeof queueSessionMessage==='function'){
+              const next=_pendingGoalContinuation;_pendingGoalContinuation=null;
+              queueSessionMessage(next.sid,{text:next.text,files:[],model:next.model,model_provider:next.model_provider,profile:next.profile});
+            }
+            _queueDrainSid=activeSid;
+            _setActivePaneIdleIfOwner();
+            _dispatchExtensionTurnLifecycle('turn:complete',activeSid,streamId,{status:'completed',endedAt:Date.now()/1000});
+            syncTopbar();
+            window.webuiTiming?.mark('settle_end',{session_id:activeSid,stream_id:streamId,ms:performance.now()-_probeParseStarted,busy:!!S.busy});
+          }
+          _clearOwnerInflightState();
+          _clearApprovalForOwner();
+          _clearClarifyForOwner('terminal');
+          _closeSource(source);
+          return;
+        }
         _flushReasoningToAnchor();
         _applyToAnchor('done',{
           status:d.status||'completed',
@@ -6185,6 +6261,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCost=(S.session&&S.session.estimated_cost)||0;
           const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
+          d.session=_settledSessionForCurrentWindow(d.session);
           S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
           // #4720: reset _oldestIdx (full-load symmetry; keeps the #4613 anchor aligned).
           if(typeof _oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0;
@@ -6404,6 +6481,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           liveDisplayText:typeof _streamDisplay==='function'?_streamDisplay():assistantText,
         });
         sendBrowserNotification('Response complete',_completionPreview||'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid});
+        window.webuiTiming?.mark('settle_end',{session_id:activeSid,stream_id:streamId,ms:performance.now()-_probeParseStarted,busy:!!S.busy});
       };
       if(_shouldUseLiveProseFade()&&assistantBody){
         _cancelAnimationFramePendingStreamRender();

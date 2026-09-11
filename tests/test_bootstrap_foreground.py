@@ -66,6 +66,19 @@ REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 
+@pytest.fixture(autouse=True)
+def restore_process_cwd():
+    """Mocked execv returns, so restore the real chdir done by bootstrap."""
+    original = os.open('.', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        yield
+    finally:
+        try:
+            os.fchdir(original)
+        finally:
+            os.close(original)
+
+
 # ---------- helpers --------------------------------------------------------
 
 
@@ -535,7 +548,18 @@ class TestForegroundExecutabilityGuard:
         assert len(execv_calls) == 0
 
 
-def test_package_python_discovers_agent_before_skip_install_gate(import_bootstrap, clean_env, monkeypatch, tmp_path):
+@pytest.fixture
+def isolate_system_agent(monkeypatch):
+    """Package-probe scenarios exclude a real host-wide agent installation."""
+    exists = Path.exists
+    def isolated_exists(path):
+        if path == Path('/usr/local/lib/hermes-agent'):
+            return False
+        return exists(path)
+    monkeypatch.setattr(Path, 'exists', isolated_exists)
+
+
+def test_package_python_discovers_agent_before_skip_install_gate(import_bootstrap, clean_env, monkeypatch, tmp_path, isolate_system_agent):
     bs = import_bootstrap
     agent_dir = tmp_path / "site-packages"
     agent_dir.mkdir()
@@ -573,7 +597,7 @@ def test_package_python_discovers_agent_before_skip_install_gate(import_bootstra
     mock_builder.assert_not_called()
 
 
-def test_package_python_without_agent_stays_fail_closed(import_bootstrap, clean_env, monkeypatch, tmp_path):
+def test_package_python_without_agent_stays_fail_closed(import_bootstrap, clean_env, monkeypatch, tmp_path, isolate_system_agent):
     bs = import_bootstrap
     python_exe = sys.executable
 

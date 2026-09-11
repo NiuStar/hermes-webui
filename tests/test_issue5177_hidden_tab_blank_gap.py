@@ -184,36 +184,12 @@ def test_ensure_messages_loaded_supports_force_override():
     )
 
 
-def test_refresh_visibility_path_requests_keep_stale_until_loaded():
-    # The visibility-recovery callers must opt INTO keepStaleUntilLoaded; the
-    # post-stream idle reconcile and the poll path stay on the original
-    # destructive reload behaviour (per the design note in the patch comment).
+def test_all_refresh_paths_request_keep_stale_until_loaded():
+    # Idle reconciliation after a long stream has visible content too. All
+    # same-session refreshes now opt into the existing atomic swap path.
     block = _refresh_block(_compact(SESSIONS_JS))
-    # The recovery-reason map MUST include 'visible' and 'focus' and EXCLUDE
-    # 'poll' / 'idle-reconcile'. Strip JS-side whitespace via _compact above.
-    assert "const_recoveryReasons={visible:true,focus:true};" in block, (
-        "expected the visibility/focus recovery-reason map"
-    )
-    assert "const_keepStaleUntilLoaded=!!_recoveryReasons[String(reason||'')];" in block
-    # The reloaded-path loadSession call must forward the flag — there is
-    # exactly one loadSession call in this block (the reloaded branch) and it
-    # must pass keepStaleUntilLoaded.
-    assert (
-        "awaitloadSession(sid,{force:true,externalRefreshReason:reason||'poll',keepStaleUntilLoaded:_keepStaleUntilLoaded});"
-        in block
-    )
-
-
-def test_poll_and_idle_reconcile_do_not_enable_keep_stale():
-    # Belt-and-suspenders: the recovery-reason map must not list 'poll' or
-    # 'idle-reconcile'. We assert on the LITERAL set definition so any
-    # accidental widening is caught by the source lock.
-    block = _refresh_block(_compact(SESSIONS_JS))
-    # Just the two keys, exact set.
-    assert "const_recoveryReasons={visible:true,focus:true};" in block
-    # Sanity: those exact reason strings must still be the ones the
-    # visibility/focus listeners use elsewhere in this file. (Failure here
-    # means a renaming broke our routing.)
+    assert "const_keepStaleUntilLoaded=true;" in block
+    assert "awaitloadSession(sid,{force:true,externalRefreshReason:reason||'poll',keepStaleUntilLoaded:_keepStaleUntilLoaded});" in block
     compact = _compact(SESSIONS_JS)
     assert "refreshActiveSessionIfExternallyUpdated('visible')" in compact
     assert "refreshActiveSessionIfExternallyUpdated('focus')" in compact

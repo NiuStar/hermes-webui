@@ -29,6 +29,7 @@ These tests drive the real ``_handle_approval_respond`` handler and assert:
 """
 from __future__ import annotations
 
+from tests._approval_entry_compat import approval_entry
 import json
 import uuid
 from unittest.mock import patch
@@ -109,7 +110,7 @@ def _seed_local_pending_approval(sid: str):
     with ta._lock:
         ta._gateway_queues.pop(sid, None)
         ta._pending.pop(sid, None)
-    entry = ta._ApprovalEntry({
+    entry = approval_entry({
         "command": "rm -rf /tmp/x",
         "description": "Dangerous command",
         "pattern_key": "dangerous_command",

@@ -664,7 +664,17 @@ def test_get_available_models_reloads_when_request_profile_changes_even_with_reb
         config.invalidate_models_cache()
 
 
-def test_chat_start_retags_empty_session_to_request_profile(monkeypatch, tmp_path):
+def _cleanup_stubbed_chat_stream(routes, session):
+    # These tests replace Thread.start, so no worker runs its normal cleanup.
+    stream_id = session.active_stream_id
+    if stream_id:
+        with routes.STREAMS_LOCK:
+            routes.STREAMS.pop(stream_id, None)
+        from api.config import unregister_stream_owner
+        unregister_stream_owner(stream_id)
+
+
+def test_chat_start_retags_empty_session_to_request_profile(monkeypatch, tmp_path, request):
     """An empty session created under profile A can be sent under profile B after a switch."""
     import api.routes as routes
 
@@ -688,6 +698,7 @@ def test_chat_start_retags_empty_session_to_request_profile(monkeypatch, tmp_pat
             self.saved = True
 
     fake = FakeSession()
+    request.addfinalizer(lambda: _cleanup_stubbed_chat_stream(routes, fake))
     monkeypatch.setattr(routes, "get_session", lambda sid: fake)
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "work")
     monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda path: tmp_path)
@@ -737,7 +748,7 @@ def test_chat_start_retags_empty_session_to_request_profile(monkeypatch, tmp_pat
     assert payloads and payloads[-1][0] == 200
 
 
-def test_chat_start_does_not_retag_non_empty_session(monkeypatch, tmp_path):
+def test_chat_start_does_not_retag_non_empty_session(monkeypatch, tmp_path, request):
     """Profile retagging is limited to empty placeholder sessions."""
     import api.routes as routes
 
@@ -761,6 +772,7 @@ def test_chat_start_does_not_retag_non_empty_session(monkeypatch, tmp_path):
             self.saved = True
 
     fake = FakeSession()
+    request.addfinalizer(lambda: _cleanup_stubbed_chat_stream(routes, fake))
     monkeypatch.setattr(routes, "get_session", lambda sid: fake)
     monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda path: tmp_path)
     monkeypatch.setattr(

@@ -72,7 +72,7 @@ def test_full_message_payload_includes_todo_state_snapshot():
 
 def test_done_payload_uses_full_message_count_helper():
     done_idx = STREAMING_SOURCE.index("put('done', _done_payload)")
-    block_start = STREAMING_SOURCE.rfind("raw_session =", 0, done_idx)
+    block_start = STREAMING_SOURCE.rfind("raw_session = _session_payload_with_full_messages", 0, done_idx)
     block = STREAMING_SOURCE[block_start:done_idx]
 
     assert "_session_payload_with_full_messages(s, tool_calls=tool_calls)" in block

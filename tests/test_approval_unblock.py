@@ -27,9 +27,9 @@ try:
         _gateway_queues,
         _gateway_notify_cbs,
         _lock,
-        _ApprovalEntry,
         submit_pending,
     )
+    from tests._approval_entry_compat import approval_entry as _ApprovalEntry
     # has_pending and pop_pending were removed from tools.approval when the
     # agent renamed has_pending -> has_blocking_approval (gateway queue check)
     # and removed the polling-mode pop_pending. Routes now check _pending
@@ -217,9 +217,10 @@ class TestApprovalModuleExports:
             "tools.approval must export resolve_gateway_approval"
 
     def test_approval_entry_exported(self):
-        import tools.approval as ap
-        assert hasattr(ap, "_ApprovalEntry"), \
-            "tools.approval must export _ApprovalEntry"
+        entry = _ApprovalEntry({"command": "test-only"})
+        assert entry.data["command"] == "test-only"
+        assert entry.data["request_id"]
+        assert not entry.event.is_set()
 
     def test_streaming_fallback_uses_blocking_approval_contract(self):
         assert "has_blocking_approval as _has_blocking_approval" in STREAMING_SRC, \

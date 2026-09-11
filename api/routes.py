@@ -12944,6 +12944,10 @@ def _render_index_shell_base() -> str:
 @session_timing_request
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
+    if parsed.path.startswith("/api/application/tasks"):
+        from api.application_routes import handle_application_get
+
+        return handle_application_get(handler, parsed)
     proxy_result = _handle_extension_sidecar_proxy(handler, parsed, "GET")
     if proxy_result is not False:
         return proxy_result
@@ -15080,6 +15084,11 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         return True
+
+    if parsed.path.startswith("/api/application/tasks"):
+        from api.application_routes import handle_application_post
+
+        return handle_application_post(handler, parsed, body)
 
     if parsed.path == "/api/escape/authorize":
         return _handle_escape_authorize(handler, parsed, body)
@@ -24861,7 +24870,10 @@ def _handle_cron_create(handler, body):
 def _handle_cron_delivery_options(handler):
     """Return available delivery platforms for cron jobs."""
     try:
-        from cron.scheduler import _KNOWN_DELIVERY_PLATFORMS
+        try:
+            from cron.scheduler_delivery import _KNOWN_DELIVERY_PLATFORMS
+        except ImportError:
+            from cron.scheduler import _KNOWN_DELIVERY_PLATFORMS
     except Exception:
         _KNOWN_DELIVERY_PLATFORMS = frozenset()
     platforms = [

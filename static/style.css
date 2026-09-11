@@ -4934,16 +4934,18 @@ main.main > #mainSettings,
 main.main > #mainSkills,
 main.main > #mainMemory,
 main.main > #mainTasks,
+main.main > #mainApplications,
 main.main > #mainKanban,
 main.main > #mainWorkspaces,
 main.main > #mainProfiles,
 main.main > #mainInsights,
 main.main > #mainLogs{display:none;}
-main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-logs):not(.showing-plugin) > #mainChat{display:flex;}
+main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-applications):not(.showing-kanban):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-logs):not(.showing-plugin) > #mainChat{display:flex;}
 main.main.showing-settings > #mainSettings{display:flex;overflow-y:auto;}
 main.main.showing-skills > #mainSkills{display:flex;}
 main.main.showing-memory > #mainMemory{display:flex;}
 main.main.showing-tasks > #mainTasks{display:flex;}
+main.main.showing-applications > #mainApplications{display:flex;overflow-y:auto;}
 main.main.showing-kanban > #mainKanban{display:flex;overflow-y:auto;}
 main.main.showing-workspaces > #mainWorkspaces{display:flex;}
 main.main.showing-profiles > #mainProfiles{display:flex;}
@@ -7322,3 +7324,17 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
 /* Settings field highlight (mirrors msg-question-highlight / _highlightQuestionRow pattern) */
 .settings-field-highlight { animation: settings-field-pulse 1.6s ease-out; }
 @keyframes settings-field-pulse { 0% { box-shadow: 0 0 0 0 var(--focus-ring); } 35% { box-shadow: 0 0 0 4px var(--focus-ring); } 100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); } }
+
+/* Application runtime v2 */
+.application-task-list { flex: 1; overflow-y: auto; padding: 8px; }
+.application-task-row { display: block; width: 100%; padding: 8px; border: 0; border-radius: 6px; background: transparent; color: var(--text); font: 12px/1.4 var(--font-mono); text-align: left; cursor: pointer; }
+.application-task-row:hover { background: var(--hover); }
+.application-muted { padding: 8px; color: var(--muted); font-size: 12px; }
+.application-runtime { display: grid; grid-template-columns: minmax(280px, 420px) minmax(0, 1fr); gap: 16px; width: 100%; height: 100%; padding: 16px; overflow: auto; }
+.application-form { display: grid; align-content: start; gap: 12px; }
+.application-form label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
+.application-form input, .application-form select { width: 100%; min-width: 0; padding: 8px 10px; border: 1px solid var(--border2); border-radius: 6px; background: var(--input-bg); color: var(--text); font: 12px var(--font-mono); }
+.application-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 4px; }
+.application-output { min-width: 0; min-height: 240px; margin: 0; padding: 12px; overflow: auto; border: 1px solid var(--border2); border-radius: 6px; background: var(--code-bg); color: var(--pre-text); font: 12px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.application-output[data-issue]:not([data-issue=""]) { border-color: var(--error); }
+@media (max-width: 760px) { .application-runtime { grid-template-columns: 1fr; padding: 12px; } .application-output { min-height: 180px; } }

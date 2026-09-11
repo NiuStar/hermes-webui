@@ -142,6 +142,36 @@ def get_stream_runtime_snapshot() -> dict[str, object]:
     return result
 
 
+def _future_display_match(stack, remaining, index):
+    # Context keys only leave remaining; each cached position is popped once.
+    while stack and stack[-1][1] not in remaining:
+        stack.pop()
+    return bool(stack and stack[-1][0] > index)
+
+
+def _completion_notice(session_id, stream_id):
+    return {'session_id': session_id, 'stream_id': stream_id, 'notification_only': True}
+
+
+def _terminal_message_window(raw):
+    """Window only the wire copy; preserve canonical total and revision."""
+    result = dict(raw)
+    messages = raw.get('messages') or []
+    offset = max(0, len(messages) - 30)
+    result['messages'] = messages[offset:]
+    result['_messages_offset'] = offset
+    result['_messages_truncated'] = offset > 0
+    # Global tool summaries span the entire history. Only the last user turn
+    # may supply the live fallback rail; prior tools remain in paged history.
+    last_user = next((i for i in range(len(messages)-1, -1, -1)
+                      if messages[i].get('role') == 'user'), len(messages))
+    result['tool_calls'] = [dict(tc) for tc in raw.get('tool_calls', [])
+                            if isinstance(tc, dict) and
+                            isinstance(tc.get('assistant_msg_idx'), int) and
+                            tc['assistant_msg_idx'] >= last_user]
+    return result
+
+
 def _session_payload_with_full_messages(session, *, tool_calls=None):
     """Return compact session metadata plus the embedded full transcript.
 
@@ -286,6 +316,19 @@ def _stream_writeback_stage(timings, name, *, clock=time.perf_counter):
             timings.append((str(name), max(0.0, float(clock() - started))))
         except Exception:
             pass
+
+
+def _timing_probe_payload(timings, started, turn_started, *, clock=time.perf_counter, wall=time.time, environ=None):
+    """Opt-in numeric telemetry; never include model inputs or outputs."""
+    if (os.environ if environ is None else environ).get('HERMES_TIMING_PROBE') != '1':
+        return None
+    try:
+        return {'stages': [{'stage': str(name), 'duration_ms': round(elapsed * 1000, 3)}
+                           for name, elapsed in timings],
+                'writeback_ms': round(max(0, clock() - started) * 1000, 3),
+                'turn_ms': round(max(0, wall() - turn_started) * 1000, 3)}
+    except Exception:
+        return None
 
 
 def _log_stream_writeback_timings(
@@ -6882,6 +6925,9 @@ def _merge_display_messages_after_agent_result(
             # row is backfilled only if it isn't already a display row and
             # hasn't already been inserted.
             _context_inserted = set()
+            _last_display_positions = {key: i for i, key in enumerate(_display_keys)}
+            _future_display_stack = sorted((i, key) for key, i in _last_display_positions.items()
+                                           if key in _remaining_ck_counts)
             _cursor = 0
             for _display_idx, _dmsg in enumerate(previous_display):
                 _dkey = _display_keys[_display_idx]
@@ -6913,10 +6959,7 @@ def _merge_display_messages_after_agent_result(
                             else:
                                 _remaining_ck_counts[_consumed_ck] = _ck_n
                         _cursor = _j + 1
-                    elif not any(
-                        _display_keys[_fi] in _remaining_ck_counts
-                        for _fi in range(_display_idx + 1, len(_display_keys))
-                    ):
+                    elif not _future_display_match(_future_display_stack, _remaining_ck_counts, _display_idx):
                         for _k in range(_cursor, len(context_keys)):
                             _ckey = context_keys[_k]
                             _cmsg = previous_context[_k]
@@ -7736,9 +7779,24 @@ def _upsert_current_turn_partial(
 
 def _sse(handler, event, data):
     """Write one SSE event to the response stream."""
+    probe = event == 'done' and os.environ.get('HERMES_TIMING_PROBE') == '1'
+    started = time.perf_counter() if probe else 0
     payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-    handler.wfile.write(payload.encode('utf-8'))
+    encoded = payload.encode('utf-8')
+    if probe:
+        serialize_ms = (time.perf_counter() - started) * 1000
+        _sse(handler, 'timing_probe', {'stages': [{'stage': 'done_serialize', 'duration_ms': serialize_ms}]})
+    write_started = time.perf_counter() if probe else 0
+    handler.wfile.write(encoded)
     handler.wfile.flush()
+    if probe:
+        try:
+            print(json.dumps({'diagnostic': 'timing_probe', 'stage': 'done_write',
+                              'session_id': (data.get('session') or {}).get('session_id'),
+                              'bytes': len(encoded), 'serialize_ms': serialize_ms,
+                              'write_flush_ms': (time.perf_counter() - write_started) * 1000}), flush=True)
+        except Exception:
+            pass
 
 
 # ── SSE write deadline (Defect A: per-connection thread exhaustion) ─────────
@@ -10826,6 +10884,12 @@ def _run_agent_streaming(
                 return
             _writeback_timings = []
             _writeback_started = time.perf_counter()
+            if os.environ.get('HERMES_TIMING_PROBE') == '1':
+                try:
+                    put('timing_probe', {'stages': [{'stage': 'agent_return_since_turn_start',
+                        'duration_ms': max(0, time.time() - _turn_started_at) * 1000}]})
+                except Exception:
+                    pass
             with _agent_lock:
                 if not ephemeral and not _stream_writeback_is_current(s, stream_id):
                     if _stream_writeback_can_supersede_recovery_marker(s, msg_text):
@@ -12062,7 +12126,7 @@ def _run_agent_streaming(
             # Include context window data from the agent's compressor for the UI indicator.
             # The session-level persistence happens above (before s.save()) so the values
             # survive a page reload; this block only populates the live SSE usage payload.
-            _cc = getattr(agent, 'context_compressor', None)
+            _cc = None if os.environ.get('HERMES_COMPLETION_NOTICE') == '1' else getattr(agent, 'context_compressor', None)
             if _cc:
                 _cc_cl_sse = getattr(_cc, 'context_length', 0) or 0
                 # #3256/#3263: remember the original compressor cap + threshold
@@ -12273,8 +12337,28 @@ def _run_agent_streaming(
             except Exception as _goal_exc:
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
             with _stream_writeback_stage(_writeback_timings, "done_payload"):
-                raw_session = _session_payload_with_full_messages(s, tool_calls=tool_calls)
-                _done_payload = {'session': redact_session_data(raw_session), 'usage': usage}
+                if os.environ.get('HERMES_COMPLETION_NOTICE') == '1':
+                    _done_payload = _completion_notice(s.session_id, stream_id)
+                    _probe = _timing_probe_payload(_writeback_timings, _writeback_started, _turn_started_at)
+                    if _probe is not None:
+                        put('timing_probe', _probe)
+                else:
+                    _payload_started = time.perf_counter()
+                    raw_session = _session_payload_with_full_messages(s, tool_calls=tool_calls)
+                    _writeback_timings.append(('done_history_merge', time.perf_counter() - _payload_started))
+                    _payload_started = time.perf_counter()
+                    if os.environ.get('HERMES_TERMINAL_WINDOW') == '1':
+                        raw_session = _terminal_message_window(raw_session)
+                    _done_payload = {'session': redact_session_data(raw_session), 'usage': usage}
+                    _writeback_timings.append(('done_redaction', time.perf_counter() - _payload_started))
+                    _probe = _timing_probe_payload(_writeback_timings, _writeback_started, _turn_started_at)
+                    if _probe is not None:
+                        try:
+                            put('timing_probe', _probe)
+                            print(json.dumps({'diagnostic': 'timing_probe', 'session_id': session_id,
+                                              'stream_id': stream_id, 'summary': _probe}), flush=True)
+                        except Exception:
+                            pass
                 if _tool_limit_reached:
                     _done_payload['terminal_state'] = 'tool_limit_reached'
                     _done_payload['terminal_reason'] = 'max_iterations'

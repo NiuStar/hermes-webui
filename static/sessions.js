@@ -1987,7 +1987,13 @@ async function loadSession(sid){
     _loadingSessionId=null;
     return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
+  const _previousMetadataMessageCount=S.session&&S.session._metadataMessageCount;
   S.session=data.session;
+  // Metadata and merged display counts occupy different coordinate spaces.
+  // A failed message fetch must not acknowledge an unseen metadata change.
+  S.session._metadataMessageCount=_keepStaleUntilLoaded && _previousMetadataMessageCount!=null
+    ? _previousMetadataMessageCount : Number(data.session.message_count || 0);
+  S.session._pendingMetadataMessageCount=Number(data.session.message_count || 0);
   if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
   // Loading a real existing session abandons any pre-session toolset override
@@ -2252,7 +2258,7 @@ async function loadSession(sid){
       // "Loading conversation..." div injected at the top of loadSession would
       // persist forever with no recovery path.
       const _msgInner = $('msgInner');
-      if (_msgInner) {
+      if (_msgInner && !(_keepStaleUntilLoaded && S.messages && S.messages.length)) {
         _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load messages. Try switching sessions or refreshing.</div>';
       }
       if (typeof showToast === 'function') showToast('Failed to load conversation messages', 3000, 'error');
@@ -3233,6 +3239,10 @@ async function _ensureMessagesLoaded(sid, opts) {
   }
   if(S.session&&S.session.session_id===sid){
     if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
+    if(S.session._pendingMetadataMessageCount!=null){
+      S.session._metadataMessageCount=S.session._pendingMetadataMessageCount;
+      delete S.session._pendingMetadataMessageCount;
+    }
     S.session.message_count=Number(data.session.message_count || msgs.length);
     S.lastUsage={...(data.session.last_usage||S.lastUsage||{})};
     // Phase 2: the messages=1 response carries the canonical cold-load
@@ -5937,6 +5947,7 @@ function _drainSessionUpdatedPendingCount(){
 //   flash (#3976). This intentionally COEXISTS with the #3916/#4195 poll-only
 //   external gate below, which is untouched.
 async function refreshActiveSessionIfExternallyUpdated(reason){
+  if(S.session?._retainStreamView) return 'retained-stream-view';
   // opts read via arguments[1] (same pattern as loadSession) so the public
   // signature stays (reason) — callers like the poll/focus/visibility hooks and
   // refreshSessionList keep passing a single reason. Only the post-stream idle
@@ -5968,7 +5979,7 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
   if(!opts.ignoreStreamJustFinished && typeof window !== 'undefined' && window._streamJustFinished) return 'skipped';
   if(typeof document !== 'undefined' && document.hidden) return 'skipped';
   const sid = S.session.session_id;
-  const localCount = Number(S.session.message_count || (Array.isArray(S.messages)?S.messages.length:0) || 0);
+  const localCount = Number(S.session._metadataMessageCount ?? S.session.message_count ?? (Array.isArray(S.messages)?S.messages.length:0));
   const localLast = Number(S.session.last_message_at || S.session.updated_at || 0);
   _activeSessionExternalRefreshInFlight = true;
   try{
@@ -5996,22 +6007,9 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
     // list metadata, advancing the local last-seen marker so the same metadata
     // bump doesn't re-trigger on every subsequent poll.
     if(remoteCount !== localCount){
-      // Hidden-tab return / visibility / focus recovery commonly trips
-      // remoteCount !== localCount when the post-turn bg-review thread or a
-      // sibling tab persisted messages while the tab was hidden. The default
-      // loadSession(force) path clears S.messages synchronously and waits for
-      // the full transcript round-trip before re-rendering, producing the
-      // user-visible "everything disappears, then reappears after a moment"
-      // gap that #5061 (metadata-only) and #5122 (SSE 4-probe) DO NOT cover
-      // (#5177). Pass keepStaleUntilLoaded so the destructive clear is
-      // deferred to swap-in-place when the new transcript actually arrives.
-      // Restrict to the recovery reasons that produced the field repro; the
-      // post-stream idle reconcile and external/imported-session polls keep
-      // the original behaviour (no DOM is on-screen long enough for the gap
-      // to matter, and any change there would have to re-verify their own
-      // tradeoffs).
-      const _recoveryReasons = {visible:true, focus:true};
-      const _keepStaleUntilLoaded = !!_recoveryReasons[String(reason||'')];
+      // All same-session reconciliation must swap atomically, including the
+      // post-stream idle path: never discard a visible answer while fetching.
+      const _keepStaleUntilLoaded = true;
       // #5409: skip force-reload while a different session's loadSession()
       // is in flight — avoids overwriting _loadingSessionId and silently
       // cancelling an in-progress session switch. All four call paths

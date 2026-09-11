@@ -77,7 +77,13 @@ def _isolate_discover_agent_dir(monkeypatch, tmp_path, hermes_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "no-such-hermes-home"))
     monkeypatch.delenv("HERMES_WEBUI_AGENT_DIR", raising=False)
     monkeypatch.delenv("HERMES_WEBUI_PYTHON", raising=False)
-    monkeypatch.setattr(bootstrap, "_agent_dir_from_python", lambda _python: None)
+    monkeypatch.setattr(bootstrap, '_agent_dir_from_python', lambda _python: None)
+    real_exists = bootstrap.Path.exists
+    def isolated_exists(path):
+        if str(path) == '/usr/local/lib/hermes-agent':
+            return False
+        return real_exists(path)
+    monkeypatch.setattr(bootstrap.Path, 'exists', isolated_exists)
     # Force REPO_ROOT.parent to a dir that won't accidentally contain a
     # `hermes-agent` sibling on the dev machine running these tests.
     monkeypatch.setattr(bootstrap, "REPO_ROOT", tmp_path / "isolated-repo-root")

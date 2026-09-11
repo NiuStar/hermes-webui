@@ -873,11 +873,59 @@ def test_snapshot_refuses_when_wal_data_version_changes(monkeypatch, tmp_path):
         {"role": "user", "content": "p", "timestamp": 100.0},
         {"role": "assistant", "content": "a", "timestamp": 200.0},
     ])
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db)
     real_conn = sqlite3.connect(db)
     fake = _FakeConn(real_conn)
     monkeypatch.setattr(models, "open_state_db_readonly", lambda _p: fake)
     snap = models.get_state_db_regeneration_tail_snapshot("s1", 50.0)
     assert snap is None, "changed data_version must refuse the bounded snapshot"
+    assert fake._dv_calls == 2, "must reach both version reads, not an earlier failure"
+
+
+@pytest.mark.parametrize("concurrent_commit", [False, True])
+def test_snapshot_real_wal_commit_during_prefix_proof(monkeypatch, tmp_path, concurrent_commit):
+    """A real WAL writer commits after the prefix proof on another connection."""
+    import sqlite3
+    from api import models
+
+    db = _make_state_db(tmp_path, [
+        {"role": "user", "content": "prefix", "timestamp": 100.0},
+        {"role": "assistant", "content": "tail", "timestamp": 200.0},
+    ])
+    writer = sqlite3.connect(db)
+    assert writer.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    original_open = models.open_state_db_readonly
+    commits = []
+
+    def open_reader(path):
+        reader = original_open(path)
+
+        def interleave(sql):
+            if concurrent_commit and "COUNT(CASE WHEN" in sql and not commits:
+                writer.execute(
+                    "INSERT INTO messages(session_id,role,content,timestamp,active) VALUES(?,?,?,?,1)",
+                    ("s1", "user", "concurrent", 150.0),
+                )
+                writer.commit()
+                commits.append(True)
+
+        reader.set_trace_callback(interleave)
+        return reader
+
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db)
+    monkeypatch.setattr(models, "open_state_db_readonly", open_reader)
+    try:
+        snap = models.get_state_db_regeneration_tail_snapshot("s1", 175.0)
+        if concurrent_commit:
+            assert commits == [True]
+            assert writer.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 3
+            assert snap is None
+        else:
+            assert snap is not None
+            assert snap["prefix"]["count"] == 1
+            assert [row["content"] for row in snap["tail"]] == ["tail"]
+    finally:
+        writer.close()
 
 
 def test_in_tail_duplicate_guard_refuses_bounded_and_full_revision_accepted(monkeypatch, tmp_path):

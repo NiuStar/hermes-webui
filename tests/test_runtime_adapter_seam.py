@@ -1,3 +1,4 @@
+from tests._approval_entry_compat import approval_entry
 import importlib
 import io
 import queue
@@ -373,7 +374,7 @@ def test_approval_respond_approves_from_gateway_queues_when_pending_empty() -> N
         approval_mod._pending.pop(test_sid, None)
 
     # 2. Populate _gateway_queues with a real entry
-    entry = approval_mod._ApprovalEntry({
+    entry = approval_entry({
         "command": "test_cmd",
         "pattern_key": test_key,
         "pattern_keys": [test_key],
