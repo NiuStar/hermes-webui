@@ -1834,8 +1834,8 @@ class TestUiJsUpdateBanner:
         m = re.search(r'function applyUpdates\b.*?\n\}', src, re.DOTALL)
         assert m, "applyUpdates() not found"
         fn = m.group(0)
-        assert 'restarting' in fn.lower(), (
-            "success toast must mention 'restarting' (server self-restarts after update)"
+        assert ('restarting' in fn.lower() or '_monitorDockerUpdateProgress' in fn), (
+            "success path must mention restart or monitor the Docker update progress"
         )
         assert 'Reloading' not in fn, (
             "success toast must not say 'Reloading' — server restarts, page reloads after"
@@ -2382,9 +2382,13 @@ if(!classes.has('is-complete')||classes.has('is-failed'))throw new Error('wrong 
         assert '_formatUpdateTargetStatus' in fn
         assert "formatUpdatePart('WebUI',data.webui)" in fn
         assert "formatUpdatePart('Agent',data.agent)" in fn
-        assert "data.webui&&data.webui.no_git&&!data.webui.manual_update" in fn
+        assert "data.webui&&data.webui.no_git&&!data.webui.deployment_online_update" in fn
 
-    def test_manual_webui_no_git_updates_are_bannerable_but_plain_no_git_stays_hidden(self):
+    def test_docker_no_git_online_update_does_not_show_non_git_warning(self):
+        src = read('static/panels.js')
+        assert "data.webui&&data.webui.no_git&&!data.webui.deployment_online_update" in src
+        assert "data.agent&&data.agent.no_git&&!data.agent.deployment_online_update&&!data.agent.ignored" in src
+
         src = read('static/ui.js')
         format_fn = extract_js_function(src, '_formatUpdateTargetStatus')
         instruction_fn = extract_js_function(src, '_formatManualUpdateInstruction')
@@ -2410,6 +2414,50 @@ if(_formatManualUpdateInstruction({{ no_git: true, behind: 1 }}) !== null) throw
 if(_formatUpdateTargetStatus('WebUI', {{ no_git: true, behind: 1 }}) !== null) throw new Error('plain no-git webui must stay hidden');
 """.strip()
         subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_settings_no_git_agent_does_not_hide_latest_webui(self):
+        ui_src = read('static/ui.js')
+        panels_src = read('static/panels.js')
+        format_fn = extract_js_function(ui_src, '_formatUpdateTargetStatus')
+        instruction_fn = extract_js_function(ui_src, '_formatManualUpdateInstruction')
+        error_fn = extract_js_function(ui_src, '_formatUpdateCheckError')
+        check_fn = extract_js_function(panels_src, 'checkUpdatesNow')
+        script = f"""
+const state = {{
+  btnCheckUpdatesNow: {{ disabled: false }},
+  checkUpdatesLabel: {{ textContent: '' }},
+  checkUpdatesSpinner: {{ style: {{ display: 'none' }} }},
+  checkUpdatesStatus: {{ textContent: '', style: {{ color: '' }} }},
+  settingsLatestVersionBadge: {{ textContent: '' }},
+}};
+const data = {{
+  webui: {{ no_git: true, deployment_online_update: true, behind: 0, release_based: true, current_version: 'v2026.09.12-r6', latest_version: 'v2026.09.12-r6' }},
+  agent: {{ no_git: true, behind: null }},
+}};
+function $(id) {{ return state[id] || null; }}
+function t(key, ...args) {{
+  const values = {{
+    settings_checking: 'Checking', settings_check_now: 'Check now',
+    settings_up_to_date: 'Up to date', settings_update_no_git: 'Cannot check for updates',
+    settings_update_check_failed: 'Check failed', settings_updates_available: '{{count}} update(s) available',
+  }};
+  return (values[key] || key).replace(/\{{(\d+)\}}/g, (_, i) => args[Number(i)] ?? '');
+}}
+async function api() {{ return data; }}
+function _showUpdateBanner() {{}}
+{format_fn}
+{instruction_fn}
+{error_fn}
+{check_fn}
+(async () => {{
+  await checkUpdatesNow();
+  if(state.checkUpdatesStatus.textContent === 'Cannot check for updates') throw new Error('Agent no-git must not hide a successful WebUI check');
+  if(state.checkUpdatesStatus.textContent.indexOf('Up to date') === -1) throw new Error('WebUI latest state must be shown: '+state.checkUpdatesStatus.textContent);
+  if(state.checkUpdatesStatus.textContent.indexOf('Cannot check for updates') === -1) throw new Error('Agent limitation must remain visible as an annotation');
+}})().catch(err => {{ console.error(err.message); process.exit(1); }});
+""".strip()
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
 
     def test_manual_webui_banner_hides_apply_button(self):
         src = read('static/ui.js')
@@ -2715,7 +2763,7 @@ class TestUpdateCompareSource:
         src = read('static/panels.js')
         up_to_date_idx = src.find("settings_up_to_date")
         assert up_to_date_idx != -1, "manual update up-to-date branch not found"
-        block = src[up_to_date_idx:up_to_date_idx + 300]
+        block = src[up_to_date_idx:src.find('// ── Auxiliary Models', up_to_date_idx)]
         assert "_showUpdateBanner(data)" in block
 
 
