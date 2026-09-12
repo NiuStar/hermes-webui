@@ -2303,6 +2303,68 @@ if (_healthResponseServerIdentity({{ server_started_at: null, uptime_seconds: nu
 
 
 class TestUpdateBannerUx:
+    def test_docker_update_progress_dom_and_polling_contract(self):
+        html = read('static/index.html')
+        src = read('static/ui.js')
+        assert 'id="updateProgress"' in html
+        assert 'id="updateProgressBar"' in html
+        assert 'id="updateProgressStage"' in html
+        assert 'id="updateProgressElapsed"' in html
+        assert 'id="btnDismissUpdate"' in html
+        assert "function _renderDockerUpdateProgress" in src
+        assert "function _monitorDockerUpdateProgress" in src
+        assert "/api/updates/status?operation_id=" in src
+        assert "res.operation_id" in src
+        assert "_monitorDockerUpdateProgress(res.operation_id,baselineServerIdentity)" in src
+        assert "if(dismiss) dismiss.disabled=true" in src
+        assert "if(dismiss) dismiss.disabled=false" in src
+        monitor_fn = extract_js_function(src, '_monitorDockerUpdateProgress')
+        assert "status.progress.state==='succeeded'" in monitor_fn
+        assert "_waitForServerThenReload" not in monitor_fn
+
+    def test_docker_update_progress_renders_stage_step_elapsed_and_terminal_styles(self):
+        src = read('static/ui.js')
+        render_fn = extract_js_function(src, '_renderDockerUpdateProgress')
+        stage_map = re.search(
+            r"const _DOCKER_UPDATE_STAGES=\{.*?\n\};", src, re.DOTALL
+        )
+        assert stage_map
+        script = f"""
+const classes=new Set();
+const track={{attrs:{{}},setAttribute(k,v){{this.attrs[k]=v;}}}};
+const state={{
+ updateProgress:{{hidden:true,classList:{{toggle(k,on){{if(on)classes.add(k);else classes.delete(k);}},remove(...ks){{ks.forEach(k=>classes.delete(k));}}}}}},
+ updateProgressStage:{{textContent:''}},updateProgressElapsed:{{textContent:''}},
+ updateProgressBar:{{style:{{width:''}},parentElement:track}},
+}};
+function $(id){{return state[id]||null;}}
+function _i18nUpdateText(key,fallback){{return fallback;}}
+{stage_map.group(0)}
+{render_fn}
+_renderDockerUpdateProgress({{stage:'waiting_for_health',step:5,total_steps:7,elapsed_seconds:18,version:'v9',state:'running'}});
+if(!state.updateProgressStage.textContent.includes('Step 5/7'))throw new Error('missing step');
+if(!state.updateProgressStage.textContent.includes('Waiting for health check'))throw new Error('missing stage');
+if(!state.updateProgressStage.textContent.includes('v9'))throw new Error('missing version');
+if(state.updateProgressElapsed.textContent!=='18s elapsed')throw new Error('missing elapsed');
+if(state.updateProgressBar.style.width!=='71%')throw new Error('wrong width');
+if(track.attrs['aria-valuenow']!=='5')throw new Error('wrong aria value');
+_renderDockerUpdateProgress({{stage:'rolled_back',step:0,total_steps:7,elapsed_seconds:20,state:'failed'}});
+if(!classes.has('is-failed'))throw new Error('missing failure style');
+_renderDockerUpdateProgress({{stage:'completed',step:7,total_steps:7,elapsed_seconds:22,state:'succeeded'}});
+if(!classes.has('is-complete')||classes.has('is-failed'))throw new Error('wrong completion style');
+""".strip()
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_update_progress_i18n_has_english_and_chinese_stage_copy(self):
+        src = read('static/i18n.js')
+        for key in (
+            'update_progress_pulling_image', 'update_progress_waiting_for_health',
+            'update_progress_rolled_back', 'update_progress_step',
+            'update_progress_elapsed',
+        ):
+            assert len(re.findall(rf'\b{key}\s*:', src)) == 2
+        assert "update_progress_pulling_image: '正在拉取容器镜像'" in src
+
     def test_update_banner_includes_release_labels(self):
         src = read('static/ui.js')
         assert 'function _formatUpdateTargetStatus' in src

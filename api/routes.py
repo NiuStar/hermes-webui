@@ -14419,6 +14419,14 @@ def handle_get(handler, parsed) -> bool:
         except RuntimeError as e:
             return bad(handler, str(e), 503)
 
+    if parsed.path == "/api/updates/status":
+        operation_id = parse_qs(parsed.query).get("operation_id", [""])[0]
+        if not re.fullmatch(r"[0-9a-f]{32}", operation_id):
+            return bad(handler, "invalid update operation ID")
+        from api.updates import docker_update_status
+
+        return j(handler, docker_update_status(operation_id))
+
     if parsed.path == "/api/updates/check":
         settings = load_settings()
         if not settings.get("check_for_updates", True):

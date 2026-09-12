@@ -25,7 +25,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from api.agent_health import get_active_profile_gateway_running_pid
-from api.docker_self_update import CONTROL_SOCKET, request_update
+from api.docker_self_update import CONTROL_SOCKET, request_status, request_update
 from api.gateway_restart import restart_active_profile_gateway
 from api.profiles import get_active_profile_name
 from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
@@ -90,6 +90,22 @@ def deployment_info() -> dict:
         'update_mode': 'docker_engine' if kind == 'docker' and docker_command_configured else ('git' if binary_online_update else 'manual'),
         'docker_update_configured': docker_command_configured,
     }
+
+
+def docker_update_status(operation_id: str) -> dict:
+    """Read one updater-owned operation through the authenticated sidecar."""
+    if not re.fullmatch(r"[0-9a-f]{32}", str(operation_id or "")):
+        return {"ok": False, "message": "Invalid update operation ID"}
+    if deployment_info().get('online_update') is not True:
+        return {
+            'ok': False,
+            'message': 'Docker updater sidecar is unavailable for this deployment.',
+        }
+    try:
+        return request_status(operation_id)
+    except Exception:
+        logger.exception("Docker self-update status read failed")
+        return {'ok': False, 'message': 'Docker update status is temporarily unavailable.'}
 
 
 def apply_docker_update(channel=None) -> dict:

@@ -83,7 +83,13 @@ extra updater program or Docker CLI is installed on the host.
 The updater pulls the release image through the Docker Engine API, recreates the
 current container with its existing mounts, ports, environment and restart
 policy, waits for the replacement to become healthy, and rolls back on failure.
-Active WebUI runs and concurrent updates block the operation.
+While the operation runs, the update banner reports the updater's real lifecycle
+stage (image pull, release verification, container replacement, health wait,
+runtime-contract verification, cleanup, or rollback), the current step, and
+elapsed time. The bar advances by completed lifecycle stage; it is deliberately
+not presented as byte-level download percentage because the Docker Engine API
+does not provide a stable total size for every registry/layer path. Active WebUI
+runs and concurrent updates block the operation.
 
 The updater sidecar deliberately remains on the image that started the current
 Compose stack. Its control protocol is kept backward-compatible; recreating the

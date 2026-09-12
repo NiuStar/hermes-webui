@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import logging
 import os
 import secrets
 import socket
@@ -16,8 +17,11 @@ import sys
 import threading
 import time
 import urllib.parse
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 SOCKET_PATH = "/var/run/docker.sock"
 API_PREFIX = "/v1.41"
@@ -27,6 +31,87 @@ CONTROL_TOKEN = "/run/hermes-webui-updater/token"
 
 class DockerEngineError(RuntimeError):
     pass
+
+
+class UpdateProgress:
+    """Thread-safe state for recent single-flight Docker updates."""
+
+    TOTAL_STEPS = 7
+    MAX_OPERATIONS = 8
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._operations: OrderedDict[str, dict[str, Any]] = OrderedDict()
+
+    def start(self, version: str) -> tuple[str, dict[str, Any]]:
+        operation_id = secrets.token_hex(16)
+        now = time.time()
+        with self._lock:
+            self._operations[operation_id] = {
+                "operation_id": operation_id,
+                "version": version,
+                "state": "running",
+                "stage": "accepted",
+                "step": 0,
+                "total_steps": self.TOTAL_STEPS,
+                "started_at": now,
+                "updated_at": now,
+                "rolled_back": False,
+            }
+            while len(self._operations) > self.MAX_OPERATIONS:
+                self._operations.popitem(last=False)
+            return operation_id, self._snapshot_locked(operation_id)
+
+    def advance(self, operation_id: str, stage: str, step: int, **extra: Any) -> None:
+        with self._lock:
+            if not self._matches(operation_id):
+                return
+            operation = self._operations[operation_id]
+            operation.update({"stage": stage, "step": step, "updated_at": time.time()})
+            operation.update(extra)
+
+    def complete(self, operation_id: str, *, cleanup_pending: bool = False) -> None:
+        with self._lock:
+            if not self._matches(operation_id):
+                return
+            self._operations[operation_id].update({
+                "state": "succeeded",
+                "stage": "completed",
+                "step": self.TOTAL_STEPS,
+                "updated_at": time.time(),
+                "cleanup_pending": cleanup_pending,
+            })
+
+    def fail(self, operation_id: str) -> None:
+        with self._lock:
+            if not self._matches(operation_id):
+                return
+            operation = self._operations[operation_id]
+            if operation.get("state") != "failed":
+                failed_stage = operation.get("stage")
+                operation.update({
+                    "state": "failed",
+                    "failed_stage": failed_stage,
+                    "old_container_untouched": failed_stage in {
+                        "accepted", "pulling_image", "verifying_image",
+                    },
+                    "updated_at": time.time(),
+                })
+
+    def snapshot(self, operation_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            if not self._matches(operation_id):
+                return None
+            return self._snapshot_locked(operation_id)
+
+    def _matches(self, operation_id: str) -> bool:
+        return operation_id in self._operations
+
+    def _snapshot_locked(self, operation_id: str) -> dict[str, Any]:
+        result = copy.deepcopy(self._operations[operation_id])
+        started_at = float(result.get("started_at") or time.time())
+        result["elapsed_seconds"] = max(0, int(time.time() - started_at))
+        return result
 
 
 class DockerEngine:
@@ -235,7 +320,22 @@ def _verified_image_id(engine: DockerEngine, image: str, version: str) -> str:
     return image_id
 
 
-def replace_container(target: str, image: str, version: str | None = None, *, timeout: int = 180) -> dict[str, Any]:
+def replace_container(
+    target: str,
+    image: str,
+    version: str | None = None,
+    *,
+    timeout: int = 180,
+    progress: Any = None,
+) -> dict[str, Any]:
+    current_stage = "accepted"
+
+    def report(stage: str, step: int, **extra: Any) -> None:
+        nonlocal current_stage
+        current_stage = stage
+        if progress is not None:
+            progress(stage, step, **extra)
+
     engine = DockerEngine()
     old = engine.inspect(target)
     was_running = bool((old.get("State") or {}).get("Running"))
@@ -244,16 +344,21 @@ def replace_container(target: str, image: str, version: str | None = None, *, ti
     name = _container_name(old)
     backup = f"{name}.hermes-update-old"
     temp = f"{name}.hermes-update-new"
+    report("pulling_image", 1)
     engine.pull(image)
     create_image = image
+    report("verifying_image", 2)
     if version:
         create_image = _verified_image_id(engine, image, version)
+    report("stopping_old_container", 3)
     engine.rename(target, backup)
     try:
         engine.stop(backup)
+        report("starting_new_container", 4)
         engine.create(temp, _create_payload(old, create_image))
         engine.rename(temp, name)
         engine.start(name)
+        report("waiting_for_health", 5)
         deadline = time.monotonic() + timeout
         became_healthy = False
         while time.monotonic() < deadline:
@@ -263,8 +368,11 @@ def replace_container(target: str, image: str, version: str | None = None, *, ti
             time.sleep(2)
         if not became_healthy:
             raise DockerEngineError("replacement container did not become healthy")
+        report("verifying_runtime", 6)
         _verify_runtime_contract(old, engine.inspect(name))
     except Exception:
+        failed_stage = current_stage
+        report("rolling_back", 0, failed_stage=failed_stage)
         try:
             engine.remove(name, force=True)
         except Exception:
@@ -277,9 +385,18 @@ def replace_container(target: str, image: str, version: str | None = None, *, ti
             engine.rename(backup, name)
             if was_running:
                 _start_if_stopped(engine, name)
+            report(
+                "rolled_back", 0, state="failed", rolled_back=True,
+                failed_stage=failed_stage,
+            )
         except Exception as rollback_error:
+            report(
+                "rollback_failed", 0, state="failed", rolled_back=False,
+                failed_stage=failed_stage,
+            )
             raise DockerEngineError(f"update failed and rollback failed: {rollback_error}")
         raise
+    report("cleaning_up", 7)
     cleanup_pending = False
     try:
         engine.remove(backup, force=True)
@@ -321,13 +438,40 @@ def request_health(socket_path: str = CONTROL_SOCKET) -> dict[str, Any]:
     return result if isinstance(result, dict) else {"ok": False, "message": "Invalid updater response"}
 
 
+def request_status(operation_id: str, socket_path: str = CONTROL_SOCKET) -> dict[str, Any]:
+    """Read one authenticated update operation without exposing updater config."""
+    token_path = Path(os.getenv("HERMES_WEBUI_UPDATE_TOKEN_FILE", CONTROL_TOKEN))
+    token = token_path.read_text(encoding="utf-8").strip()
+    payload = json.dumps({
+        "action": "status",
+        "operation_id": operation_id,
+        "token": token,
+    }).encode()
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(5)
+    try:
+        client.connect(socket_path)
+        client.sendall(payload + b"\n")
+        response = client.recv(8192)
+    finally:
+        client.close()
+    result = json.loads(response.decode("utf-8"))
+    return result if isinstance(result, dict) else {"ok": False, "message": "Invalid updater response"}
+
+
 def _release_is_valid(channel: str, version: str) -> bool:
     if channel == "stable":
         return bool(__import__("re").fullmatch(r"v[0-9][0-9A-Za-z.+-]*", version))
     return channel == "experimental" and bool(__import__("re").fullmatch(r"exp-v[0-9][0-9A-Za-z.+-]*", version))
 
 
-def _control_request(payload: dict[str, Any], *, busy: threading.Lock, expected_token: str) -> tuple[dict[str, Any], threading.Thread | None]:
+def _control_request(
+    payload: dict[str, Any],
+    *,
+    busy: threading.Lock,
+    expected_token: str,
+    progress: UpdateProgress | None = None,
+) -> tuple[dict[str, Any], threading.Thread | None]:
     channel = str(payload.get("channel") or "")
     version = str(payload.get("version") or "")
     sha = str(payload.get("sha") or "")
@@ -338,6 +482,13 @@ def _control_request(payload: dict[str, Any], *, busy: threading.Lock, expected_
         return {"ok": False, "message": "Invalid update request"}, None
     if payload.get("action") == "ping":
         return {"ok": True, "status": "ready", "busy": busy.locked()}, None
+    progress_store = progress or UpdateProgress()
+    if payload.get("action") == "status":
+        operation_id = str(payload.get("operation_id") or "")
+        snapshot = progress_store.snapshot(operation_id)
+        if snapshot is None:
+            return {"ok": False, "message": "Update operation not found"}, None
+        return {"ok": True, "progress": snapshot}, None
     if payload.get("action") != "update" or not _release_is_valid(channel, version) or not sha or len(sha) > 128:
         return {"ok": False, "message": "Invalid update request"}, None
     if not busy.acquire(blocking=False):
@@ -345,15 +496,37 @@ def _control_request(payload: dict[str, Any], *, busy: threading.Lock, expected_
     target = os.getenv("HERMES_WEBUI_UPDATE_TARGET", "hermes-webui").strip()
     repository = os.getenv("HERMES_WEBUI_DOCKER_IMAGE", "24802117/hermes-webui").strip()
     image = f"{repository}:{'latest' if channel == 'stable' else 'experimental'}"
+    operation_id, initial_progress = progress_store.start(version)
 
     def run() -> None:
         try:
-            replace_container(target, image, version)
+            result = replace_container(
+                target,
+                image,
+                version,
+                progress=lambda stage, step, **extra: progress_store.advance(
+                    operation_id, stage, step, **extra
+                ),
+            )
+            progress_store.complete(
+                operation_id,
+                cleanup_pending=bool(result.get("cleanup_pending")),
+            )
+        except Exception:
+            logger.exception("Docker self-update operation %s failed", operation_id)
+            progress_store.fail(operation_id)
         finally:
             busy.release()
 
     worker = threading.Thread(target=run, name="hermes-webui-docker-update", daemon=True)
-    return {"ok": True, "latest_version": version, "latest_sha": sha, "restart_scheduled": True}, worker
+    return {
+        "ok": True,
+        "latest_version": version,
+        "latest_sha": sha,
+        "restart_scheduled": True,
+        "operation_id": operation_id,
+        "progress": initial_progress,
+    }, worker
 
 
 def serve_control(socket_path: str = CONTROL_SOCKET) -> None:
@@ -375,6 +548,7 @@ def serve_control(socket_path: str = CONTROL_SOCKET) -> None:
     os.chmod(path, 0o660)
     server.listen(4)
     busy = threading.Lock()
+    progress = UpdateProgress()
     while True:
         conn, _ = server.accept()
         conn.settimeout(5)
@@ -382,7 +556,12 @@ def serve_control(socket_path: str = CONTROL_SOCKET) -> None:
         try:
             raw = conn.recv(8192)
             payload = json.loads(raw.splitlines()[0].decode("utf-8"))
-            response, worker = _control_request(payload, busy=busy, expected_token=token)
+            response, worker = _control_request(
+                payload,
+                busy=busy,
+                expected_token=token,
+                progress=progress,
+            )
         except Exception:
             response = {"ok": False, "message": "Invalid updater request"}
         conn.sendall(json.dumps(response).encode("utf-8"))

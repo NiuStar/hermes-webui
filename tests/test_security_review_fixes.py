@@ -107,6 +107,30 @@ def test_get_update_check_returns_cache_without_fetch(monkeypatch):
     assert handler.status == 200
 
 
+def test_get_docker_update_status_proxies_only_valid_operation_id(monkeypatch):
+    from api import routes, updates
+
+    seen = []
+    monkeypatch.setattr(
+        updates,
+        "docker_update_status",
+        lambda operation_id: seen.append(operation_id) or {"ok": True},
+        raising=False,
+    )
+    handler = _Handler(client_ip="127.0.0.1")
+    routes.handle_get(
+        handler,
+        urlsplit("/api/updates/status?operation_id=" + "a" * 32),
+    )
+    assert handler.status == 200
+    assert seen == ["a" * 32]
+
+    invalid = _Handler(client_ip="127.0.0.1")
+    routes.handle_get(invalid, urlsplit("/api/updates/status?operation_id=../bad"))
+    assert invalid.status == 400
+    assert seen == ["a" * 32]
+
+
 def test_cached_update_status_does_not_drop_agent_info_when_reenabled(monkeypatch):
     from api import updates
 

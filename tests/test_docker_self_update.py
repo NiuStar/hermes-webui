@@ -181,6 +181,144 @@ def test_healthcheck_exit_code_tracks_authenticated_ping(monkeypatch):
     assert dsu.main(['--healthcheck', '/tmp/control.sock']) == 1
 
 
+def test_update_request_returns_operation_id_and_authenticated_status(monkeypatch):
+    monkeypatch.setenv('HERMES_WEBUI_DOCKER_SELF_UPDATE', '1')
+    progress = dsu.UpdateProgress()
+    response, worker = dsu._control_request(
+        {
+            'action': 'update', 'channel': 'stable', 'version': 'v1.2.3',
+            'sha': 'abc', 'token': 'secret',
+        },
+        busy=threading.Lock(), expected_token='secret', progress=progress,
+    )
+    assert response['ok'] is True
+    assert len(response['operation_id']) == 32
+    assert response['progress']['stage'] == 'accepted'
+    assert response['progress']['step'] == 0
+    assert worker is not None
+
+    status, status_worker = dsu._control_request(
+        {
+            'action': 'status', 'operation_id': response['operation_id'],
+            'token': 'secret',
+        },
+        busy=threading.Lock(), expected_token='secret', progress=progress,
+    )
+    assert status == {'ok': True, 'progress': response['progress']}
+    assert status_worker is None
+
+
+def test_update_status_rejects_unknown_operation(monkeypatch):
+    monkeypatch.setenv('HERMES_WEBUI_DOCKER_SELF_UPDATE', '1')
+    response, worker = dsu._control_request(
+        {'action': 'status', 'operation_id': '0' * 32, 'token': 'secret'},
+        busy=threading.Lock(), expected_token='secret', progress=dsu.UpdateProgress(),
+    )
+    assert response == {'ok': False, 'message': 'Update operation not found'}
+    assert worker is None
+
+
+def test_progress_keeps_recent_operations_bounded():
+    progress = dsu.UpdateProgress()
+    operation_ids = []
+    for index in range(progress.MAX_OPERATIONS + 2):
+        operation_id, _ = progress.start(f'v{index}')
+        progress.complete(operation_id)
+        operation_ids.append(operation_id)
+    assert progress.snapshot(operation_ids[0]) is None
+    assert progress.snapshot(operation_ids[1]) is None
+    assert progress.snapshot(operation_ids[2])['state'] == 'succeeded'
+    assert progress.snapshot(operation_ids[-1])['version'] == f'v{progress.MAX_OPERATIONS + 1}'
+
+
+def test_update_worker_failure_becomes_terminal_status(monkeypatch):
+    monkeypatch.setenv('HERMES_WEBUI_DOCKER_SELF_UPDATE', '1')
+    progress = dsu.UpdateProgress()
+
+    def fail_replace(_target, _image, _version, *, progress):
+        progress('waiting_for_health', 5)
+        progress(
+            'rolled_back', 0, state='failed', rolled_back=True,
+            failed_stage='waiting_for_health',
+        )
+        raise dsu.DockerEngineError('hidden implementation detail')
+
+    monkeypatch.setattr(dsu, 'replace_container', fail_replace)
+    response, worker = dsu._control_request(
+        {
+            'action': 'update', 'channel': 'stable', 'version': 'v1.2.3',
+            'sha': 'abc', 'token': 'secret',
+        },
+        busy=threading.Lock(), expected_token='secret', progress=progress,
+    )
+    worker.start()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    snapshot = progress.snapshot(response['operation_id'])
+    assert snapshot['state'] == 'failed'
+    assert snapshot['stage'] == 'rolled_back'
+    assert snapshot['failed_stage'] == 'waiting_for_health'
+    assert snapshot['rolled_back'] is True
+    assert 'hidden implementation detail' not in str(snapshot)
+
+
+def test_pull_failure_reports_old_container_untouched_without_details(monkeypatch):
+    progress = dsu.UpdateProgress()
+    operation_id, _ = progress.start('v1.2.3')
+    progress.advance(operation_id, 'pulling_image', 1)
+    progress.fail(operation_id)
+    snapshot = progress.snapshot(operation_id)
+    assert snapshot['state'] == 'failed'
+    assert snapshot['failed_stage'] == 'pulling_image'
+    assert snapshot['old_container_untouched'] is True
+    assert 'container' not in snapshot
+    assert 'image' not in snapshot
+    assert 'token' not in snapshot
+
+
+def test_replace_container_reports_real_stage_order(monkeypatch):
+    old = _old_info()
+
+    class Engine:
+        def __init__(self):
+            self.replacement_started = False
+
+        def inspect(self, target):
+            if target == 'hermes-webui' and self.replacement_started:
+                result = _old_info()
+                result['State'] = {'Running': True, 'Health': {'Status': 'healthy'}}
+                return result
+            if target == 'hermes-webui':
+                return old
+            return {'State': {'Running': False}}
+        def pull(self, _image): pass
+        def inspect_image(self, _image):
+            return {'Id': 'sha256:new', 'Config': {'Labels': {'org.opencontainers.image.version': 'v1.2.3'}}}
+        def rename(self, _old, _new): pass
+        def stop(self, _target): pass
+        def create(self, _name, _payload): return {'Id': 'new'}
+        def start(self, target):
+            if target == 'hermes-webui':
+                self.replacement_started = True
+        def remove(self, _target, force=False): pass
+
+    engine = Engine()
+    monkeypatch.setattr(dsu, 'DockerEngine', lambda: engine)
+    monkeypatch.setattr(dsu, '_verify_runtime_contract', lambda _old, _new: None)
+    stages = []
+    result = dsu.replace_container(
+        'hermes-webui', 'repo/webui:latest', 'v1.2.3',
+        progress=lambda stage, step, **extra: stages.append((stage, step, extra)),
+    )
+    assert result['ok'] is True
+    assert [item[:2] for item in stages] == [
+        ('pulling_image', 1), ('verifying_image', 2),
+        ('stopping_old_container', 3), ('starting_new_container', 4),
+        ('waiting_for_health', 5), ('verifying_runtime', 6),
+        ('cleaning_up', 7),
+    ]
+
+
 
 def test_replace_container_rolls_back_when_new_container_unhealthy(monkeypatch):
     class Engine:

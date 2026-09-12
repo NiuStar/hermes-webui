@@ -410,10 +410,19 @@
             <div id="updateSummaryDiffLinks" style="display:none;font-size:11px;margin-top:8px"></div>
           </div>
         </div>
+        <div id="updateProgress" class="update-progress" role="status" aria-live="polite" aria-atomic="true" hidden>
+          <div class="update-progress-head">
+            <span id="updateProgressStage"></span>
+            <span id="updateProgressElapsed"></span>
+          </div>
+          <div class="update-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="7" aria-valuenow="0">
+            <div id="updateProgressBar" class="update-progress-bar"></div>
+          </div>
+        </div>
         <div id="updateError" style="display:none;font-size:12px;color:var(--error,#e05);margin-top:4px;word-break:break-word"></div>
       </div>
       <div style="display:flex;gap:8px;flex-shrink:0;flex-wrap:wrap">
-        <button class="update-btn" onclick="dismissUpdate()" data-i18n="update_later">Later</button>
+        <button class="update-btn" id="btnDismissUpdate" onclick="dismissUpdate()" data-i18n="update_later">Later</button>
         <button class="update-btn update-primary" id="btnApplyUpdate" onclick="applyUpdates()" data-i18n="update_now">Update Now</button>
         <button class="update-btn" id="btnForceUpdate" style="display:none;background:var(--error,#e05);color:#fff;border-color:var(--error,#e05)" onclick="forceUpdate(this)" data-i18n="update_force">Force update</button>
         <button class="update-btn" id="btnClearUpdateLock" style="display:none" onclick="applyClearUpdateLock(this)" data-i18n="update_clear_lock_retry">Clear lock and retry update</button>

@@ -10418,6 +10418,97 @@ function _formatUpdateApplyExceptionMessage(error){
   const message=(error&&error.message)||String(error||'unknown error');
   return _i18nUpdateText('update_failed_prefix','Update failed: ')+message;
 }
+const _DOCKER_UPDATE_STAGES={
+  accepted:['update_progress_accepted','Update accepted'],
+  pulling_image:['update_progress_pulling_image','Pulling container image'],
+  verifying_image:['update_progress_verifying_image','Verifying release image'],
+  stopping_old_container:['update_progress_stopping_old_container','Stopping current WebUI'],
+  starting_new_container:['update_progress_starting_new_container','Starting updated WebUI'],
+  waiting_for_health:['update_progress_waiting_for_health','Waiting for health check'],
+  verifying_runtime:['update_progress_verifying_runtime','Verifying runtime configuration'],
+  cleaning_up:['update_progress_cleaning_up','Cleaning up previous container'],
+  completed:['update_progress_completed','Update completed'],
+  rolling_back:['update_progress_rolling_back','Update failed — rolling back'],
+  rolled_back:['update_progress_rolled_back','Update failed — previous version restored'],
+  rollback_failed:['update_progress_rollback_failed','Update failed — rollback needs attention'],
+};
+function _renderDockerUpdateProgress(progress){
+  const panel=$('updateProgress');
+  const stageEl=$('updateProgressStage');
+  const elapsedEl=$('updateProgressElapsed');
+  const bar=$('updateProgressBar');
+  if(!panel||!progress) return;
+  const total=Math.max(1,Number(progress.total_steps)||7);
+  const step=Math.max(0,Math.min(total,Number(progress.step)||0));
+  const elapsed=Math.max(0,Math.floor(Number(progress.elapsed_seconds)||0));
+  const stageMeta=_DOCKER_UPDATE_STAGES[progress.stage];
+  const label=stageMeta?_i18nUpdateText(stageMeta[0],stageMeta[1]):String(progress.stage||'Updating');
+  const failed=progress.state==='failed'||progress.stage==='rolled_back'||progress.stage==='rollback_failed';
+  const complete=progress.state==='succeeded'||progress.stage==='completed';
+  panel.hidden=false;
+  panel.classList.toggle('is-failed',failed);
+  panel.classList.toggle('is-complete',complete);
+  const stepText=step>0?_i18nUpdateText('update_progress_step',`Step ${step}/${total}`).replace('{0}',String(step)).replace('{1}',String(total)):'';
+  if(stageEl) stageEl.textContent=(stepText?stepText+' · ':'')+label+(progress.version?' · '+progress.version:'');
+  if(elapsedEl) elapsedEl.textContent=_i18nUpdateText('update_progress_elapsed',`${elapsed}s elapsed`).replace('{0}',String(elapsed));
+  const track=bar&&bar.parentElement;
+  if(track) track.setAttribute('aria-valuenow',String(step));
+  if(bar) bar.style.width=`${Math.round(step/total*100)}%`;
+}
+function _hideDockerUpdateProgress(){
+  const panel=$('updateProgress');
+  if(panel){panel.hidden=true;panel.classList.remove('is-failed','is-complete');}
+}
+async function _monitorDockerUpdateProgress(operationId,baselineServerIdentity){
+  let unavailable=0;
+  const deadline=Date.now()+12*60*1000;
+  while(Date.now()<deadline){
+    try{
+      const status=await api('/api/updates/status?operation_id='+encodeURIComponent(operationId),{timeoutMs:8000});
+      unavailable=0;
+      if(!status.ok||!status.progress){
+        const message=(status&&status.message)||'Update progress is unavailable.';
+        throw new Error(message);
+      }
+      _renderDockerUpdateProgress(status.progress);
+      if(status.progress.state==='failed'){
+        const failedStage=status.progress.failed_stage;
+        const failedMeta=_DOCKER_UPDATE_STAGES[failedStage];
+        const failedLabel=failedMeta?_i18nUpdateText(failedMeta[0],failedMeta[1]):String(failedStage||'unknown stage');
+        const rollback=status.progress.rolled_back
+          ?_i18nUpdateText('update_progress_restored',' Previous version restored.')
+          :(status.progress.old_container_untouched
+            ?_i18nUpdateText('update_progress_unchanged',' Current version was not changed.')
+            :_i18nUpdateText('update_progress_rollback_attention',' Rollback may require attention.'));
+        const errEl=$('updateError');
+        const failedPrefix=_i18nUpdateText('update_progress_failed_during',`Update failed during ${failedLabel}.`).replace('{0}',failedLabel);
+        if(errEl){errEl.textContent=failedPrefix+rollback;errEl.style.display='block';}
+        return false;
+      }
+      if(status.progress.state==='succeeded'){
+        return true;
+      }
+    }catch(error){
+      unavailable++;
+      try{
+        const health=await fetch(new URL('health',document.baseURI||location.href).href,{cache:'no-store'});
+        if(!health.ok) throw new Error('health unavailable');
+      }catch(_healthError){
+        _renderDockerUpdateProgress({stage:'starting_new_container',step:4,total_steps:7,elapsed_seconds:0,state:'running'});
+        unavailable=0;
+      }
+      if(unavailable>=3){
+        const errEl=$('updateError');
+        if(errEl){errEl.textContent=_i18nUpdateText('update_progress_unavailable','The WebUI is reachable, but update progress cannot be read. The update may still be running; check updater health before retrying.');errEl.style.display='block';}
+        return false;
+      }
+    }
+    await new Promise(resolve=>setTimeout(resolve,1000));
+  }
+  const errEl=$('updateError');
+  if(errEl){errEl.textContent=_i18nUpdateText('update_progress_slow','Update is taking longer than expected. Check updater health before retrying.');errEl.style.display='block';}
+  return false;
+}
 async function applyUpdates(){
   if(window._updateApplyInFlight) return;
   window._updateApplyInFlight=true;
@@ -10426,12 +10517,17 @@ async function applyUpdates(){
   const resetApplyButton=(delayMs)=>{
     const reset=()=>{
       window._updateApplyInFlight=false;
+      const dismiss=$('btnDismissUpdate');
+      if(dismiss) dismiss.disabled=false;
       if(btn){btn.disabled=false;btn.textContent=updateText('update_now','Update Now');}
     };
     if(delayMs>0) setTimeout(reset,delayMs);
     else reset();
   };
   if(btn){btn.disabled=true;btn.textContent=updateText('update_updating','Updating\u2026');}
+  const dismiss=$('btnDismissUpdate');
+  if(dismiss) dismiss.disabled=true;
+  _hideDockerUpdateProgress();
   const errEl=$('updateError');
   if(errEl){errEl.style.display='none';errEl.textContent='';}
   // Hide any leftover force-update button from a prior conflict so a fresh
@@ -10465,6 +10561,25 @@ async function applyUpdates(){
         _showUpdateError(target,res);
         resetApplyButton(0);
         return;
+      }
+      if(target==='webui'&&window._updateData?.webui?.deployment_online_update){
+        if(res.operation_id){
+          if(res.progress) _renderDockerUpdateProgress(res.progress);
+          const completed=await _monitorDockerUpdateProgress(res.operation_id,baselineServerIdentity);
+          if(!completed){
+            resetApplyButton(0);
+            return;
+          }
+        }else{
+          // Backward compatibility: an older updater can accept the update but
+          // cannot expose staged progress. Keep the established restart wait.
+          _renderDockerUpdateProgress({
+            stage:'starting_new_container',step:4,total_steps:7,
+            elapsed_seconds:0,state:'running',
+          });
+          _waitForServerThenReload({baselineServerIdentity});
+          return;
+        }
       }
       if(res.stash_conflict){
         stashConflictMessages.push('Update applied ('+target+'): '+(res.message||'Local changes were preserved in git stash.'));
