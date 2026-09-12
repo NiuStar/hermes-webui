@@ -2397,6 +2397,13 @@ if(state.updateBanner.classList.added !== true) throw new Error('manual update m
 """.strip()
         subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
 
+    def test_docker_online_webui_update_is_not_filtered_as_no_git(self):
+        src = read('static/ui.js')
+        format_fn = extract_js_function(src, '_formatUpdateTargetStatus')
+        assert "const noGitUnavailable=!!(info&&info.no_git&&!info.deployment_online_update);" in format_fn
+        assert "if(!info||(noGitUnavailable&&!manualNoGit)||!(info.behind>0)) return null;" in format_fn
+        assert "if(!info||(info.no_git&&!manualNoGit)||!(info.behind>0)) return null;" not in format_fn
+
     def test_settings_manual_webui_update_includes_pull_guidance(self):
         ui_src = read('static/ui.js')
         panels_src = read('static/panels.js')

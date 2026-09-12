@@ -10040,7 +10040,8 @@ async function refreshSession() {
 // ── Update banner ──
 function _formatUpdateTargetStatus(label,info){
   const manualNoGit=!!(info&&info.no_git&&info.manual_update&&info.behind>0&&!info.deployment_online_update);
-  if(!info||(info.no_git&&!manualNoGit)||!(info.behind>0)) return null;
+  const noGitUnavailable=!!(info&&info.no_git&&!info.deployment_online_update);
+  if(!info||(noGitUnavailable&&!manualNoGit)||!(info.behind>0)) return null;
   const release=(info.release_based&&info.latest_version)
     ?` (${info.current_version||'unknown'} -> ${info.latest_version})`
     :(info.branch?` (${info.branch})`:'');
