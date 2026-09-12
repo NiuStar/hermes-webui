@@ -9,6 +9,14 @@ def test_webui_init_does_not_grant_docker_socket_access():
     assert "stat -c '%g' /var/run/docker.sock" not in INIT
 
 
+def test_uid_remap_does_not_traverse_read_only_home_mounts():
+    assert 'passwd = Path("/etc/passwd")' in INIT
+    assert 'fields[2] = str(wanted_uid)' in INIT
+    assert 'wanted UID {wanted_uid} is already assigned to {fields[0]}' in INIT
+    assert 'os.replace(tmp_name, passwd)' in INIT
+    assert 'usermod -o -u "${WANTED_UID}" hermeswebui' not in INIT
+
+
 def test_all_compose_files_isolate_docker_socket_in_updater_sidecar():
     import yaml
     for name in ('docker-compose.yml', 'docker-compose.two-container.yml', 'docker-compose.three-container.yml'):
@@ -21,6 +29,7 @@ def test_all_compose_files_isolate_docker_socket_in_updater_sidecar():
         assert any('updater-control' in str(item) for item in updater['volumes'])
         assert updater['network_mode'] == 'none'
         assert updater['read_only'] is True
+        assert updater['healthcheck'] == {'disable': True}
         assert updater['profiles'] == ['self-update']
         env = [str(item) for item in webui['environment']]
         assert any('HERMES_WEBUI_DOCKER_SELF_UPDATE=${HERMES_WEBUI_DOCKER_SELF_UPDATE:-0}' in item for item in env)

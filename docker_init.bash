@@ -248,7 +248,58 @@ if [ "A${whoami}" == "Aroot" ]; then
     fi
   else
     groupmod -o -g "${WANTED_GID}" hermeswebui || error_exit "Failed to set GID of hermeswebui user"
-    usermod -o -u "${WANTED_UID}" hermeswebui || error_exit "Failed to set UID of hermeswebui user"
+    # Avoid usermod's implicit recursive home chown when changing UID: a
+    # read-only Agent checkout can be mounted below ~/.hermes.  Rewrite only
+    # the exact UID field in /etc/passwd atomically; the account home never
+    # changes, and chown_home_hermeswebui() below owns the explicit filesystem
+    # migration while pruning read-only nested mounts.
+    python3 - "${WANTED_UID}" <<'PY' || error_exit "Failed to set UID of hermeswebui user"
+import os
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+wanted_uid = int(sys.argv[1])
+passwd = Path("/etc/passwd")
+original = passwd.read_text(encoding="utf-8")
+lines = original.splitlines(keepends=True)
+for line in lines:
+    fields = line.rstrip("\n").split(":")
+    if len(fields) != 7:
+        raise SystemExit("invalid passwd entry")
+    if fields[0] != "hermeswebui" and fields[2] == str(wanted_uid):
+        raise SystemExit(
+            f"wanted UID {wanted_uid} is already assigned to {fields[0]}"
+        )
+matches = 0
+for index, line in enumerate(lines):
+    fields = line.rstrip("\n").split(":")
+    if fields[0] != "hermeswebui":
+        continue
+    if len(fields) != 7:
+        raise SystemExit("invalid hermeswebui passwd entry")
+    fields[2] = str(wanted_uid)
+    lines[index] = ":".join(fields) + ("\n" if line.endswith("\n") else "")
+    matches += 1
+if matches != 1:
+    raise SystemExit(f"expected one hermeswebui passwd entry, found {matches}")
+metadata = passwd.stat()
+fd, tmp_name = tempfile.mkstemp(prefix=".passwd.hermes.", dir="/etc")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write("".join(lines))
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(tmp_name, stat.S_IMODE(metadata.st_mode))
+    os.chown(tmp_name, metadata.st_uid, metadata.st_gid)
+    os.replace(tmp_name, passwd)
+finally:
+    try:
+        os.unlink(tmp_name)
+    except FileNotFoundError:
+        pass
+PY
   fi
 
   chown_home_hermeswebui || error_exit "Failed to set owner of /home/hermeswebui"

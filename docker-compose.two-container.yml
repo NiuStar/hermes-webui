@@ -158,6 +158,8 @@ services:
     user: "0:0"
     network_mode: none
     read_only: true
+    healthcheck:
+      disable: true
     environment:
       - HERMES_WEBUI_DOCKER_SELF_UPDATE=${HERMES_WEBUI_DOCKER_SELF_UPDATE:-0}
       - HERMES_WEBUI_UPDATE_TARGET=${HERMES_WEBUI_CONTAINER_NAME:-hermes-webui}
