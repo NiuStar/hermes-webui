@@ -19,12 +19,12 @@ def test_home_chown_skips_hermes_agent_subtree():
     # The prune target should be the whole hermes-agent subtree, not just
     # the inner `.git/objects` directory. The old narrower prune was
     # insufficient once the entire mount became :ro.
-    assert "-path \"/home/hermeswebui/.hermes/hermes-agent\" -prune" in INIT_SCRIPT, (
-        "chown walk must prune the entire hermes-agent path (not just "
-        ".git/objects) so a :ro multi-container mount doesn't EROFS-fail "
-        "the chown."
+    assert 'agent = home / ".hermes" / "hermes-agent"' in INIT_SCRIPT, (
+        "chown walk must identify the entire hermes-agent path (not just "
+        ".git/objects) so a :ro multi-container mount is skipped."
     )
-    assert 'chown -h "${WANTED_UID}:${WANTED_GID}"' in INIT_SCRIPT
+    assert 'if name == ".git" or path == agent:' in INIT_SCRIPT
+    assert "os.lchown(path, wanted_uid, wanted_gid)" in INIT_SCRIPT
 
 
 def test_home_chown_helper_documents_readonly_mount_compat():

@@ -17,6 +17,13 @@ def test_uid_remap_does_not_traverse_read_only_home_mounts():
     assert 'usermod -o -u "${WANTED_UID}" hermeswebui' not in INIT
 
 
+def test_home_chown_ignores_only_entries_that_vanish_during_walk():
+    assert 'os.walk(home, topdown=True, followlinks=False, onerror=walk_error)' in INIT
+    assert 'except FileNotFoundError:' in INIT
+    assert 'os.lchown(path, wanted_uid, wanted_gid)' in INIT
+    assert '-exec chown -h "${WANTED_UID}:${WANTED_GID}" {} +' not in INIT
+
+
 def test_all_compose_files_isolate_docker_socket_in_updater_sidecar():
     import yaml
     for name in ('docker-compose.yml', 'docker-compose.two-container.yml', 'docker-compose.three-container.yml'):

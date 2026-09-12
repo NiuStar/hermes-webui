@@ -211,16 +211,49 @@ chown_home_hermeswebui() {
   #
   # Multi-container compose (#2470) additionally mounts the entire
   # hermes-agent-src volume read-only on the WebUI side because the WebUI only
-  # reads it for `uv pip install`. On a :ro mount, chown returns EROFS for any
-  # file inside the subtree, which would propagate to `set -e` and kill startup
-  # before the WebUI can run. Either way, the WebUI never writes to the agent
-  # source — prune the entire hermes-agent path from the chown walk so a
-  # read-only or partially-read-only mount doesn't break the rest of the home
-  # ownership alignment.
-  find /home/hermeswebui \
-    -path "/home/hermeswebui/.hermes/hermes-agent" -prune \
-    -o -name ".git" -prune \
-    -o -exec chown -h "${WANTED_UID}:${WANTED_GID}" {} +
+  # reads it for `uv pip install`. Prune that subtree and every .git directory.
+  # Walk entries one at a time so transient SQLite -wal/-shm files that vanish
+  # between enumeration and lchown do not abort startup. Only ENOENT is ignored;
+  # permission, read-only filesystem, and I/O failures still fail closed.
+  python3 - "${WANTED_UID}" "${WANTED_GID}" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+wanted_uid = int(sys.argv[1])
+wanted_gid = int(sys.argv[2])
+home = Path("/home/hermeswebui")
+agent = home / ".hermes" / "hermes-agent"
+
+
+def lchown_if_present(path: Path) -> None:
+    try:
+        os.lchown(path, wanted_uid, wanted_gid)
+    except FileNotFoundError:
+        pass
+
+
+def walk_error(error: OSError) -> None:
+    if isinstance(error, FileNotFoundError):
+        return
+    raise error
+
+
+lchown_if_present(home)
+for root, dirs, files in os.walk(home, topdown=True, followlinks=False, onerror=walk_error):
+    root_path = Path(root)
+    kept_dirs = []
+    for name in dirs:
+        path = root_path / name
+        if name == ".git" or path == agent:
+            continue
+        lchown_if_present(path)
+        if not path.is_symlink():
+            kept_dirs.append(name)
+    dirs[:] = kept_dirs
+    for name in files:
+        lchown_if_present(root_path / name)
+PY
 }
 
 # The production image does not ship sudo. The entrypoint starts as root only
