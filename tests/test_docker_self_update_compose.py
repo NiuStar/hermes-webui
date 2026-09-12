@@ -36,7 +36,14 @@ def test_all_compose_files_isolate_docker_socket_in_updater_sidecar():
         assert any('updater-control' in str(item) for item in updater['volumes'])
         assert updater['network_mode'] == 'none'
         assert updater['read_only'] is True
-        assert updater['healthcheck'] == {'disable': True}
+        healthcheck = updater['healthcheck']
+        assert healthcheck['test'] == [
+            'CMD', '/usr/local/bin/python', '/apptoo/api/docker_self_update.py',
+            '--healthcheck', '/run/hermes-webui-updater/control.sock',
+        ]
+        assert healthcheck['interval'] == '10s'
+        assert healthcheck['timeout'] == '5s'
+        assert healthcheck['retries'] == 6
         assert updater['profiles'] == ['self-update']
         env = [str(item) for item in webui['environment']]
         assert any('HERMES_WEBUI_DOCKER_SELF_UPDATE=${HERMES_WEBUI_DOCKER_SELF_UPDATE:-0}' in item for item in env)

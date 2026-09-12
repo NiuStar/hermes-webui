@@ -159,7 +159,11 @@ services:
     network_mode: none
     read_only: true
     healthcheck:
-      disable: true
+      test: ["CMD", "/usr/local/bin/python", "/apptoo/api/docker_self_update.py", "--healthcheck", "/run/hermes-webui-updater/control.sock"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
     environment:
       - HERMES_WEBUI_DOCKER_SELF_UPDATE=${HERMES_WEBUI_DOCKER_SELF_UPDATE:-0}
       - HERMES_WEBUI_UPDATE_TARGET=${HERMES_WEBUI_CONTAINER_NAME:-hermes-webui}

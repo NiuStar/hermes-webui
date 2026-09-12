@@ -145,6 +145,42 @@ def test_control_request_rejects_when_not_explicitly_enabled(monkeypatch):
     assert worker is None
 
 
+def test_authenticated_ping_reports_ready_without_starting_update(monkeypatch):
+    monkeypatch.setenv('HERMES_WEBUI_DOCKER_SELF_UPDATE', '1')
+    response, worker = dsu._control_request(
+        {'action': 'ping', 'token': 'secret'},
+        busy=threading.Lock(), expected_token='secret',
+    )
+    assert response == {'ok': True, 'status': 'ready', 'busy': False}
+    assert worker is None
+
+
+def test_ping_rejects_wrong_token(monkeypatch):
+    monkeypatch.setenv('HERMES_WEBUI_DOCKER_SELF_UPDATE', '1')
+    response, worker = dsu._control_request(
+        {'action': 'ping', 'token': 'wrong'},
+        busy=threading.Lock(), expected_token='secret',
+    )
+    assert response == {'ok': False, 'message': 'Invalid update request'}
+    assert worker is None
+
+
+def test_healthcheck_exit_code_tracks_authenticated_ping(monkeypatch):
+    monkeypatch.setattr(
+        dsu, 'request_health',
+        lambda _socket: {'ok': True, 'status': 'ready'},
+        raising=False,
+    )
+    assert dsu.main(['--healthcheck', '/tmp/control.sock']) == 0
+
+    monkeypatch.setattr(
+        dsu, 'request_health',
+        lambda _socket: {'ok': False, 'message': 'bad'},
+        raising=False,
+    )
+    assert dsu.main(['--healthcheck', '/tmp/control.sock']) == 1
+
+
 
 def test_replace_container_rolls_back_when_new_container_unhealthy(monkeypatch):
     class Engine:

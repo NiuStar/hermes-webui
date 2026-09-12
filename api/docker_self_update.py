@@ -304,6 +304,23 @@ def request_update(channel: str, version: str, sha: str, socket_path: str = CONT
     return result if isinstance(result, dict) else {"ok": False, "message": "Invalid updater response"}
 
 
+def request_health(socket_path: str = CONTROL_SOCKET) -> dict[str, Any]:
+    """Probe the authenticated control loop without touching Docker state."""
+    token_path = Path(os.getenv("HERMES_WEBUI_UPDATE_TOKEN_FILE", CONTROL_TOKEN))
+    token = token_path.read_text(encoding="utf-8").strip()
+    payload = json.dumps({"action": "ping", "token": token}).encode()
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(5)
+    try:
+        client.connect(socket_path)
+        client.sendall(payload + b"\n")
+        response = client.recv(8192)
+    finally:
+        client.close()
+    result = json.loads(response.decode("utf-8"))
+    return result if isinstance(result, dict) else {"ok": False, "message": "Invalid updater response"}
+
+
 def _release_is_valid(channel: str, version: str) -> bool:
     if channel == "stable":
         return bool(__import__("re").fullmatch(r"v[0-9][0-9A-Za-z.+-]*", version))
@@ -319,6 +336,8 @@ def _control_request(payload: dict[str, Any], *, busy: threading.Lock, expected_
         return {"ok": False, "message": "Docker self-update is disabled"}, None
     if not expected_token or not __import__("hmac").compare_digest(supplied_token, expected_token):
         return {"ok": False, "message": "Invalid update request"}, None
+    if payload.get("action") == "ping":
+        return {"ok": True, "status": "ready", "busy": busy.locked()}, None
     if payload.get("action") != "update" or not _release_is_valid(channel, version) or not sha or len(sha) > 128:
         return {"ok": False, "message": "Invalid update request"}, None
     if not busy.acquire(blocking=False):
@@ -375,9 +394,16 @@ def serve_control(socket_path: str = CONTROL_SOCKET) -> None:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--serve", metavar="SOCKET")
+    parser.add_argument("--healthcheck", metavar="SOCKET")
     args = parser.parse_args(argv)
     if args.serve:
         serve_control(args.serve)
+    if args.healthcheck:
+        try:
+            result = request_health(args.healthcheck)
+        except Exception:
+            return 1
+        return 0 if result.get("ok") is True and result.get("status") == "ready" else 1
     return 0
 
 
