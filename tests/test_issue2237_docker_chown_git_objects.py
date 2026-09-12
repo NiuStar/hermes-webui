@@ -19,12 +19,14 @@ def test_home_chown_skips_hermes_agent_subtree():
     # The prune target should be the whole hermes-agent subtree, not just
     # the inner `.git/objects` directory. The old narrower prune was
     # insufficient once the entire mount became :ro.
-    assert 'agent = home / ".hermes" / "hermes-agent"' in INIT_SCRIPT, (
-        "chown walk must identify the entire hermes-agent path (not just "
+    assert 'agent = home / ".hermes" / "hermes-agent"' not in INIT_SCRIPT
+    ownership = (REPO / "api" / "docker_home_ownership.py").read_text(encoding="utf-8")
+    assert '_AGENT_RELATIVE = PurePosixPath(".hermes/hermes-agent")' in ownership, (
+        "ownership walk must identify the entire hermes-agent path (not just "
         ".git/objects) so a :ro multi-container mount is skipped."
     )
-    assert 'if name == ".git" or path == agent:' in INIT_SCRIPT
-    assert "os.lchown(path, wanted_uid, wanted_gid)" in INIT_SCRIPT
+    assert 'if name == ".git" or child_relative == _AGENT_RELATIVE:' in ownership
+    assert "_chown_fd(child_fd, uid, gid)" in ownership
 
 
 def test_home_chown_helper_documents_readonly_mount_compat():

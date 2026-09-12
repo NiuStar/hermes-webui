@@ -18,9 +18,13 @@ def test_uid_remap_does_not_traverse_read_only_home_mounts():
 
 
 def test_home_chown_ignores_only_entries_that_vanish_during_walk():
-    assert 'os.walk(home, topdown=True, followlinks=False, onerror=walk_error)' in INIT
-    assert 'except FileNotFoundError:' in INIT
-    assert 'os.lchown(path, wanted_uid, wanted_gid)' in INIT
+    assert '/apptoo/api/docker_home_ownership.py' in INIT
+    assert 'os.walk(home' not in INIT
+    ownership = (ROOT / 'api' / 'docker_home_ownership.py').read_text(encoding='utf-8')
+    assert 'except FileNotFoundError:' in ownership
+    assert '_chown_fd(child_fd, uid, gid)' in ownership
+    assert 'dir_fd=' in ownership
+    assert 'os.O_NOFOLLOW' in ownership
     assert '-exec chown -h "${WANTED_UID}:${WANTED_GID}" {} +' not in INIT
 
 

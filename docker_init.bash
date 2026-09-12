@@ -215,45 +215,8 @@ chown_home_hermeswebui() {
   # Walk entries one at a time so transient SQLite -wal/-shm files that vanish
   # between enumeration and lchown do not abort startup. Only ENOENT is ignored;
   # permission, read-only filesystem, and I/O failures still fail closed.
-  python3 - "${WANTED_UID}" "${WANTED_GID}" <<'PY'
-import os
-import sys
-from pathlib import Path
-
-wanted_uid = int(sys.argv[1])
-wanted_gid = int(sys.argv[2])
-home = Path("/home/hermeswebui")
-agent = home / ".hermes" / "hermes-agent"
-
-
-def lchown_if_present(path: Path) -> None:
-    try:
-        os.lchown(path, wanted_uid, wanted_gid)
-    except FileNotFoundError:
-        pass
-
-
-def walk_error(error: OSError) -> None:
-    if isinstance(error, FileNotFoundError):
-        return
-    raise error
-
-
-lchown_if_present(home)
-for root, dirs, files in os.walk(home, topdown=True, followlinks=False, onerror=walk_error):
-    root_path = Path(root)
-    kept_dirs = []
-    for name in dirs:
-        path = root_path / name
-        if name == ".git" or path == agent:
-            continue
-        lchown_if_present(path)
-        if not path.is_symlink():
-            kept_dirs.append(name)
-    dirs[:] = kept_dirs
-    for name in files:
-        lchown_if_present(root_path / name)
-PY
+  /usr/local/bin/python /apptoo/api/docker_home_ownership.py \
+    /home/hermeswebui "${WANTED_UID}" "${WANTED_GID}"
 }
 
 # The production image does not ship sudo. The entrypoint starts as root only
