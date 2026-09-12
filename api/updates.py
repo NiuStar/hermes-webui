@@ -275,9 +275,18 @@ def _run_git(args, cwd, timeout=10):
     git_executable = _resolve_git_executable()
     if not git_executable:
         return 'git executable not found', False
+    git_args = list(args)
+    try:
+        repo_path = Path(cwd).resolve()
+        if (repo_path / '.git').exists():
+            # Scope the ownership exception to this repository and invocation;
+            # never write a global Git configuration entry.
+            git_args = ['-c', f'safe.directory={repo_path}', *git_args]
+    except (OSError, TypeError, ValueError):
+        pass
     try:
         r = subprocess.run(
-            [git_executable] + args,
+            [git_executable] + git_args,
             cwd=str(cwd),
             capture_output=True,
             text=True,
@@ -308,6 +317,20 @@ def _is_git_lock_error(output: str) -> bool:
         return False
     lower_out = output.lower()
     return any(sig in lower_out for sig in _GIT_LOCK_SIGNATURES)
+
+
+def _git_metadata_writable(path: Path) -> bool:
+    """Return whether this checkout can update its Git metadata.
+
+    Docker's separate WebUI layout mounts the Agent checkout read-only.  A
+    normal ``git fetch`` then fails while creating ``.git/FETCH_HEAD`` even
+    though all read-only inspection commands still work.
+    """
+    try:
+        git_path = Path(path) / '.git'
+        return git_path.exists() and os.access(git_path, os.W_OK)
+    except (OSError, TypeError, ValueError):
+        return False
 
 
 def _inventory_locks(path: Path) -> dict:
@@ -1316,7 +1339,10 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     # after a squash-merge that re-points a release tag at a new SHA) jams
     # the update path indefinitely with "would clobber existing tag" errors.
     # See #2756.
-    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--tags', '--force'], path, timeout=15)
+    read_only_git = not _git_metadata_writable(path)
+    fetch_out, fetch_ok = ('', True) if read_only_git else _run_git(
+        ['fetch', 'origin', '--tags', '--force'], path, timeout=15
+    )
     if not fetch_ok:
         release_info = _check_repo_release(path, name, channel)
         message = 'fetch failed'
@@ -1340,6 +1366,9 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     if release_info is not None:
         release_info = dict(release_info)
         release_info['dirty'] = _is_dirty(path)
+        if read_only_git:
+            release_info['read_only'] = True
+            release_info['check_mode'] = 'local_refs'
         return release_info
 
     branch_info = _check_repo_branch(path, name, fetch=False)
@@ -1347,6 +1376,9 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
         branch_info = dict(branch_info)
         branch_info['dirty'] = _is_dirty(path)
         branch_info['channel'] = channel
+        if read_only_git:
+            branch_info['read_only'] = True
+            branch_info['check_mode'] = 'local_refs'
         return branch_info
     return None
 

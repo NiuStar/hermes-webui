@@ -95,6 +95,60 @@ def test_is_dirty_preserves_legacy_empty_failure_contract(tmp_path, monkeypatch)
     assert updates._is_dirty(tmp_path) is True
 
 
+def test_run_git_scopes_safe_directory_to_repository_invocation(tmp_path, monkeypatch):
+    (tmp_path / '.git').mkdir()
+    seen = {}
+
+    class Result:
+        returncode = 0
+        stdout = 'ok\n'
+        stderr = ''
+
+    def fake_run(command, **kwargs):
+        seen['command'] = command
+        return Result()
+
+    monkeypatch.setattr(updates.subprocess, 'run', fake_run)
+    monkeypatch.setattr(updates, '_resolve_git_executable', lambda: '/usr/bin/git')
+    result, ok = updates._run_git(['status', '--short'], tmp_path)
+
+    assert ok is True
+    assert result == 'ok'
+    assert seen['command'][:3] == [
+        '/usr/bin/git', '-c', f'safe.directory={tmp_path.resolve()}',
+    ]
+    assert seen['command'][3:] == ['status', '--short']
+
+
+def test_read_only_git_checkout_skips_fetch_and_uses_local_refs(tmp_path, monkeypatch):
+    (tmp_path / '.git').mkdir()
+    calls = []
+
+    def fake_run(args, cwd, timeout=10):
+        calls.append(args)
+        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+            return 'v0.51.106\nv0.51.103', True
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+            return 'v0.51.103', True
+        if args == ['merge-base', '--is-ancestor', 'v0.51.106', 'HEAD']:
+            return '', False
+        if args == ['merge-base', '--is-ancestor', 'HEAD', 'v0.51.106']:
+            return '', True
+        if args == ['remote', 'get-url', 'origin']:
+            return 'https://github.com/example/hermes-agent.git', True
+        if args == ['diff-index', '--quiet', 'HEAD', '--']:
+            return '', True
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    monkeypatch.setattr(updates, '_run_git', fake_run)
+    monkeypatch.setattr(updates.os, 'access', lambda *_args: False)
+    info = updates._check_repo(tmp_path, 'agent')
+
+    assert info['read_only'] is True
+    assert info['check_mode'] == 'local_refs'
+    assert not any(args[:1] == ['fetch'] for args in calls)
+
+
 @pytest.mark.parametrize(
     'probe_output',
     ['git exited with status 2', 'git exited with status 128'],
