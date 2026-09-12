@@ -176,6 +176,22 @@ def _normalized_networks(info: dict[str, Any]) -> dict[str, list[str]]:
     }
 
 
+def _normalize_runtime_value(value: Any) -> Any:
+    """Normalize Docker's equivalent empty/default inspect values."""
+    if value in (None, {}, [], "", 0, False):
+        return None
+    if isinstance(value, dict):
+        normalized = {
+            str(key): _normalize_runtime_value(item)
+            for key, item in value.items()
+        }
+        return {key: item for key, item in sorted(normalized.items()) if item is not None} or None
+    if isinstance(value, list):
+        normalized = [_normalize_runtime_value(item) for item in value]
+        return [item for item in normalized if item is not None] or None
+    return value
+
+
 def _verify_runtime_contract(old: dict[str, Any], new: dict[str, Any]) -> None:
     keys = (
         "Binds", "Mounts", "PortBindings", "RestartPolicy", "NetworkMode",
@@ -186,7 +202,12 @@ def _verify_runtime_contract(old: dict[str, Any], new: dict[str, Any]) -> None:
     )
     old_host = old.get("HostConfig") or {}
     new_host = new.get("HostConfig") or {}
-    mismatches = [key for key in keys if old_host.get(key) != new_host.get(key)]
+    mismatches = [
+        key
+        for key in keys
+        if _normalize_runtime_value(old_host.get(key))
+        != _normalize_runtime_value(new_host.get(key))
+    ]
     if _normalized_networks(old) != _normalized_networks(new):
         mismatches.append("Networks")
     if mismatches:

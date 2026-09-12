@@ -59,6 +59,13 @@ def test_missing_healthcheck_is_never_accepted():
     assert dsu._healthy(Engine(), 'webui') is False
 
 
+def test_runtime_contract_normalizes_empty_defaults():
+    assert dsu._normalize_runtime_value(None) is None
+    assert dsu._normalize_runtime_value([]) is None
+    assert dsu._normalize_runtime_value({}) is None
+    assert dsu._normalize_runtime_value(0) is None
+
+
 def test_runtime_contract_rejects_changed_port_binding():
     old = _old_info()
     new = _old_info()
