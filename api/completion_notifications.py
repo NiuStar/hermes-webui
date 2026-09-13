@@ -15,6 +15,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import unicodedata
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -291,7 +292,28 @@ def _mark_sent(key: str, channel: str, hermes_home: str | Path | None = None) ->
 
 
 def _completion_text(title: str, text: str) -> str:
-    return "Hermes response complete\nReturn to WebUI to view the response."
+    """Build a bounded, redacted completion notice with useful context."""
+    from api.helpers import _redact_fn_uncached
+
+    def _single_line(value: Any, fallback: str, *, input_limit: int) -> str:
+        raw = str(value or "")[:input_limit]
+        redacted = _redact_fn_uncached(raw)
+        visible = "".join(
+            " " if char.isspace() else "" if unicodedata.category(char).startswith("C") else char
+            for char in redacted
+        )
+        normalized = re.sub(r"\s+", " ", visible).strip()
+        return normalized or fallback
+
+    def _bounded(value: str, limit: int) -> str:
+        if len(value) <= limit:
+            return value
+        return value[: max(0, limit - 1)].rstrip() + "…"
+
+    safe_title = _bounded(_single_line(title, "未命名会话", input_limit=512), 80)
+    safe_conclusion = _single_line(text, "已完成，请返回 WebUI 查看结果。", input_limit=2000)
+    prefix = f"Hermes 回复完成\n会话：{safe_title}\n输出结论："
+    return prefix + _bounded(safe_conclusion, max(0, _MAX_PREVIEW_CHARS - len(prefix)))
 
 
 class _DeliveryFailure(RuntimeError):

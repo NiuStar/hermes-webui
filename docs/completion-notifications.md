@@ -20,9 +20,12 @@ The WebUI never accepts or returns platform credentials or target IDs in browser
 requests. It reuses the platform credentials and home channel configured in the
 active Hermes home. The settings API exposes only boolean `configured` status.
 
-The notification body contains only a completion label and an instruction to
-return to WebUI. Session titles, assistant output, full transcripts, credentials,
-access tokens, and platform target IDs are not sent.
+The notification body contains a bounded, single-line session title and a bounded
+preview of the settled final assistant output so the recipient can identify the
+completed work without opening WebUI. Both fields are force-redacted before
+sending, control characters are folded, and the complete message is capped at
+500 characters. Session IDs, full transcripts, credentials, access tokens, and
+platform target IDs are not sent.
 
 ## Delivery Contract
 

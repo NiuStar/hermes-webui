@@ -5,7 +5,7 @@
 
 ### Added
 
-- **回复完成后可发送低噪音通知，不必一直盯着 WebUI。** 设置页新增默认关闭的“回复完成后通知”，可选浏览器、微信（Weixin）、企业微信（WeCom）和飞书；消息渠道复用当前 Hermes profile 已配置的凭据与 home channel，不在 WebUI 接收、保存或回显密钥和目标 ID。服务端只在最终回复成功落库后异步发送，取消、错误、部分流和断线均不触发；通知只包含固定完成状态和返回 WebUI 的提示，不发送会话标题或回答正文。每个 `profile + session + stream + channel` 持久化幂等，状态文件为 `0600`，官方 `send_message` 必须返回 `success=true` 才算成功，平台冷却限流按返回时间退避。
+- **回复完成后可发送低噪音通知，不必一直盯着 WebUI。** 设置页新增默认关闭的“回复完成后通知”，可选浏览器、微信（Weixin）、企业微信（WeCom）和飞书；消息渠道复用当前 Hermes profile 已配置的凭据与 home channel，不在 WebUI 接收、保存或回显密钥和目标 ID。服务端只在最终回复成功落库后异步发送，取消、错误、部分流和断线均不触发；通知包含经过强制脱敏和限长的会话标题与最终输出结论，折叠控制字符且整条最多 500 字符，不发送 session ID、完整记录、凭据或目标 ID。每个 `profile + session + stream + channel` 持久化幂等，状态文件为 `0600`，官方 `send_message` 必须返回 `success=true` 才算成功，平台冷却限流按返回时间退避。
 
 ### Fixed
 

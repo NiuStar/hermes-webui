@@ -58,6 +58,7 @@ def test_normalize_settings_rejects_unknown_or_unconfigured_channels(notificatio
 
 def test_send_completion_is_idempotent_and_uses_bounded_preview(notifications, monkeypatch):
     sent = []
+    credential = "sk-" + "abcdefghijklmnop"
     monkeypatch.setattr(notifications, "_send_via_hermes", lambda channel, message, home=None: sent.append((channel, message, home)) or {"success": True, "message_id": "m"})
     settings = {
         "completion_notifications_enabled": True,
@@ -67,23 +68,41 @@ def test_send_completion_is_idempotent_and_uses_bounded_preview(notifications, m
         settings,
         session_id="session-1",
         stream_id="stream-1",
-        title="A session",
-        text="x" * 900,
+        title=f"生产验收\n会话 {credential}",
+        text="部署成功，所有检查通过。 API_KEY=super-secret-value " + "x" * 900,
     )
     result2 = notifications.send_completion(
         settings,
         session_id="session-1",
         stream_id="stream-1",
-        title="A session",
-        text="x" * 900,
+        title=f"生产验收\n会话 {credential}",
+        text="部署成功，所有检查通过。 API_KEY=super-secret-value " + "x" * 900,
     )
 
     assert result1["sent"] == ["feishu"]
     assert result2["sent"] == []
     assert len(sent) == 1
-    assert len(sent[0][1]) <= 500
-    assert "x" * 20 not in sent[0][1]
-    assert "A session" not in sent[0][1]
+    message = sent[0][1]
+    assert len(message) <= 500
+    assert message.startswith("Hermes 回复完成\n会话：生产验收 会话 sk-abc...mnop\n输出结论：部署成功，所有检查通过。 API_KEY=***")
+    assert "session-1" not in message
+    assert "super-secret-value" not in message
+    assert "abcdefghijklmnop" not in message
+    assert "\n会话\n" not in message
+
+
+def test_completion_text_has_safe_fallbacks_and_hard_total_limit(notifications):
+    fallback = notifications._completion_text("\n\x00", "\t\n")
+    assert fallback == "Hermes 回复完成\n会话：未命名会话\n输出结论：已完成，请返回 WebUI 查看结果。"
+
+    safe_unicode = notifications._completion_text("生产\u202e标题", "完成\u200b✅")
+    assert safe_unicode == "Hermes 回复完成\n会话：生产标题\n输出结论：完成✅"
+
+    bounded = notifications._completion_text("标" * 500, "结论" * 5000)
+    assert len(bounded) == 500
+    assert bounded.splitlines()[1].startswith("会话：")
+    assert bounded.splitlines()[1].endswith("…")
+    assert bounded.splitlines()[2].startswith("输出结论：")
 
 
 def test_interrupted_completion_is_not_sent(notifications, monkeypatch):
