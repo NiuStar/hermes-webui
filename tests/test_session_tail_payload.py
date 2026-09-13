@@ -705,6 +705,10 @@ def test_indexed_window_fast_path_requires_idle_current_webui_sidecar(monkeypatc
         active_stream_id=None,
         pending_user_message=None,
         pending_started_at=None,
+        truncation_watermark=None,
+        truncation_boundary=None,
+        intentional_shrink_generation=None,
+        clear_generation=None,
         updated_at=200.0,
         profile="default",
     )
@@ -733,6 +737,10 @@ def test_indexed_window_fast_path_requires_idle_current_webui_sidecar(monkeypatc
         ("parent_session_id", "snapshot"),
         ("read_only", True),
         ("session_source", "weixin"),
+        ("truncation_watermark", 190.0),
+        ("truncation_boundary", 180.0),
+        ("intentional_shrink_generation", "shrink-1"),
+        ("clear_generation", "clear-1"),
     ):
         candidate = SimpleNamespace(**stub.__dict__)
         setattr(candidate, field, value)

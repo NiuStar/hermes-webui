@@ -9680,6 +9680,14 @@ def _indexed_session_window_if_safe(session, *, msg_limit, msg_before=None):
         or bool(getattr(session, 'active_stream_id', None))
         or bool(getattr(session, 'pending_user_message', None))
         or bool(getattr(session, 'pending_started_at', None))
+        # Undo/retry/clear semantics are not a simple sidecar subset. The
+        # canonical merge applies these persisted boundaries to suppress rows
+        # that may still exist in either store; an identity-subset proof cannot
+        # prove absence of stale suffix rows.
+        or getattr(session, 'truncation_watermark', None) not in (None, '')
+        or getattr(session, 'truncation_boundary', None) not in (None, '')
+        or getattr(session, 'intentional_shrink_generation', None) not in (None, '')
+        or getattr(session, 'clear_generation', None) not in (None, '')
     ):
         return None
     relationship = str(getattr(session, 'relationship_type', None) or '').strip().lower()
