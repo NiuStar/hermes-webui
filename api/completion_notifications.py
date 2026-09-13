@@ -7,13 +7,14 @@ channel. Credentials never cross the WebUI API boundary.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import threading
-import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -72,14 +73,16 @@ def _hermes_home(source: Mapping[str, str] | None = None) -> Path:
 
 def _agent_root(source: Mapping[str, str] | None = None) -> Path:
     env = os.environ if source is None else source
-    configured = str(
-        env.get("HERMES_WEBUI_AGENT_DIR")
-        or env.get("HERMES_AGENT_DIR")
-        or ""
-    ).strip()
-    if configured:
-        return Path(configured).expanduser()
-    for candidate in (Path(_AGENT_DIR), _hermes_home(env) / "hermes-agent"):
+    candidates = [
+        str(env.get("HERMES_WEBUI_AGENT_DIR") or "").strip(),
+        str(env.get("HERMES_AGENT_DIR") or "").strip(),
+        str(_AGENT_DIR),
+        str(_hermes_home(env) / "hermes-agent"),
+    ]
+    for raw_candidate in candidates:
+        if not raw_candidate:
+            continue
+        candidate = Path(raw_candidate).expanduser()
         if (candidate / "tools" / "send_message_tool.py").is_file():
             return candidate
     return _hermes_home(env) / "hermes-agent"
@@ -160,6 +163,55 @@ def _state_path(hermes_home: str | Path | None = None) -> Path:
     return Path(configured).expanduser() / "completion_notifications.json" if configured else STATE_DIR / "completion_notifications.json"
 
 
+def _claims_db_path(hermes_home: str | Path | None = None) -> Path:
+    return _state_path(hermes_home).with_suffix(".sqlite3")
+
+
+def _claim_digest(key: str, channel: str) -> str:
+    return hashlib.sha256(f"{key}\0{channel}".encode("utf-8")).hexdigest()
+
+
+def _open_claims_db(hermes_home: str | Path | None = None) -> sqlite3.Connection:
+    path = _claims_db_path(hermes_home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    os.close(fd)
+    path.chmod(0o600)
+    connection = sqlite3.connect(path, timeout=10)
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS claims ("
+        "claim_key TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('claimed','sent'))"
+        ")"
+    )
+    connection.commit()
+    return connection
+
+
+def _try_claim(key: str, channel: str, hermes_home: str | Path | None = None) -> bool:
+    connection = _open_claims_db(hermes_home)
+    try:
+        cursor = connection.execute(
+            "INSERT OR IGNORE INTO claims(claim_key, state) VALUES (?, 'claimed')",
+            (_claim_digest(key, channel),),
+        )
+        connection.commit()
+        return cursor.rowcount == 1
+    finally:
+        connection.close()
+
+
+def _set_claim_sent(key: str, channel: str, hermes_home: str | Path | None = None) -> None:
+    connection = _open_claims_db(hermes_home)
+    try:
+        connection.execute(
+            "UPDATE claims SET state = 'sent' WHERE claim_key = ?",
+            (_claim_digest(key, channel),),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def public_status(hermes_home: str | Path | None = None) -> dict[str, Any]:
     """Return browser-safe channel status; never return credentials or targets."""
     configured = {"browser": True}
@@ -222,9 +274,12 @@ def _claimable_channels(key: str, channels: list[str], hermes_home: str | Path |
         pending = []
         for channel in channels:
             claim = (scope, key, channel)
-            if channel != "browser" and channel not in sent and claim not in _IN_FLIGHT:
-                _IN_FLIGHT.add(claim)
-                pending.append(channel)
+            if channel == "browser" or channel in sent or claim in _IN_FLIGHT:
+                continue
+            if not _try_claim(key, channel, hermes_home):
+                continue
+            _IN_FLIGHT.add(claim)
+            pending.append(channel)
         return pending
 
 
@@ -232,14 +287,7 @@ def _mark_sent(key: str, channel: str, hermes_home: str | Path | None = None) ->
     scope = str(Path(hermes_home).expanduser()) if hermes_home is not None else "default"
     with _STATE_LOCK:
         _IN_FLIGHT.discard((scope, key, channel))
-        state = _read_state(hermes_home)
-        sent = list(state.get(key) or [])
-        if channel not in sent:
-            sent.append(channel)
-        state[key] = sent
-        if len(state) > _MAX_STATE_ENTRIES:
-            state = dict(list(state.items())[-_MAX_STATE_ENTRIES:])
-        _write_state(state, hermes_home)
+        _set_claim_sent(key, channel, hermes_home)
 
 
 def _completion_text(title: str, text: str) -> str:
@@ -276,10 +324,12 @@ def _sender_environment(channel: str, hermes_home: str | Path | None = None) -> 
 
 def _run_sender_process(channel: str, message: str, hermes_home: str | Path | None = None) -> str:
     env, agent_root = _sender_environment(channel, hermes_home)
+    agent_root = agent_root.resolve()
     if not (agent_root / "tools" / "send_message_tool.py").is_file():
         return json.dumps({"error": "Hermes Agent sender is unavailable"})
     script = (
-        "import json\n"
+        "import json, sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
         "from tools.send_message_tool import send_message_tool\n"
         "args=json.loads(input())\n"
         "result=send_message_tool(args)\n"
@@ -287,12 +337,13 @@ def _run_sender_process(channel: str, message: str, hermes_home: str | Path | No
     )
     try:
         completed = subprocess.run(
-            [sys.executable, "-c", script],
+            [sys.executable, "-I", "-c", script, str(agent_root)],
             input=json.dumps({"action": "send", "target": channel, "message": message}) + "\n",
             text=True,
             capture_output=True,
             timeout=45,
             env=env,
+            cwd=agent_root,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
@@ -332,24 +383,15 @@ def send_completion(settings: dict[str, Any], *, session_id: str, stream_id: str
     message = _completion_text(title, text)
     result: dict[str, Any] = {"sent": [], "failed": []}
     for channel in _claimable_channels(key, normalized["completion_notification_channels"], hermes_home):
-        last_error: Exception | None = None
-        for attempt in range(3):
-            try:
-                _send_via_hermes(channel, message, hermes_home)
-                _mark_sent(key, channel, hermes_home)
-                result["sent"].append(channel)
-                last_error = None
-                break
-            except Exception as exc:  # delivery failure must not break the chat turn
-                last_error = exc
-                if attempt < 2:
-                    retry_after = getattr(exc, "retry_after", None)
-                    time.sleep(retry_after if retry_after is not None else 1.0 * (attempt + 1))
-        if last_error is not None:
+        try:
+            _send_via_hermes(channel, message, hermes_home)
+            _mark_sent(key, channel, hermes_home)
+            result["sent"].append(channel)
+        except Exception as exc:  # delivery failure must not break the chat turn
             scope = str(Path(hermes_home).expanduser()) if hermes_home is not None else "default"
             with _STATE_LOCK:
                 _IN_FLIGHT.discard((scope, key, channel))
-            logger.warning("Completion notification failed for %s: %s", channel, type(last_error).__name__)
+            logger.warning("Completion notification failed for %s: %s", channel, type(exc).__name__)
             result["failed"].append(channel)
     return result
 

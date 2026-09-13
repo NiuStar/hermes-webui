@@ -27,13 +27,22 @@ access tokens, and platform target IDs are not sent.
 ## Delivery Contract
 
 The server dispatches after the session save and completion journal event. Each
-`session_id + stream_id + channel` is recorded in the WebUI state directory so
-reconnects and duplicate terminal callbacks do not send the same channel twice.
-Failed platform delivery is retried three times with short backoff; failure is
-logged only as a channel name and exception type and does not fail the chat
-turn. A later duplicate completion can retry a channel that never succeeded.
-When Hermes reports a provider cooldown, retries honor that delay (capped at 60
-seconds) instead of immediately adding more requests.
+`profile + session_id + stream_id + channel` is claimed atomically in the
+profile's WebUI state directory before any network send, so concurrent WebUI
+processes, reconnects, and duplicate terminal callbacks cannot send the same
+channel twice. Claim keys are hashed and stored in a profile-local transactional
+SQLite database with mode `0600`.
+Each claimed channel is attempted exactly once. A failure is logged only as a
+channel name and exception type and does not fail the chat
+turn. Claims are retained after a failed or interrupted delivery: this is an
+intentional at-most-once boundary, preferring a missed notification over a
+duplicate notification after an uncertain external send.
+There is no WebUI-layer retry, including after a timeout or provider cooldown,
+because the external service may have accepted the message before its response
+was lost. Retrying would violate the at-most-once guarantee.
 
 Delivery is successful only when Hermes Agent's official `send_message` result
 contains `success=true`. Transport success alone is not considered delivery.
+The sender runs in isolated Python mode with the validated Hermes Agent source
+inserted first on `sys.path`; the WebUI working directory cannot shadow the
+official `tools.send_message_tool` module.

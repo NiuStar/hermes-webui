@@ -3,6 +3,8 @@
 import importlib
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -100,8 +102,6 @@ def test_interrupted_completion_is_not_sent(notifications, monkeypatch):
 
 
 def test_official_sender_errors_are_failed_and_do_not_leak_details(notifications, monkeypatch):
-    sleeps = []
-    monkeypatch.setattr(notifications.time, "sleep", lambda seconds: sleeps.append(seconds))
     monkeypatch.setattr(
         notifications,
         "_run_sender_process",
@@ -116,7 +116,6 @@ def test_official_sender_errors_are_failed_and_do_not_leak_details(notifications
     )
     assert result == {"sent": [], "failed": ["weixin"]}
     assert "secret" not in repr(result)
-    assert sleeps == [30.0, 30.0]
 
 
 def test_sender_environment_is_scoped_and_state_is_private(notifications, monkeypatch, tmp_path):
@@ -126,8 +125,10 @@ def test_sender_environment_is_scoped_and_state_is_private(notifications, monkey
     assert "OPENAI_API_KEY" not in env
     assert env["WEIXIN_TOKEN"] == "selected-platform-token"
 
-    notifications._write_state({"session:stream": ["weixin"]})
-    assert notifications._state_path().stat().st_mode & 0o777 == 0o600
+    claimed = notifications._claimable_channels("session:stream", ["weixin"])
+    assert claimed == ["weixin"]
+    database = notifications._claims_db_path()
+    assert database.stat().st_mode & 0o777 == 0o600
 
 
 def test_sender_subprocess_uses_official_contract_without_unrelated_secrets(notifications, monkeypatch):
@@ -172,7 +173,7 @@ def test_profile_home_isolates_credentials_and_idempotency(notifications, monkey
             hermes_home=home,
         )
         assert result["sent"] == ["weixin"]
-        assert notifications._state_path(home).is_file()
+        assert notifications._claims_db_path(home).is_file()
     assert seen == [str(home) for home in homes]
 
 
@@ -187,3 +188,159 @@ def test_public_status_is_scoped_to_requested_profile_home(notifications, tmp_pa
     )
     assert notifications.public_status(configured_home)["configured"]["weixin"] is True
     assert notifications.public_status(unconfigured_home)["configured"]["weixin"] is False
+
+
+def test_sender_cannot_be_shadowed_by_working_directory_tools_package(notifications, monkeypatch, tmp_path):
+    agent_root = Path(os.environ["HERMES_AGENT_DIR"])
+    (agent_root / "tools" / "__init__.py").write_text("", encoding="utf-8")
+    (agent_root / "tools" / "send_message_tool.py").write_text(
+        "import json\ndef send_message_tool(args): return json.dumps({'success': True, 'origin': 'official'})\n",
+        encoding="utf-8",
+    )
+    attacker = tmp_path / "attacker"
+    (attacker / "tools").mkdir(parents=True)
+    (attacker / "tools" / "__init__.py").write_text("", encoding="utf-8")
+    (attacker / "tools" / "send_message_tool.py").write_text(
+        "raise RuntimeError('shadow package executed')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(attacker)
+    result = notifications._send_via_hermes("weixin", "test")
+    assert result["origin"] == "official"
+
+
+def test_claim_is_cross_process_at_most_once(notifications, tmp_path):
+    home = tmp_path / "multiprocess-profile"
+    home.mkdir()
+    script = (
+        "import json,sys\n"
+        "from api.completion_notifications import _claimable_channels\n"
+        "print(json.dumps(_claimable_channels('same-session:same-stream',['weixin'],sys.argv[1])))\n"
+    )
+    env = dict(os.environ)
+    repo_root = str(Path(__file__).resolve().parent.parent)
+    env["PYTHONPATH"] = repo_root
+    workers = [
+        subprocess.Popen(
+            [sys.executable, "-c", script, str(home)],
+            cwd=repo_root,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        for _ in range(2)
+    ]
+    completed = [worker.communicate(timeout=15) for worker in workers]
+    for worker, (_stdout, stderr) in zip(workers, completed, strict=True):
+        assert worker.returncode == 0, stderr
+    results = [json.loads(stdout) for stdout, _stderr in completed]
+    assert sorted(results, key=len) == [[], ["weixin"]]
+
+
+def test_invalid_agent_override_falls_back_to_authoritative_agent_dir(notifications, monkeypatch, tmp_path):
+    authoritative = tmp_path / "authoritative-agent"
+    (authoritative / "tools").mkdir(parents=True)
+    (authoritative / "tools" / "send_message_tool.py").write_text("# official\n", encoding="utf-8")
+    invalid = tmp_path / "missing-agent"
+    monkeypatch.setattr(notifications, "_AGENT_DIR", authoritative)
+    root = notifications._agent_root({
+        "HERMES_HOME": os.environ["HERMES_HOME"],
+        "HERMES_WEBUI_AGENT_DIR": str(invalid),
+    })
+    assert root == authoritative
+
+
+def test_failed_delivery_keeps_claim_and_prevents_duplicate_callback(notifications, monkeypatch):
+    attempts = []
+    monkeypatch.setattr(
+        notifications,
+        "_send_via_hermes",
+        lambda *args: attempts.append(args) or (_ for _ in ()).throw(RuntimeError("failed")),
+    )
+    settings = {"completion_notifications_enabled": True, "completion_notification_channels": ["weixin"]}
+    first = notifications.send_completion(
+        settings,
+        session_id="failed-session",
+        stream_id="failed-stream",
+        title="ignored",
+        text="ignored",
+    )
+    second = notifications.send_completion(
+        settings,
+        session_id="failed-session",
+        stream_id="failed-stream",
+        title="ignored",
+        text="ignored",
+    )
+    assert first == {"sent": [], "failed": ["weixin"]}
+    assert second == {"sent": [], "failed": []}
+    assert len(attempts) == 1
+
+
+def test_legacy_r2_sent_state_prevents_duplicate_after_upgrade(notifications):
+    notifications._write_state({"legacy-session:legacy-stream": ["weixin"]})
+    assert notifications._claimable_channels(
+        "legacy-session:legacy-stream",
+        ["weixin"],
+    ) == []
+
+
+def test_claim_survives_process_exit_before_delivery(notifications, tmp_path):
+    home = tmp_path / "crash-profile"
+    home.mkdir()
+    repo_root = str(Path(__file__).resolve().parent.parent)
+    env = dict(os.environ)
+    env["PYTHONPATH"] = repo_root
+    script = (
+        "from api.completion_notifications import _claimable_channels\n"
+        "assert _claimable_channels('crash-session:crash-stream',['weixin'],%r)==['weixin']\n"
+    ) % str(home)
+    subprocess.run([sys.executable, "-c", script], cwd=repo_root, env=env, check=True)
+    assert notifications._claimable_channels(
+        "crash-session:crash-stream",
+        ["weixin"],
+        home,
+    ) == []
+
+
+def test_claims_use_one_private_transactional_database(notifications, tmp_path):
+    home = tmp_path / "database-profile"
+    home.mkdir()
+    for index in range(20):
+        assert notifications._claimable_channels(
+            f"session-{index}:stream-{index}",
+            ["weixin"],
+            home,
+        ) == ["weixin"]
+    database = notifications._claims_db_path(home)
+    assert database.is_file()
+    assert database.stat().st_mode & 0o777 == 0o600
+    assert not list(database.parent.glob("completion_notifications.claims/*"))
+
+
+def test_uncertain_timeout_is_not_retried(notifications, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        notifications,
+        "_send_via_hermes",
+        lambda *args: calls.append(args) or (_ for _ in ()).throw(subprocess.TimeoutExpired("sender", 45)),
+    )
+    settings = {"completion_notifications_enabled": True, "completion_notification_channels": ["weixin"]}
+    first = notifications.send_completion(
+        settings,
+        session_id="timeout-session",
+        stream_id="timeout-stream",
+        title="ignored",
+        text="ignored",
+    )
+    second = notifications.send_completion(
+        settings,
+        session_id="timeout-session",
+        stream_id="timeout-stream",
+        title="ignored",
+        text="ignored",
+    )
+    assert first == {"sent": [], "failed": ["weixin"]}
+    assert second == {"sent": [], "failed": []}
+    assert len(calls) == 1
