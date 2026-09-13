@@ -6403,7 +6403,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           sessionId:completedSid,
           liveDisplayText:typeof _streamDisplay==='function'?_streamDisplay():assistantText,
         });
-        sendBrowserNotification('Response complete',_completionPreview||'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid});
+        const _metadataOnlyCompletionNotice=window._completionNotificationsEnabled===true
+          && Array.isArray(window._completionNotificationChannels)
+          && window._completionNotificationChannels.includes('browser');
+        const _completionNoticeBody=_metadataOnlyCompletionNotice
+          ? 'Return to WebUI to view the response.'
+          : (_completionPreview||'Task finished');
+        sendBrowserNotification('Response complete',_completionNoticeBody,{forceHidden:_wasEverBackgrounded,sid:activeSid});
       };
       if(_shouldUseLiveProseFade()&&assistantBody){
         _cancelAnimationFramePendingStreamRender();

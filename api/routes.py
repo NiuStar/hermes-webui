@@ -13454,6 +13454,17 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/settings":
         settings = load_settings()
+        try:
+            from api.completion_notifications import public_status
+            completion_status = public_status(get_active_hermes_home())
+            settings["completion_notification_channels_status"] = completion_status["configured"]
+        except Exception:
+            settings["completion_notification_channels_status"] = {
+                "browser": True,
+                "weixin": False,
+                "wecom": False,
+                "feishu": False,
+            }
         settings["persisted_speech_keys"] = persisted_speech_settings_keys()
         # Never expose the stored password hash to clients
         settings.pop("password_hash", None)
@@ -16960,7 +16971,30 @@ def handle_post(handler, parsed) -> bool:
 
         from api.config import get_max_tokens_status, set_max_tokens
 
+        if "completion_notifications_enabled" in body or "completion_notification_channels" in body:
+            try:
+                from api.completion_notifications import normalize_settings
+                _completion_home = get_active_hermes_home()
+                normalize_settings({
+                    "completion_notifications_enabled": body.get("completion_notifications_enabled", load_settings().get("completion_notifications_enabled", False)),
+                    "completion_notification_channels": body.get("completion_notification_channels", load_settings().get("completion_notification_channels", ["browser"])),
+                }, environ={
+                    "HERMES_HOME": str(_completion_home),
+                    "HERMES_WEBUI_AGENT_DIR": str(Path(os.getenv("HERMES_WEBUI_AGENT_DIR", "")).expanduser()) if os.getenv("HERMES_WEBUI_AGENT_DIR") else "",
+                })
+            except ValueError as exc:
+                return bad(handler, str(exc), 400)
         saved = save_settings(body)
+        try:
+            from api.completion_notifications import public_status
+            saved["completion_notification_channels_status"] = public_status(get_active_hermes_home())["configured"]
+        except Exception:
+            saved["completion_notification_channels_status"] = {
+                "browser": True,
+                "weixin": False,
+                "wecom": False,
+                "feishu": False,
+            }
         saved["persisted_speech_keys"] = persisted_speech_settings_keys()
         if max_tokens_provided:
             max_tokens_status = set_max_tokens(max_tokens_value)

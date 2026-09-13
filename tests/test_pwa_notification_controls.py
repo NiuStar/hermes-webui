@@ -39,7 +39,9 @@ def test_notification_payload_uses_completion_session_when_provided():
     assert "tag:sid?`hermes-${sid}`" in MESSAGES_JS
     assert "function _completionNotificationPreviewText" in MESSAGES_JS
     assert "_completionNotificationPreviewText(lastAsst," in MESSAGES_JS
-    assert "sendBrowserNotification('Response complete',_completionPreview||'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid})" in MESSAGES_JS
+    assert "window._completionNotificationChannels.includes('browser')" in MESSAGES_JS
+    assert "? 'Return to WebUI to view the response.'" in MESSAGES_JS
+    assert "sendBrowserNotification('Response complete',_completionNoticeBody,{forceHidden:_wasEverBackgrounded,sid:activeSid})" in MESSAGES_JS
     assert "assistantText?assistantText.slice(0,100)" not in MESSAGES_JS
     assert "sendBrowserNotification('Approval required',d.description||'Tool approval needed',{sid:activeSid})" in MESSAGES_JS
     assert "sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed',{sid:activeSid})" in MESSAGES_JS

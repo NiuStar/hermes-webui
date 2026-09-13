@@ -9707,6 +9707,8 @@ _SETTINGS_DEFAULTS = {
     "sound_enabled": False,  # play notification sound when assistant finishes
     "rtl": False,  # right-to-left chat layout (chat messages + composer only)
     "notifications_enabled": False,  # browser notification when tab is in background
+    "completion_notifications_enabled": False,  # server-side delivery after a persisted response completes
+    "completion_notification_channels": ["browser"],  # browser | weixin | wecom | feishu
     "show_thinking": True,  # show/hide thinking/reasoning blocks in chat view
     "simplified_tool_calling": True,  # legacy compatibility; Worklog renderer remains enabled
     "terminal_auto_expand_on_output": False,  # auto-expand terminal panel when output arrives while collapsed
@@ -9877,6 +9879,12 @@ def load_settings() -> dict:
         ):
             settings["default_message_mode"] = stored.get("busy_input_mode")
         settings.pop("busy_input_mode", None)
+        channels = settings.get("completion_notification_channels")
+        if isinstance(channels, list):
+            settings["completion_notification_channels"] = [
+                "wecom" if channel == "wechat_work" else channel
+                for channel in channels
+            ]
         # Grandfather established installs OFF for show_cli_sessions (#3988).
         # The default flipped True so NEW users see CLI/TUI/messaging
         # sessions without hunting for the toggle — but an existing user
@@ -10003,6 +10011,7 @@ _SETTINGS_BOOL_KEYS = {
     "sound_enabled",
     "rtl",
     "notifications_enabled",
+    "completion_notifications_enabled",
     "show_thinking",
     "terminal_auto_expand_on_output",
     "workspace_todos_tab",
@@ -10210,7 +10219,7 @@ def save_settings(settings: dict) -> dict:
             # Validate list-valued ordering settings. Chat/settings stay fixed
             # for tabs; composer ordering only accepts known control keys.
             # Duplicates are collapsed while preserving the first requested order.
-            if k in {"hidden_tabs", "tab_order", "composer_control_order"}:
+            if k in {"hidden_tabs", "tab_order", "composer_control_order", "completion_notification_channels"}:
                 if not isinstance(v, list):
                     continue
                 seen = set()
@@ -10225,6 +10234,10 @@ def save_settings(settings: dict) -> dict:
                         continue
                     if k == "composer_control_order" and s not in _COMPOSER_CONTROL_ORDER_KEYS:
                         continue
+                    if k == "completion_notification_channels":
+                        s = "wecom" if s == "wechat_work" else s
+                        if s not in {"browser", "weixin", "wecom", "feishu"}:
+                            continue
                     seen.add(s)
                     cleaned.append(s)
                 v = cleaned

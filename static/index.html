@@ -1297,6 +1297,20 @@
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsCompletionNotificationsEnabled" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_completion_notifications">Notify when a response is complete</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_completion_notifications">Send a short completion notice without keeping this page open. Hermes platform credentials stay on the server.</div>
+              <div style="display:flex;gap:12px;align-items:center;margin-top:8px;flex-wrap:wrap">
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" name="completionNotificationChannel" value="browser"><span data-i18n="settings_completion_channel_browser">Browser</span></label>
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" name="completionNotificationChannel" value="weixin"><span data-i18n="settings_completion_channel_weixin">WeChat</span></label>
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" name="completionNotificationChannel" value="wecom"><span data-i18n="settings_completion_channel_wecom">WeCom</span></label>
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" name="completionNotificationChannel" value="feishu"><span data-i18n="settings_completion_channel_feishu">Feishu</span></label>
+              </div>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_completion_channels">Messaging channels use the credentials and home channel already configured in Hermes.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsShowTokenUsage" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_token_usage">Show token usage after responses</span>
               </label>

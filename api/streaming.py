@@ -12040,6 +12040,34 @@ def _run_agent_streaming(
                         put('cancel', _cancel_event_payload('Cancelled by user'))
                         return
                 _success_writeback_committed = True
+                if not ephemeral:
+                    try:
+                        from api.completion_notifications import dispatch_completed_turn
+                        from api.profiles import get_hermes_home_for_profile
+                        _latest_assistant_for_notification = next(
+                            (
+                                message
+                                for message in reversed(s.messages)
+                                if isinstance(message, dict) and message.get("role") == "assistant"
+                            ),
+                            None,
+                        ) or {}
+                        _notification_content = _latest_assistant_for_notification.get("content", "")
+                        if not isinstance(_notification_content, str):
+                            _notification_content = " ".join(
+                                str(part.get("text", "")) if isinstance(part, dict) else str(part)
+                                for part in _notification_content
+                            ) if isinstance(_notification_content, list) else str(_notification_content)
+                        dispatch_completed_turn(
+                            load_settings(),
+                            session_id=s.session_id,
+                            stream_id=stream_id,
+                            title=getattr(s, "title", "Untitled"),
+                            text=_notification_content,
+                            hermes_home=get_hermes_home_for_profile(getattr(s, "profile", None)),
+                        )
+                    except Exception:
+                        logger.warning("Failed to dispatch completion notification", exc_info=True)
             usage = {
                 'input_tokens': input_tokens,
                 'output_tokens': output_tokens,

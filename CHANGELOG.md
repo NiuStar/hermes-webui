@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **回复完成后可发送低噪音通知，不必一直盯着 WebUI。** 设置页新增默认关闭的“回复完成后通知”，可选浏览器、微信（Weixin）、企业微信（WeCom）和飞书；消息渠道复用当前 Hermes profile 已配置的凭据与 home channel，不在 WebUI 接收、保存或回显密钥和目标 ID。服务端只在最终回复成功落库后异步发送，取消、错误、部分流和断线均不触发；通知只包含固定完成状态和返回 WebUI 的提示，不发送会话标题或回答正文。每个 `profile + session + stream + channel` 持久化幂等，状态文件为 `0600`，官方 `send_message` 必须返回 `success=true` 才算成功，平台冷却限流按返回时间退避。
+
 ### Fixed
 
 - **Regenerating a response no longer refetches the entire conversation, so regenerate on a long chat is fast instead of stalling (and silently cancelling).** Clicking "regenerate" used to pull the whole transcript back from the server before it could rebuild the request, which on a large session caused a long UI freeze and could time out and silently drop the regeneration. The regeneration authority now reads only a bounded, sidecar-anchored tail of recent turns instead of the full transcript — and it is exact by construction: it takes the tail's prefix proof, keys, and rows from a single WAL-consistent database snapshot (a `data_version` check forces a full read if the database is written mid-snapshot), reuses the canonical projection and durable ordering so the bounded rows match the full reader byte-for-byte, and falls back to a full read whenever the skipped prefix isn't provably identical or the tail contains a duplicated turn key. If any of those invariants can't be met it reads the whole transcript exactly as before, so a concurrent edit or an unusual session can never produce a stale or reordered regeneration. Thanks @webtecnica. (#7204, closes #6826)

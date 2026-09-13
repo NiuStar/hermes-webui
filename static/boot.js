@@ -3307,7 +3307,11 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._showCliSessions=s.show_cli_sessions!==false;
     window._showPreviousMessagingSessions=!!s.show_previous_messaging_sessions;
     window._soundEnabled=!!s.sound_enabled;
-    window._notificationsEnabled=!!s.notifications_enabled;
+    window._completionNotificationsEnabled=s.completion_notifications_enabled===true;
+    window._completionNotificationChannels=Array.isArray(s.completion_notification_channels)
+      ? s.completion_notification_channels : ['browser'];
+    window._notificationsEnabled=!!s.notifications_enabled
+      || (window._completionNotificationsEnabled&&window._completionNotificationChannels.includes('browser'));
     window._whatsNewSummaryEnabled=!!s.whats_new_summary_enabled;
     window._showThinking=s.show_thinking!==false;
     window._simplifiedToolCalling=true;

@@ -8769,6 +8769,11 @@ function _preferencesPayloadFromUi(){
   if(rtlCb) payload.rtl=rtlCb.checked;
   const notifCb=$('settingsNotificationsEnabled');
   if(notifCb) payload.notifications_enabled=notifCb.checked;
+  const completionNotifCb=$('settingsCompletionNotificationsEnabled');
+  if(completionNotifCb) payload.completion_notifications_enabled=completionNotifCb.checked;
+  const completionChannels=document.querySelectorAll('input[name="completionNotificationChannel"]:checked');
+  const allCompletionChannels=document.querySelectorAll('input[name="completionNotificationChannel"]');
+  if(allCompletionChannels.length) payload.completion_notification_channels=Array.from(completionChannels).map(input=>input.value);
   const sidebarDensitySel=$('settingsSidebarDensity');
   if(sidebarDensitySel) payload.sidebar_density=sidebarDensitySel.value;
   const pinnedLimitField=$('settingsPinnedSessionsLimit');
@@ -8929,6 +8934,18 @@ async function _autosavePreferencesSettings(payload){
     }
     if(payload&&payload.new_chat_on_workspace_switch!==undefined){
       window._newChatOnWorkspaceSwitch=!!(saved&&saved.new_chat_on_workspace_switch);  // #5473
+    }
+    if(payload&&(
+      Object.prototype.hasOwnProperty.call(payload,'completion_notifications_enabled')
+      || Object.prototype.hasOwnProperty.call(payload,'completion_notification_channels')
+    )){
+      const _completionEnabled=!!(saved&&saved.completion_notifications_enabled);
+      const _completionChannels=Array.isArray(saved&&saved.completion_notification_channels)
+        ? saved.completion_notification_channels : ['browser'];
+      window._completionNotificationsEnabled=_completionEnabled;
+      window._completionNotificationChannels=_completionChannels;
+      window._notificationsEnabled=!!(saved&&saved.notifications_enabled)
+        || (_completionEnabled&&_completionChannels.includes('browser'));
     }
     _settingsPreferencesAutosaveRetryPayload=null;
     _setPreferencesAutosaveStatus('saved');
@@ -9682,6 +9699,25 @@ async function loadSettingsPanel(){
     }
     const notifCb=$('settingsNotificationsEnabled');
     if(notifCb){notifCb.checked=!!settings.notifications_enabled;notifCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const completionNotifCb=$('settingsCompletionNotificationsEnabled');
+    const completionChannelInputs=Array.from(document.querySelectorAll('input[name="completionNotificationChannel"]'));
+    const completionStatus=settings.completion_notification_channels_status||{};
+    const savedCompletionChannels=Array.isArray(settings.completion_notification_channels)
+      ? settings.completion_notification_channels : ['browser'];
+    if(completionNotifCb){
+      completionNotifCb.checked=!!settings.completion_notifications_enabled;
+      window._completionNotificationsEnabled=completionNotifCb.checked;
+      window._completionNotificationChannels=savedCompletionChannels;
+      window._notificationsEnabled=!!settings.notifications_enabled
+        || (completionNotifCb.checked && savedCompletionChannels.includes('browser'));
+      completionNotifCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+    }
+    completionChannelInputs.forEach(input=>{
+      const channelConfigured=input.value==='browser'||!!completionStatus[input.value];
+      input.checked=channelConfigured&&savedCompletionChannels.includes(input.value);
+      input.disabled=!channelConfigured;
+      input.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+    });
     // show_thinking has no settings panel checkbox — controlled via /reasoning show|hide
     const sidebarDensitySel=$('settingsSidebarDensity');
     if(sidebarDensitySel){
@@ -12091,7 +12127,12 @@ function _applySavedSettingsUi(saved, body, opts){
   window._showCliSessions=showCliSessions;
   window._showPreviousMessagingSessions=!!body.show_previous_messaging_sessions;
   window._soundEnabled=body.sound_enabled;
-  window._notificationsEnabled=body.notifications_enabled;
+  window._completionNotificationsEnabled=body.completion_notifications_enabled===true;
+  window._completionNotificationChannels=Array.isArray(body.completion_notification_channels)
+    ? body.completion_notification_channels : ['browser'];
+  window._notificationsEnabled=body.notifications_enabled===true
+    || (window._completionNotificationsEnabled
+      && window._completionNotificationChannels.includes('browser'));
   window._whatsNewSummaryEnabled=!!body.whats_new_summary_enabled;
   window._showThinking=body.show_thinking!==false;
   window._simplifiedToolCalling=true;
@@ -12811,6 +12852,8 @@ async function saveSettings(andClose){
   body.sound_enabled=!!($('settingsSoundEnabled')||{}).checked;
   body.rtl=!!($('settingsRtl')||{}).checked;
   body.notifications_enabled=!!($('settingsNotificationsEnabled')||{}).checked;
+  body.completion_notifications_enabled=!!($('settingsCompletionNotificationsEnabled')||{}).checked;
+  body.completion_notification_channels=Array.from(document.querySelectorAll('input[name="completionNotificationChannel"]:checked')).map(input=>input.value);
   body.show_thinking=window._showThinking!==false;
   body.sidebar_density=sidebarDensity;
   body.default_message_mode=defaultMessageMode;

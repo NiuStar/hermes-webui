@@ -29,6 +29,7 @@ from api.config import (
     coerce_reasoning_effort_for_model,
     gateway_approval_unavailable_reason,
     gateway_supports_approval,
+    load_settings,
     register_active_run,
     unregister_active_run,
     unregister_stream_owner,
@@ -1389,6 +1390,19 @@ def _run_gateway_chat_streaming(
                 _restore_cancelled_success_writeback()
                 return
             success_writeback_committed = True
+            try:
+                from api.completion_notifications import dispatch_completed_turn
+                from api.profiles import get_hermes_home_for_profile
+                dispatch_completed_turn(
+                    load_settings(),
+                    session_id=s.session_id,
+                    stream_id=stream_id,
+                    title=getattr(s, "title", "Untitled"),
+                    text=assistant_text,
+                    hermes_home=get_hermes_home_for_profile(getattr(s, "profile", None)),
+                )
+            except Exception:
+                logger.warning("Failed to dispatch Gateway completion notification", exc_info=True)
         try:
             from api.goals import evaluate_goal_after_turn, has_active_goal
             from api.profiles import get_hermes_home_for_profile
