@@ -472,9 +472,11 @@ def request_status(operation_id: str, socket_path: str = CONTROL_SOCKET) -> dict
 
 
 def _release_is_valid(channel: str, version: str) -> bool:
+    if len(version) > 128:
+        return False
     if channel == "stable":
-        return bool(__import__("re").fullmatch(r"v[0-9][0-9A-Za-z.+-]*", version))
-    return channel == "experimental" and bool(__import__("re").fullmatch(r"exp-v[0-9][0-9A-Za-z.+-]*", version))
+        return bool(__import__("re").fullmatch(r"v[0-9][0-9A-Za-z_.-]*", version))
+    return channel == "experimental" and bool(__import__("re").fullmatch(r"exp-v[0-9][0-9A-Za-z_.-]*", version))
 
 
 def _control_request(
@@ -507,7 +509,8 @@ def _control_request(
         return {"ok": False, "message": "Docker update already in progress"}, None
     target = os.getenv("HERMES_WEBUI_UPDATE_TARGET", "hermes-webui").strip()
     repository = os.getenv("HERMES_WEBUI_DOCKER_IMAGE", "24802117/hermes-webui").strip()
-    image = f"{repository}:{'latest' if channel == 'stable' else 'experimental'}"
+    image_tag = version if channel == "stable" else "experimental"
+    image = f"{repository}:{image_tag}"
     operation_id, initial_progress = progress_store.start(version)
 
     def run() -> None:

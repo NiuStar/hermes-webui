@@ -35,6 +35,13 @@ services:
 > release is pushed. Experimental builds are not pushed on every commit to the
 > default branch.
 
+> **Online-update integrity:** Compose may use the floating `:latest` tag for
+> ordinary startup, but stable online updates pull the exact GitHub-verified
+> release tag (`:v…`). This prevents a stable release from failing image
+> verification when `:latest` is published later. Experimental updates retain
+> the existing `:experimental` contract because the release workflow publishes
+> experimental pinned tags without the `exp-v` GitHub prefix.
+
 > **Note (v0.14+):** If you use `docker-compose.three-container.yml`, both
 > `hermes-agent` and `hermes-dashboard` initialise from the same image and write
 > to the same `hermes-home` volume simultaneously. This can cause overlapping lock

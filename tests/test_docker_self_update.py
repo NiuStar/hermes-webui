@@ -1,5 +1,6 @@
-from api import docker_self_update as dsu
 import threading
+
+from api import docker_self_update as dsu
 
 
 def _old_info():
@@ -115,6 +116,12 @@ def test_control_request_rejects_arbitrary_actions_and_versions(monkeypatch):
         {'action': 'delete', 'channel': 'stable', 'version': 'v1.2.3', 'sha': 'x'},
         {'action': 'update', 'channel': 'stable', 'version': 'latest', 'sha': 'x'},
         {'action': 'update', 'channel': 'other', 'version': 'v1.2.3', 'sha': 'x'},
+        {'action': 'update', 'channel': 'stable', 'version': 'v1.2.3/other', 'sha': 'x'},
+        {'action': 'update', 'channel': 'stable', 'version': 'v1.2.3:other', 'sha': 'x'},
+        {'action': 'update', 'channel': 'stable', 'version': 'v1.2.3@sha256:deadbeef', 'sha': 'x'},
+        {'action': 'update', 'channel': 'stable', 'version': 'v1.2.3+build', 'sha': 'x'},
+        {'action': 'update', 'channel': 'stable', 'version': 'v' + ('1' * 128), 'sha': 'x'},
+        {'action': 'update', 'channel': 'experimental', 'version': 'exp-v1.2.3/other', 'sha': 'x'},
     ):
         payload['token'] = 'secret'
         response, worker = dsu._control_request(payload, busy=busy, expected_token='secret')
@@ -132,6 +139,66 @@ def test_control_request_is_single_flight(monkeypatch):
     assert response['ok'] is False
     assert worker is None
     busy.release()
+
+
+def test_control_request_pulls_exact_verified_stable_release_tag(monkeypatch):
+    monkeypatch.setenv('HERMES_WEBUI_DOCKER_SELF_UPDATE', '1')
+    monkeypatch.setenv('HERMES_WEBUI_DOCKER_IMAGE', 'repo/webui')
+    monkeypatch.setenv('HERMES_WEBUI_UPDATE_TARGET', 'webui')
+    seen = []
+    monkeypatch.setattr(
+        dsu,
+        'replace_container',
+        lambda target, image, version, progress=None: seen.append((target, image, version)) or {'cleanup_pending': False},
+    )
+    busy = threading.Lock()
+    response, worker = dsu._control_request(
+        {
+            'action': 'update',
+            'channel': 'stable',
+            'version': 'v2026.09.13-r3',
+            'sha': 'release-sha',
+            'token': 'secret',
+        },
+        busy=busy,
+        expected_token='secret',
+    )
+    assert response['ok'] is True
+    assert worker is not None
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert seen == [('webui', 'repo/webui:v2026.09.13-r3', 'v2026.09.13-r3')]
+
+
+def test_control_request_preserves_experimental_floating_tag_contract(monkeypatch):
+    monkeypatch.setenv('HERMES_WEBUI_DOCKER_SELF_UPDATE', '1')
+    monkeypatch.setenv('HERMES_WEBUI_DOCKER_IMAGE', 'repo/webui')
+    monkeypatch.setenv('HERMES_WEBUI_UPDATE_TARGET', 'webui')
+    seen = []
+    monkeypatch.setattr(
+        dsu,
+        'replace_container',
+        lambda target, image, version, progress=None: seen.append((target, image, version)) or {'cleanup_pending': False},
+    )
+    busy = threading.Lock()
+    response, worker = dsu._control_request(
+        {
+            'action': 'update',
+            'channel': 'experimental',
+            'version': 'exp-v2026.09.13-r3',
+            'sha': 'release-sha',
+            'token': 'secret',
+        },
+        busy=busy,
+        expected_token='secret',
+    )
+    assert response['ok'] is True
+    assert worker is not None
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert seen == [('webui', 'repo/webui:experimental', 'exp-v2026.09.13-r3')]
 
 
 def test_control_request_rejects_wrong_token(monkeypatch):
