@@ -235,8 +235,20 @@ def _create_payload(info: dict[str, Any], image: str) -> dict[str, Any]:
     payload: dict[str, Any] = config
     payload["HostConfig"] = host
     networks = (info.get("NetworkSettings") or {}).get("Networks") or {}
+    container_id = str(info.get("Id") or "")
+    generated_aliases = {container_id, container_id[:12]} - {""}
     if networks:
-        payload["NetworkingConfig"] = {"EndpointsConfig": {name: {"Aliases": value.get("Aliases", [])} for name, value in networks.items()}}
+        payload["NetworkingConfig"] = {
+            "EndpointsConfig": {
+                name: {
+                    "Aliases": [
+                        alias for alias in (value.get("Aliases") or [])
+                        if str(alias) not in generated_aliases
+                    ]
+                }
+                for name, value in networks.items()
+            }
+        }
     return payload
 
 

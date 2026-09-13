@@ -49,6 +49,15 @@ def test_create_payload_preserves_runtime_contract_and_changes_image():
     assert payload['NetworkingConfig']['EndpointsConfig']['project_default']['Aliases'] == ['hermes-webui']
 
 
+def test_create_payload_excludes_container_generated_network_aliases():
+    old = _old_info()
+    old['Id'] = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+    old['NetworkSettings']['Networks']['project_default']['Aliases'] = [
+        'hermes-webui', old['Id'][:12], old['Id'],
+    ]
+    payload = dsu._create_payload(old, 'repo/webui:new')
+    assert payload['NetworkingConfig']['EndpointsConfig']['project_default']['Aliases'] == ['hermes-webui']
+
 def test_docker_requests_use_compatible_version_prefix():
     assert dsu.API_PREFIX == '/v1.41'
 
