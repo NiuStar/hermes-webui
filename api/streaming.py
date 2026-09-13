@@ -68,6 +68,8 @@ from api.models import (
     StateDBSessionMessagesSnapshot,
     _dedupe_persisted_reasoning_rows,
     _is_empty_partial_activity_message,
+    _read_metadata_json_prefix,
+    logical_message_count_for_session,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
     get_state_db_session_messages,
@@ -155,6 +157,11 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
         'messages': messages,
         'message_count': len(messages),
     }
+    if getattr(session, '_messages_are_physical_segment', False):
+        raw['_messages_segmented'] = True
+        logical_count = getattr(session, 'lineage_message_count', None)
+        if isinstance(logical_count, int) and logical_count >= len(messages):
+            raw['message_count'] = logical_count
     attach_todo_state(raw, messages)
     if tool_calls is not None:
         raw['tool_calls'] = tool_calls
@@ -4884,29 +4891,61 @@ def generate_session_title_for_session(session, *, prefer_latest: bool = False, 
     return None, llm_status or 'empty_title', raw_preview
 
 
-def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
-    """Persist old_sid as a read-only pre-compression snapshot.
+def _verified_pre_compression_snapshot(path, expected_messages: int) -> bool:
+    try:
+        metadata = json.loads(_read_metadata_json_prefix(path) or '{}')
+        return bool(
+            metadata.get('pre_compression_snapshot')
+            and int(metadata.get('message_count') or -1) >= int(expected_messages)
+        )
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return False
 
-    Context compression rotates the active WebUI session id from old_sid to the
-    agent's new continuation id. The old JSON must remain on disk for lineage
-    traversal, but it should not continue to appear as an active sidebar row.
-    """
+
+def _physical_message_count_for_session(session) -> int:
+    messages = list(getattr(session, 'messages', None) or [])
+    start = getattr(session, '_persist_message_segment_start', None)
+    if start is None:
+        return len(messages)
+    try:
+        start = int(start)
+    except (TypeError, ValueError):
+        return len(messages)
+    return len(messages) - start if 0 <= start < len(messages) else len(messages)
+
+
+def _preserve_pre_compression_snapshot(s, old_sid: str) -> bool:
+    """Persist old_sid as a verified read-only pre-compression snapshot."""
     old_path = SESSION_DIR / f'{old_sid}.json'
     if not old_path.exists():
-        return
+        return False
+    existing_loaded = None
     try:
-        existing_text = old_path.read_text(encoding='utf-8')
         try:
-            existing = json.loads(existing_text)
-            existing_msgs = len(existing.get('messages') or [])
-            existing_snapshot = bool(existing.get('pre_compression_snapshot'))
-        except (json.JSONDecodeError, ValueError):
-            # Treat corrupt/malformed old JSON as missing history and rewrite it
-            # from the in-memory pre-compression messages below. That is safer
-            # than leaving an unreadable recovery snapshot behind.
-            existing_msgs = -1
-            existing_snapshot = False
-        if len(s.messages) > existing_msgs:
+            existing = json.loads(_read_metadata_json_prefix(old_path) or '{}')
+            if 'message_count' in existing:
+                existing_msgs = int(existing.get('message_count') or 0)
+            else:
+                # Legacy layout: never treat an unknown count as zero. Serialize
+                # the one full load and retain the object for the mark-only branch.
+                # Tiny legacy files can be read directly from the caller-bound
+                # SESSION_DIR (also keeps isolated migration/tests profile-safe).
+                from api.models import Session
+                if old_path.stat().st_size <= 1024 * 1024:
+                    legacy_payload = json.loads(old_path.read_text(encoding='utf-8'))
+                    existing_msgs = len(legacy_payload.get('messages') or [])
+                else:
+                    existing_loaded = Session.load(old_sid)
+                    if existing_loaded is None:
+                        return False
+                    existing_msgs = len(existing_loaded.messages or [])
+        except (json.JSONDecodeError, TypeError, ValueError):
+            # The old file exists but its completeness cannot be proven. Leave it
+            # untouched and keep the continuation cumulative; never overwrite a
+            # potentially recoverable parent with a shorter in-memory view.
+            return False
+        expected_physical_messages = _physical_message_count_for_session(s)
+        if expected_physical_messages >= existing_msgs:
             # In-memory messages are newer than the file; save the full old
             # snapshot from the current session object while preserving its
             # pre-existing parent_session_id lineage.
@@ -4950,12 +4989,15 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
                 s.pending_attachments = saved_pending_attachments
                 s.pending_started_at = saved_pending_started_at
                 s.pending_user_source = saved_pending_user_source
-            return
+            return _verified_pre_compression_snapshot(
+                old_path,
+                max(existing_msgs, expected_physical_messages),
+            )
         # Existing file is already at least as complete as memory; stamp only
         # the snapshot marker so index/sidebar projection can hide it without
         # rewriting a shorter messages array over a fuller transcript.
         from api.models import Session
-        snapshot = Session.load(old_sid)
+        snapshot = existing_loaded or Session.load(old_sid)
         if snapshot:
             snapshot.pre_compression_snapshot = True
             snapshot.pinned = False
@@ -4976,10 +5018,15 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
                 "Marked pre-compression session %s as sidebar-hidden snapshot",
                 old_sid,
             )
+            return _verified_pre_compression_snapshot(
+                old_path,
+                max(existing_msgs, expected_physical_messages),
+            )
     except OSError:
         logger.debug("Could not read old session file before preservation")
     except Exception:
         logger.debug("Failed to preserve pre-compression session file", exc_info=True)
+    return False
 
 
 def _maybe_schedule_title_refresh(session, put_event, agent):
@@ -10961,7 +11008,40 @@ def _run_agent_streaming(
                     # compression removes messages from the model's context. Skip
                     # the write when the file already contains up-to-date data
                     # (i.e. it was just saved by a checkpoint).
-                    _preserve_pre_compression_snapshot(s, old_sid)
+                    _snapshot_verified = _preserve_pre_compression_snapshot(s, old_sid)
+                    # Keep the logical in-memory transcript intact for terminal
+                    # SSE consumers, but let the continuation persist only the
+                    # segment from the newest compression marker onward. The
+                    # verified parent snapshot owns everything before that marker;
+                    # lineage pagination stitches both files back into the same
+                    # visible history. Any missing marker or failed snapshot keeps
+                    # the legacy full-array save (fail closed, no silent loss).
+                    if _snapshot_verified:
+                        _segment_start = next(
+                            (
+                                idx
+                                for idx in range(len(s.messages) - 1, -1, -1)
+                                if _is_context_compression_marker(s.messages[idx])
+                            ),
+                            None,
+                        )
+                        if _segment_start is not None:
+                            s._persist_message_segment_start = _segment_start
+                            s.lineage_message_count = logical_message_count_for_session(s)
+                            # The verified parent snapshot is written after the
+                            # compressed turn settles, so it already contains the
+                            # child's entire initial physical segment (marker plus
+                            # the completed result). Persist that exact overlap;
+                            # only messages appended on later turns belong solely
+                            # to the child.
+                            s.lineage_parent_overlap_count = len(s.messages) - _segment_start
+                        else:
+                            logger.warning(
+                                "compression snapshot verified but no marker found; "
+                                "keeping full continuation transcript: old_sid=%s new_sid=%s",
+                                old_sid,
+                                new_sid,
+                            )
                     # The continuation is the live/tip session, not another archived
                     # snapshot. If the in-memory object was itself loaded from a
                     # pre-compression snapshot (possible on repeated compression chains

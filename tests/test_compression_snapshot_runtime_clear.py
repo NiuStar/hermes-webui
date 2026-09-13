@@ -121,3 +121,8 @@ def test_preserve_pre_compression_snapshot_does_not_leave_continuation_marked_as
     continuation = json.loads((tmp_path / "new_session.json").read_text(encoding="utf-8"))
     assert continuation["pre_compression_snapshot"] is False
 
+
+def test_compression_rotation_persists_full_initial_child_overlap():
+    source = streaming.Path(streaming.__file__).read_text(encoding="utf-8")
+    assert "s.lineage_parent_overlap_count = len(s.messages) - _segment_start" in source
+

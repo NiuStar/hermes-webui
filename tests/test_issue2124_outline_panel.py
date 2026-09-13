@@ -68,8 +68,6 @@ def test_outline_navigation_and_long_session_contract():
         "window._outlineJump",
         "S.messages",
         "'msg-user-'",
-        "/api/session",
-        "_ensureOutlineMessagesLoaded",
         "_ensureAllMessagesLoaded()",
         "_messagesTruncated",
         "_expandOutlineRenderWindow()",

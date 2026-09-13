@@ -113,7 +113,7 @@ def test_stale_cached_session_is_single_flight(monkeypatch):
     assert results[0] is not stale
 
 
-def test_distinct_cold_loads_have_a_global_concurrency_bound(monkeypatch):
+def test_distinct_cold_loads_are_serialized_to_prevent_oom(monkeypatch):
     import api.models as models
 
     _install_lightweight_resolve_stubs(monkeypatch, models)
@@ -145,7 +145,7 @@ def test_distinct_cold_loads_have_a_global_concurrency_bound(monkeypatch):
             for future in [executor.submit(resolve, sid) for sid in session_ids]
         ]
 
-    assert peak == 2
+    assert peak == 1
     assert {result.session_id for result in results} == set(session_ids)
 
 
@@ -153,11 +153,11 @@ def test_metadata_only_load_bypasses_full_resolve_slots(monkeypatch):
     import api.models as models
 
     _install_lightweight_resolve_stubs(monkeypatch, models)
-    heavy_entered = threading.Barrier(3)
+    heavy_entered = threading.Event()
     release_heavy = threading.Event()
 
     def fake_load(cls, sid):
-        heavy_entered.wait(timeout=2)
+        heavy_entered.set()
         assert release_heavy.wait(timeout=2)
         return _empty_session(models, sid)
 
@@ -170,7 +170,7 @@ def test_metadata_only_load_bypasses_full_resolve_slots(monkeypatch):
     with ThreadPoolExecutor(max_workers=3) as executor:
         first = executor.submit(models.get_session, "heavy-a")
         second = executor.submit(models.get_session, "heavy-b")
-        heavy_entered.wait(timeout=2)
+        assert heavy_entered.wait(timeout=2)
         metadata = executor.submit(models.get_session, "metadata", True)
         try:
             assert metadata.result(timeout=0.5).session_id == "metadata"
@@ -190,11 +190,11 @@ def test_fresh_cache_hit_bypasses_full_resolve_slots(monkeypatch):
     monkeypatch.setattr(models, "_cached_session_lags_disk", lambda _session: False)
     monkeypatch.setattr(models, "_inactive_cache_tail_needs_disk_check", lambda _session: False)
 
-    heavy_entered = threading.Barrier(3)
+    heavy_entered = threading.Event()
     release_heavy = threading.Event()
 
     def fake_load(cls, sid):
-        heavy_entered.wait(timeout=2)
+        heavy_entered.set()
         assert release_heavy.wait(timeout=2)
         return _empty_session(models, sid)
 
@@ -203,7 +203,7 @@ def test_fresh_cache_hit_bypasses_full_resolve_slots(monkeypatch):
     with ThreadPoolExecutor(max_workers=3) as executor:
         first = executor.submit(models.get_session, "heavy-a")
         second = executor.submit(models.get_session, "heavy-b")
-        heavy_entered.wait(timeout=2)
+        assert heavy_entered.wait(timeout=2)
         cache_hit = executor.submit(models.get_session, "cached")
         try:
             assert cache_hit.result(timeout=0.5) is cached

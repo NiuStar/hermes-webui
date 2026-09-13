@@ -36,6 +36,33 @@ def test_full_message_payload_overrides_stale_compact_message_count():
     assert payload["message_count"] != session.compact()["message_count"]
 
 
+def test_reloaded_physical_segment_payload_is_marked_for_frontend_merge():
+    session = _FakeSession(
+        session_id="child-session",
+        messages=[{"role": "system", "content": "summary"}, {"role": "assistant", "content": "tail"}],
+        _messages_are_physical_segment=True,
+        lineage_message_count=45,
+    )
+
+    payload = _session_payload_with_full_messages(session)
+
+    assert payload["_messages_segmented"] is True
+    assert payload["message_count"] == 45
+
+
+def test_live_logical_continuation_payload_is_not_mislabeled_as_physical_segment():
+    session = _FakeSession(
+        session_id="child-session",
+        messages=[{"role": "user", "content": "full history"}, {"role": "assistant", "content": "tail"}],
+        lineage_parent_overlap_count=1,
+        _messages_are_physical_segment=False,
+    )
+
+    payload = _session_payload_with_full_messages(session)
+
+    assert "_messages_segmented" not in payload
+
+
 def test_full_message_payload_includes_todo_state_snapshot():
     todo_result = {
         "todos": [

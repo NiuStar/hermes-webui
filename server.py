@@ -671,6 +671,13 @@ def main() -> None:
     _abort_if_already_serving(HOST, PORT)
     httpd = QuietHTTPServer((HOST, PORT), Handler)
 
+    try:
+        from api.session_sidecar_maintenance import start_sidecar_maintenance_worker
+        if start_sidecar_maintenance_worker():
+            print('[ok] Session sidecar maintenance worker started', flush=True)
+    except Exception as e:
+        print(f'[!!] WARNING: Session sidecar maintenance failed to start: {type(e).__name__}', flush=True)
+
     from api.config import TLS_ENABLED, TLS_CERT, TLS_KEY
     scheme = 'https' if TLS_ENABLED else 'http'
     if TLS_ENABLED:
@@ -745,5 +752,10 @@ def main() -> None:
             stop_session_channel_reaper()
         except Exception:
             logger.debug("Failed to stop SessionChannel reaper during shutdown", exc_info=True)
+        try:
+            from api.session_sidecar_maintenance import stop_sidecar_maintenance_worker
+            stop_sidecar_maintenance_worker()
+        except Exception:
+            logger.debug("Failed to stop session sidecar maintenance worker during shutdown", exc_info=True)
 if __name__ == '__main__':
     main()

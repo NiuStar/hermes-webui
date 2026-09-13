@@ -3157,23 +3157,19 @@ async function _ensureMessagesLoaded(sid, opts) {
   }
   // Fetch session messages with a tail window for fast initial load.
   const reloadLimit = _messageReloadLimitForSession(sid); // defaults to _INITIAL_MSG_LIMIT
-  // A reload window above the server's msg_limit ceiling would be clamped by
-  // the backend (returning only the last _MSG_LIMIT_MAX rows), which can
-  // silently SHRINK an already-loaded transcript that had more than the ceiling
-  // of rows visible (rows 400–999 replaced by 500–999). When the requested
-  // window exceeds the ceiling, fall back to the bare full-transcript request
-  // (no msg_limit / no expand_renderable) so a same-session refresh never drops
-  // already-loaded older rows (Codex gate #6154, silent row-loss).
-  const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : null;
-  const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';
+  // Never fall back to a bare full-transcript request. A large already-loaded
+  // view can be rebuilt through msg_before pages; one unbounded refresh can OOM
+  // the server before the browser receives anything.
+  const boundedReloadLimit = Math.max(1, Math.min(reloadLimit || _INITIAL_MSG_LIMIT, _msgLimitMax));
+
   // Older frontends used expand_renderable=1 to request visible-row expansion.
   // The server now counts msg_limit by visible transcript rows by default; keep
   // the flag for compatibility with mixed-version deployments.
-  const expandParam = boundedReloadLimit ? '&expand_renderable=1' : '';
+  const expandParam = '&expand_renderable=1';
   let data;
   try {
     data = await api(
-      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`,
+      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${boundedReloadLimit}${expandParam}`,
       {timeoutMs:120000}
     );
   } finally {
@@ -3675,6 +3671,8 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages){
 // Load older messages when the user scrolls to the top of the conversation.
 // Prepends them to S.messages and re-renders, preserving scroll position.
 let _loadingOlder = false;
+let _ensureAllMessagesPromise = null;
+let _ensureAllMessagesSid = null;
 // _oldestIdx tracks the index (in the server's full message array) of the
 // oldest message currently loaded in S.messages. Starts at 0 when all
 // messages are loaded, or > 0 when truncated by msg_limit.
@@ -3872,71 +3870,41 @@ async function _loadOlderMessages() {
 }
 
 // Ensure the full message history is loaded (for undo, export, etc).
-// If the session was loaded with msg_limit, this fetches all messages.
-//
-// Race-safety (#1937): with the endless-scroll opt-in, _loadOlderMessages
-// may be in flight when this runs (e.g. user scrolled near the top, then
-// hit the Start jump pill). Two coordinated guards prevent the prefetch
-// from prepending duplicate messages onto our wholesale replacement:
-//   1. Hold the _loadingOlder mutex around the body so a NEW prefetch
-//      cannot start mid-replace (entry-gate check at line ~1003 returns
-//      early). The mutex is also self-protecting against concurrent
-//      ensure-all calls from rapid double-clicks on Start.
-//   2. Bump _messagesGeneration before mutating S.messages so any
-//      in-flight prefetch's post-await generation check bails out.
+// Large transcripts are assembled through the existing bounded msg_before
+// pager; never request the whole sidecar in one response.
 async function _ensureAllMessagesLoaded() {
   if (!_messagesTruncated || !S.session) return;
-  if (_loadingOlder) {
-    // A prefetch is mid-flight (between the `_loadingOlder = true` line
-    // and its post-await guards). Bumping the generation token now
-    // poisons that prefetch's continuation, but we still need to claim
-    // the mutex AFTER it releases. Yield until the prefetch finishes
-    // (its finally-block clears _loadingOlder) before fetching the full
-    // history ourselves. The generation bump below ensures any other
-    // future race against this same continuation also fails closed.
-    _bumpMessagesGeneration();
-    while (_loadingOlder) {
-      await new Promise(resolve => setTimeout(resolve, 16));
-    }
-    if (!_messagesTruncated || !S.session) return;
+  const sid = S.session.session_id;
+  if (_ensureAllMessagesPromise && _ensureAllMessagesSid === sid) {
+    return _ensureAllMessagesPromise;
   }
-  _loadingOlder = true;
-  try {
-    const sid = S.session.session_id;
-    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`, {timeoutMs:120000});
-    // Guard: api() may have redirected (401) and returned undefined.
-    if (!data || !data.session) return;
-    // Session may have been switched while we awaited. Bail rather than
-    // overwrite the new session's messages.
+  const loadAll = async () => {
+  // Let an in-flight prefetch finish before taking over. Its generation guards
+  // already prevent stale prepends after a session switch.
+  while (_loadingOlder) {
+    await new Promise(resolve => setTimeout(resolve, 16));
     if (!S.session || S.session.session_id !== sid) return;
-    if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
-    const msgs = (data.session.messages || []).filter(m => m && m.role);
-    // Bump the generation BEFORE the wholesale replace so any racing
-    // prefetch (whose snapshot was taken before this call's mutex
-    // acquisition) sees the new value and aborts.
-    _bumpMessagesGeneration();
-    // #3306: Same ephemeral-field carry-forward as _ensureMessagesLoaded.
-    // Loading older messages also does a wholesale replace of S.messages
-    // and would otherwise drop _turnUsage/_turnDuration/_turnTps/
-    // _gatewayRouting/_statusCard/_anchor_stream_id on the existing turns.
-    let _msgsToAssign = msgs;
-    if (typeof window._carryForwardEphemeralTurnFields === 'function') {
-      _msgsToAssign = window._carryForwardEphemeralTurnFields(S.messages || [], msgs);
+  }
+  let previousOldest = _oldestIdx;
+  while (_messagesTruncated && S.session && S.session.session_id === sid) {
+    await _loadOlderMessages();
+    if (!S.session || S.session.session_id !== sid) return;
+    if (!_messagesTruncated) break;
+    if (_oldestIdx >= previousOldest) {
+      throw new Error('Message pagination made no progress');
     }
-    S.messages = _msgsToAssign;
-    _messagesTruncated = false;
-    _oldestIdx = 0;
-    _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
-    if (S.session && S.session.session_id === sid) {
-      S.session.message_count = Number(data.session.message_count || msgs.length);
-      if (Object.prototype.hasOwnProperty.call(data.session, 'regeneration_revision')) {
-        S.session.regeneration_revision = data.session.regeneration_revision;
-      } else {
-        delete S.session.regeneration_revision;
-      }
-    }
+    previousOldest = _oldestIdx;
+  }
+  };
+  _ensureAllMessagesSid = sid;
+  _ensureAllMessagesPromise = loadAll();
+  try {
+    return await _ensureAllMessagesPromise;
   } finally {
-    _loadingOlder = false;
+    if (_ensureAllMessagesSid === sid) {
+      _ensureAllMessagesPromise = null;
+      _ensureAllMessagesSid = null;
+    }
   }
 }
 

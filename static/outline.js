@@ -103,21 +103,13 @@ function _jumpToMessage(rawIdx) {
     return;
   }
 
-  // Row is outside the render window — reload the full session and retry.
-  // Use the bare messages=1 path (no msg_limit) so the server returns the
-  // COMPLETE transcript: the target row is addressed by absolute index
-  // (msg-user-<rawIdx>), so a bounded tail window would miss early rows.
-  // (A previous version sent msg_limit=9999 as a "give me everything" hack,
-  // but the server now clamps msg_limit, so the bare path is the correct way
-  // to request the full transcript here.)
-  if (typeof api !== 'function') return;
+  // Row is outside the current window. Assemble older pages through the shared
+  // bounded loader, then retry the absolute raw-index target.
+  if (typeof _ensureAllMessagesLoaded !== 'function') return;
   if (S.busy || S.activeStreamId) return;
-  api('/api/session?session_id=' + encodeURIComponent(sid) +
-      '&messages=1&resolve_model=0')
-    .then(function(data) {
-      if (!data || !data.session) return;
-      if (!S.session || S.session.session_id !== sid) return;  // session switched
-      S.messages = data.session.messages || [];                // populate S
+  _ensureAllMessagesLoaded()
+    .then(function() {
+      if (!S.session || S.session.session_id !== sid) return;
       _expandOutlineRenderWindow();
       if (typeof renderMessages === 'function') renderMessages({ preserveScroll: true });
       window.setTimeout(function() {

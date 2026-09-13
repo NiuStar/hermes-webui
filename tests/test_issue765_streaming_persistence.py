@@ -294,8 +294,9 @@ class TestIssue765FollowupHardening:
         errors = []
 
         def _replace_with_barrier(src, dst):
-            replace_sources.append(str(src))
-            barrier.wait(timeout=5)
+            if Path(dst) == s.path:
+                replace_sources.append(str(src))
+                barrier.wait(timeout=5)
             return original_replace(src, dst)
 
         monkeypatch.setattr(models.os, "replace", _replace_with_barrier)

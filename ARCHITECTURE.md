@@ -61,6 +61,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       helpers.py           HTTP helpers: j(), bad(), require(), safe_resolve(), security headers
       goals.py             Persistent-goal commands and profile-scoped native GoalManager bridge
       models.py            Session model + CRUD, per-session profile tracking, CLI/state.db bridge
+      session_sidecar_maintenance.py  Startup/CLI maintenance for disposable large-session indexes
       profiles.py          Profile state management, hermes_cli wrapper
       onboarding.py        First-run onboarding status, real provider config writes, OAuth linking, readiness detection
       routes.py            All GET + POST route handlers (if/elif dispatch, no decorators)
@@ -107,6 +108,10 @@ State directory (runtime data, separate from source):
 
     ~/.hermes/webui/
     sessions/          One JSON file per session: {session_id}.json
+                       Compression continuations may store bounded physical
+                       segments linked to verified read-only parent snapshots;
+                       `.message_offsets/` contains disposable byte indexes for
+                       bounded pagination. See docs/rfcs/segmented-session-sidecars.md.
     workspaces.json    Registered workspaces list
     last_workspace.txt Last-used workspace path
     settings.json      User settings (default model, workspace, send key, password hash)

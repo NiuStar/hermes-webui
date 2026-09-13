@@ -965,14 +965,11 @@ async function _runManualCompression(focusTopic){
     // Preflight: verify the viewed session still exists before compressing.
     // This avoids a confusing "not found" toast when the UI is stale.
     try{
-      const live=await api(`/api/session?session_id=${encodeURIComponent(sid)}`);
+      const live=await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
       if(!live||!live.session||live.session.session_id!==sid){
         throw new Error('session no longer available');
       }
-      S.session=live.session;
-      S.messages=live.session.messages||[];
-      S.toolCalls=live.session.tool_calls||[];
-      if(typeof _messagesTruncated!=='undefined') _messagesTruncated=false;
+      S.session={...S.session,...live.session};
     }catch(preflightErr){
       if(typeof clearCompressionUi==='function') clearCompressionUi();
       if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
@@ -1748,11 +1745,11 @@ async function cmdRetry(){
     const r=await api('/api/session/retry',{method:'POST',body:JSON.stringify({session_id:activeSid})});
     if(r&&r.error){showToast(r.error);return;}
     if(!S.session||S.session.session_id!==activeSid)return;
-    const data=await api('/api/session?session_id='+encodeURIComponent(activeSid));
+    const data=await api('/api/session?session_id='+encodeURIComponent(activeSid)+'&messages=1&resolve_model=0&msg_limit=500');
     // #5924 SILENT-race guard: a session switch during the GET await must not let
     // this recovery apply session A's intent to whatever session is now visible.
     if(!S.session||S.session.session_id!==activeSid)return;
-    if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=false;renderMessages();}
+    if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!data.session._messages_truncated;if(typeof _oldestIdx!=='undefined')_oldestIdx=Number(data.session._messages_offset||0);renderMessages();}
     $('msg').value=r.last_user_text||'';if(typeof autoResize==='function')autoResize();
     // Re-arm the single-shot explicit-pick marker from the captured non-default
     // pick — but only if it's still safe at fire time (session unchanged, current
@@ -1770,8 +1767,8 @@ async function cmdUndo(){
     const r=await api('/api/session/undo',{method:'POST',body:JSON.stringify({session_id:activeSid})});
     if(r&&r.error){showToast(r.error);return;}
     if(!S.session||S.session.session_id!==activeSid)return;
-    const data=await api('/api/session?session_id='+encodeURIComponent(activeSid));
-    if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=false;renderMessages();}
+    const data=await api('/api/session?session_id='+encodeURIComponent(activeSid)+'&messages=1&resolve_model=0&msg_limit=500');
+    if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!data.session._messages_truncated;if(typeof _oldestIdx!=='undefined')_oldestIdx=Number(data.session._messages_offset||0);renderMessages();}
     showToast(`↩ ${t('undid_n_messages')} ${r.removed_count} ${t('undid_messages_suffix')}`);
   }catch(e){showToast(t('undo_failed')+e.message);}
 }

@@ -29,7 +29,7 @@ def test_done_handler_resets_oldest_idx_from_payload_offset():
     compact = _compact(MESSAGES_JS)
     # The truncated flag and the offset reset must be wired off the SAME done
     # payload (d.session), mirroring sessions.js / ui.js full-load paths.
-    assert "_messagesTruncated=!!d.session._messages_truncated" in compact, (
+    assert "if(!_doneSegmented&&typeof_messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated" in compact, (
         "done handler should still set _messagesTruncated from the done payload"
     )
     assert "_oldestIdx=d.session._messages_offset||0" in compact, (
@@ -41,7 +41,7 @@ def test_done_handler_resets_oldest_idx_from_payload_offset():
 def test_done_handler_oldest_idx_reset_is_guarded_and_ordered_before_filter():
     """Reset must be typeof-guarded and happen before the messages are re-filtered/rendered."""
     compact = _compact(MESSAGES_JS)
-    assert "if(typeof_oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0" in compact, (
+    assert "if(!_doneSegmented&&typeof_oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0" in compact, (
         "_oldestIdx reset should be typeof-guarded like _messagesTruncated"
     )
     # The reset must precede _filterRecoveryControlMessages (which precedes the

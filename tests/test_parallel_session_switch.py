@@ -503,10 +503,20 @@ class TestMessagePaginationFrontend:
 
     def test_oldest_idx_reset_on_session_switch(self):
         """_oldestIdx must be reset to 0 on session switch."""
-        # Find the loadSession reset block
-        idx = SESSIONS_JS.find("_messagesTruncated = false;\n    _oldestIdx = 0;")
-        assert idx >= 0, (
-            "_oldestIdx must be reset to 0 alongside _messagesTruncated on session switch"
+        switch_arm = re.search(
+            r"if \(currentSid !== sid \|\| forceReload\) \{(.*?)\n  \}",
+            SESSIONS_JS,
+            re.DOTALL,
+        )
+        assert switch_arm, "loadSession's session-switch reset arm not found"
+        block = switch_arm.group(1)
+        assert "_messagesTruncated = false;" in block
+        assert "_oldestIdx = 0;" in block
+        ensure_all_start = SESSIONS_JS.index("async function _ensureAllMessagesLoaded")
+        ensure_all_end = SESSIONS_JS.index("\n}", ensure_all_start)
+        ensure_all = SESSIONS_JS[ensure_all_start:ensure_all_end]
+        assert "_ensureAllMessagesSid === sid" in ensure_all, (
+            "load-all promise reuse must be scoped to the exact session id"
         )
 
 

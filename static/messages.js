@@ -6185,9 +6185,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCost=(S.session&&S.session.estimated_cost)||0;
           const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
-          S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
+          const _doneMessages=d.session&&d.session._messages_segmented
+            ?_mergeSegmentedTerminalMessages(S.messages||[],d.session.messages||[])
+            :(d.session.messages||[]);
+          const _doneSegmented=!!(d.session&&d.session._messages_segmented);
+          S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[],_doneMessages);if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);if(!_doneSegmented&&typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
           // #4720: reset _oldestIdx (full-load symmetry; keeps the #4613 anchor aligned).
-          if(typeof _oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0;
+          if(!_doneSegmented&&typeof _oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0;
           S.messages=_filterRecoveryControlMessages(S.messages || []);
           if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
           if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
@@ -6629,7 +6633,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             if(typeof showToast==='function') showToast('Stream recovery signal received. Restoring transcript...',3500,'error');
           } else if(d.session&&typeof d.session==='object'){
             S.session=d.session;
-            const _nextMsgs3018=(d.session.messages||[]).filter(m=>m&&m.role);
+            const _incomingErrorMessages=(d.session.messages||[]).filter(m=>m&&m.role);
+            const _nextMsgs3018=d.session._messages_segmented
+              ?_mergeSegmentedTerminalMessages(S.messages||[],_incomingErrorMessages)
+              :_incomingErrorMessages;
             if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);
             _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
             S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
@@ -6870,7 +6877,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             ? _isMessageReaderUnpinned()
             : (typeof _messageUserUnpinned!=='undefined' && _messageUserUnpinned));
         S.session=sessionPayload;
-        const _nextMsgs3018=(sessionPayload.messages||[]).filter(m=>m&&m.role);
+        const _incomingCancelMessages=(sessionPayload.messages||[]).filter(m=>m&&m.role);
+        const _nextMsgs3018=(sessionPayload._messages_segmented||sessionPayload._messages_truncated)
+          ?_mergeSegmentedTerminalMessages(S.messages||[],_incomingCancelMessages)
+          :_incomingCancelMessages;
+        const _cancelMergedWindow=!!(sessionPayload._messages_segmented||sessionPayload._messages_truncated);
+        if(!_cancelMergedWindow&&typeof _messagesTruncated!=='undefined') _messagesTruncated=!!sessionPayload._messages_truncated;
+        if(!_cancelMergedWindow&&typeof _oldestIdx!=='undefined') _oldestIdx=Number(sessionPayload._messages_offset||0);
         if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(sessionPayload);
         _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
         S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
@@ -6894,7 +6907,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // Fetch latest session from server to get accurate message list (includes cancel status)
           // This ensures messages stay in sync with server, fixing race condition where local
           // "*Task cancelled.*" message gets lost when done event overwrites S.messages
-          const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+          const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}&messages=1&resolve_model=0&msg_limit=500`);
           if(data&&data.session) _applyCancelSessionPayload(data.session);
         }catch(_){
           // Fallback to local cancel message if API fails
@@ -6972,6 +6985,36 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return nextMessages;
   }
+  function _mergeSegmentedTerminalMessages(prevMessages,nextMessages){
+    const prev=Array.isArray(prevMessages)?prevMessages:[];
+    const next=Array.isArray(nextMessages)?nextMessages:[];
+    if(!prev.length) return next;
+    if(!next.length) return prev;
+    const prevKeys=prev.map(_messageIdentityKey);
+    const nextKeys=next.map(_messageIdentityKey);
+    const maxOverlap=Math.min(prev.length,next.length,5000);
+    let bestLength=0;
+    let bestEnd=-1;
+    // The browser may hold only the latest page while the physical child starts
+    // at an older compression marker. Match the current page's longest suffix
+    // at any contiguous position inside the child, then append only what follows
+    // that match. Ties prefer the latest occurrence so repeated text does not
+    // select an older turn and re-append rows already visible.
+    for(let end=0;end<nextKeys.length;end++){
+      const bound=Math.min(maxOverlap,end+1);
+      let length=0;
+      while(
+        length<bound&&
+        prevKeys[prevKeys.length-1-length]===nextKeys[end-length]
+      ) length++;
+      if(length>bestLength||(length===bestLength&&length>0&&end>bestEnd)){
+        bestLength=length;
+        bestEnd=end;
+      }
+    }
+    if(bestLength>0) return [...prev,...next.slice(bestEnd+1)];
+    return [...prev,...next];
+  }
   if(typeof window!=='undefined'){
     window._carryForwardEphemeralTurnFields=_carryForwardEphemeralTurnFields;
   }
@@ -6984,7 +7027,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       return returnStatus?'stale':false;
     }
     try{
-      const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+      const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}&messages=1&resolve_model=0&msg_limit=500`);
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
       // we were awaiting the network roundtrip, bail out — done already settled.
       if(_streamFinalized) return returnStatus?'restored':true;
@@ -7015,7 +7058,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         S.activeStreamId=null;
         clearLiveToolCards();if(!assistantText)removeThinking();
         S.session=session;
-        const _nextMsgs3018=(session.messages||[]).filter(m=>m&&m.role);
+        const _incomingSettledMessages=(session.messages||[]).filter(m=>m&&m.role);
+        const _nextMsgs3018=(session._messages_segmented||session._messages_truncated)
+          ?_mergeSegmentedTerminalMessages(S.messages||[],_incomingSettledMessages)
+          :_incomingSettledMessages;
+        const _settledMergedWindow=!!(session._messages_segmented||session._messages_truncated);
+        if(!_settledMergedWindow&&typeof _messagesTruncated!=='undefined') _messagesTruncated=!!session._messages_truncated;
+        if(!_settledMergedWindow&&typeof _oldestIdx!=='undefined') _oldestIdx=Number(session._messages_offset||0);
         const _currentMessages=Array.isArray(S.messages)?S.messages:[];
         const _currentVisibleMessages=_filterRecoveryControlMessages(_currentMessages || []);
         const _stagedMessages=_carryForwardEphemeralTurnFields(_currentMessages, _nextMsgs3018);

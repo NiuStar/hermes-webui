@@ -822,14 +822,20 @@ def test_stream_end_restore_attaches_projected_anchor_scene_before_render():
 def test_cancel_settlement_attaches_projected_anchor_scene_before_render():
     cancel = _event_listener_body(MESSAGES_JS, "cancel")
 
-    fetch_idx = cancel.index("const _nextMsgs3018=(sessionPayload.messages||[]).filter(m=>m&&m.role);")
+    fetch_idx = cancel.index("const _incomingCancelMessages=(sessionPayload.messages||[]).filter(m=>m&&m.role);")
+    merge_idx = cancel.index("const _nextMsgs3018=(sessionPayload._messages_segmented||sessionPayload._messages_truncated)", fetch_idx)
     attach_idx = cancel.index("_attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);")
     carry_idx = cancel.index("S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);")
     render_idx = cancel.index("renderMessages({preserveScroll:true});")
-    assert fetch_idx < attach_idx < carry_idx < render_idx
+    assert fetch_idx < merge_idx < attach_idx < carry_idx < render_idx
 
     embedded_idx = cancel.index("if(_applyCancelSessionPayload(_cancelSessionPayload)) return;")
-    fallback_get_idx = cancel.index("const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);")
+    fallback_get_idx = cancel.index(
+        "const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}&messages=1&resolve_model=0&msg_limit=500`)"
+    )
+    cursor_idx = cancel.index("_messagesTruncated=!!sessionPayload._messages_truncated")
+    apply_messages_idx = cancel.index("S.messages=_carryForwardEphemeralTurnFields", cursor_idx)
+    assert cursor_idx < apply_messages_idx < embedded_idx
     fallback_apply_idx = cancel.index("if(data&&data.session) _applyCancelSessionPayload(data.session);")
     assert embedded_idx < fallback_get_idx < fallback_apply_idx
 
@@ -843,11 +849,12 @@ def test_application_error_settlement_attaches_projected_anchor_scene_before_ren
     apperror = _event_listener_body(MESSAGES_JS, "apperror")
 
     assert "_applyToAnchor('apperror'" in apperror
-    session_idx = apperror.index("const _nextMsgs3018=(d.session.messages||[]).filter(m=>m&&m.role);")
+    session_idx = apperror.index("const _incomingErrorMessages=(d.session.messages||[]).filter(m=>m&&m.role);")
+    merge_idx = apperror.index("const _nextMsgs3018=d.session._messages_segmented", session_idx)
     attach_idx = apperror.index("_attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);")
     carry_idx = apperror.index("S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);")
     render_idx = apperror.index("renderMessages({preserveScroll:true});")
-    assert session_idx < attach_idx < carry_idx < render_idx
+    assert session_idx < merge_idx < attach_idx < carry_idx < render_idx
 
     synthetic_push_idx = apperror.index("S.messages.push({role:'assistant',content:`**${label}:**")
     synthetic_attach_idx = apperror.index("_attachProjectedAnchorSceneToLastAssistant(S.messages);", synthetic_push_idx)

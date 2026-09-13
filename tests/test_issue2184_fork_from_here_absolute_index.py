@@ -149,29 +149,19 @@ def test_messages_truncated_declared_at_module_scope():
 # _ensureAllMessagesLoaded resets _oldestIdx (existing #1937 guard)
 # ---------------------------------------------------------------------------
 
-def test_ensure_all_resets_oldest_idx_to_zero():
-    """After loading all messages, ``_oldestIdx`` must be 0 — this is why we capture early."""
-    body = _function_body(SESSIONS_JS, "_ensureAllMessagesLoaded")
-    assert "_oldestIdx = 0;" in body, (
-        "_ensureAllMessagesLoaded must reset _oldestIdx to 0 after the "
-        "wholesale replace. This is why forkFromMessage must capture the "
-        "absolute count BEFORE awaiting _ensureAllMessagesLoaded. "
-        "See #2184 and #1937."
-    )
+def test_ensure_all_pages_until_oldest_idx_reaches_zero():
+    """The bounded pager, not a wholesale GET, must drive the cursor to zero."""
+    ensure = _function_body(SESSIONS_JS, "_ensureAllMessagesLoaded")
+    older = _function_body(SESSIONS_JS, "_loadOlderMessages")
+    assert "while (_messagesTruncated" in ensure
+    assert "await _loadOlderMessages();" in ensure
+    assert "_oldestIdx = responseSession._messages_offset || 0;" in older
 
 
-def test_ensure_all_messages_uses_extended_timeout_for_full_history_load():
-    """Full-history loads for fork/export/start-jump can legitimately exceed the API default timeout."""
-    body = _function_body(SESSIONS_JS, "_ensureAllMessagesLoaded")
-    full_history_call = re.search(
-        r"api\((?P<url>`[^`]*messages=1&resolve_model=0[^`]*`)\s*,\s*\{(?P<opts>[^}]*)\}\s*\)",
-        body,
-        re.S,
-    )
-    assert full_history_call, "_ensureAllMessagesLoaded must pass options to the full-history api() call"
-    timeout_match = re.search(r"timeoutMs\s*:\s*(\d+)", full_history_call.group("opts"))
-    assert timeout_match, "Full-history api() call must specify timeoutMs"
-    assert int(timeout_match.group(1)) >= 120000
+def test_bounded_older_pages_use_extended_timeout_for_full_history_load():
+    """Each bounded page in a full-history loop keeps the extended timeout."""
+    body = _function_body(SESSIONS_JS, "_loadOlderMessages")
+    assert body.count("timeoutMs:120000") >= 2
 
 
 # ---------------------------------------------------------------------------

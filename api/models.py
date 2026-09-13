@@ -7,8 +7,10 @@ import inspect
 import json
 import logging
 import math
+import mmap
 import os
 import re
+import shutil
 import threading
 import time
 import uuid
@@ -1278,6 +1280,867 @@ def _parse_nonnegative_int(value):
     return parsed if parsed >= 0 else None
 
 
+_MESSAGE_OFFSET_INDEX_VERSION = 2
+_MESSAGE_OFFSET_INDEX_DIR = '.message_offsets'
+_INDEXED_WINDOW_MAX_ROWS = 5000
+_INDEXED_WINDOW_MAX_BYTES = 16 * 1024 * 1024
+_MESSAGE_OFFSET_INDEX_MAX_BYTES = 64 * 1024 * 1024
+_MESSAGE_OFFSET_INDEX_MAX_ROWS = 500_000
+
+
+def _message_offset_index_path(session_id: str) -> Path | None:
+    if not is_safe_session_id(session_id):
+        return None
+    return SESSION_DIR / _MESSAGE_OFFSET_INDEX_DIR / f'{session_id}.json'
+
+
+def _write_encoded_json(file_obj, encoder, value) -> None:
+    for chunk in encoder.iterencode(value):
+        file_obj.write(chunk.encode('utf-8'))
+
+
+def _write_indexed_json_array(file_obj, encoder, values, *, kind: str) -> list:
+    offsets = []
+    file_obj.write(b'[')
+    for index, value in enumerate(values or []):
+        if index:
+            file_obj.write(b',')
+        start = file_obj.tell()
+        _write_encoded_json(file_obj, encoder, value)
+        end = file_obj.tell()
+        if kind == 'messages':
+            todo_candidate = bool(
+                isinstance(value, dict)
+                and value.get('role') == 'tool'
+                and isinstance(value.get('content'), str)
+                and '"todos"' in value.get('content', '')
+            )
+            offsets.append([
+                start,
+                end,
+                todo_candidate,
+                _message_visible_key_digest(value, normalize_workspace_prefix=True),
+            ])
+        elif kind == 'tool_calls':
+            assistant_idx = value.get('assistant_msg_idx') if isinstance(value, dict) else None
+            offsets.append([start, end, assistant_idx if isinstance(assistant_idx, int) and not isinstance(assistant_idx, bool) else None])
+    file_obj.write(b']')
+    return offsets
+
+
+def _message_visible_key_digest(message, *, normalize_workspace_prefix=False) -> str:
+    key = _session_message_visible_key(
+        message,
+        normalize_workspace_prefix=normalize_workspace_prefix,
+    )
+    payload = json.dumps(
+        key,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(',', ':'),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+
+def _message_visible_key_counts(messages, *, normalize_workspace_prefix=False) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for message in messages or []:
+        digest = _message_visible_key_digest(
+            message,
+            normalize_workspace_prefix=normalize_workspace_prefix,
+        )
+        counts[digest] = counts.get(digest, 0) + 1
+    return counts
+
+
+def _last_indexed_message_timestamp(messages):
+    for message in reversed(list(messages or [])):
+        if not isinstance(message, dict):
+            continue
+        raw = message.get('timestamp')
+        if raw is None:
+            raw = message.get('_ts')
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def logical_message_count_for_session(session) -> int:
+    messages = list(getattr(session, 'messages', None) or [])
+    logical_count = _parse_nonnegative_int(getattr(session, 'lineage_message_count', None))
+    if not getattr(session, '_messages_are_physical_segment', False) or logical_count is None:
+        return len(messages)
+    baseline = getattr(session, '_loaded_physical_message_count', None)
+    if not isinstance(baseline, int) or baseline < 0:
+        return logical_count
+    return logical_count + max(0, len(messages) - baseline)
+
+
+def _write_indexed_json_object(file_obj, encoder, value) -> dict:
+    offsets = {}
+    file_obj.write(b'{')
+    for index, (key, record) in enumerate((value or {}).items()):
+        if index:
+            file_obj.write(b',')
+        _write_encoded_json(file_obj, encoder, str(key))
+        file_obj.write(b':')
+        start = file_obj.tell()
+        _write_encoded_json(file_obj, encoder, record)
+        end = file_obj.tell()
+        message_index = record.get('message_index') if isinstance(record, dict) else None
+        message_ref = record.get('message_ref') if isinstance(record, dict) else None
+        offsets[str(key)] = [
+            start,
+            end,
+            message_index if isinstance(message_index, int) and not isinstance(message_index, bool) else None,
+            str(message_ref) if message_ref else None,
+        ]
+    file_obj.write(b'}')
+    return offsets
+
+
+def _write_message_offset_index(
+    session_id: str,
+    sidecar_path: Path,
+    index_data: dict,
+    *,
+    expected_signature=None,
+) -> bool:
+    index_path = _message_offset_index_path(session_id)
+    signature = _sidecar_stat_signature(sidecar_path)
+    if (
+        index_path is None
+        or signature is None
+        or (expected_signature is not None and signature != expected_signature)
+    ):
+        return False
+    index_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    payload = {
+        'version': _MESSAGE_OFFSET_INDEX_VERSION,
+        'session_id': session_id,
+        'sidecar_name': sidecar_path.name,
+        'sidecar_signature': list(signature[1:]),
+        **index_data,
+    }
+    tmp = index_path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
+    try:
+        with open(tmp, 'w', encoding='utf-8') as handle:
+            json.dump(payload, handle, ensure_ascii=False, separators=(',', ':'))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, 0o600)
+        if (
+            expected_signature is not None
+            and _sidecar_stat_signature(sidecar_path) != expected_signature
+        ):
+            tmp.unlink(missing_ok=True)
+            return False
+        _safe_replace(tmp, index_path)
+        return True
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        logger.debug('Failed to write message offset index for %s', session_id, exc_info=True)
+        return False
+
+
+def _skip_json_whitespace(buffer, position: int, end: int) -> int:
+    while position < end and buffer[position] in b' \t\r\n':
+        position += 1
+    return position
+
+
+def _scan_json_string_end(buffer, position: int, end: int) -> int:
+    if position >= end or buffer[position] != ord('"'):
+        raise ValueError('expected JSON string')
+    position += 1
+    escaped = False
+    while position < end:
+        byte = buffer[position]
+        position += 1
+        if escaped:
+            escaped = False
+        elif byte == ord('\\'):
+            escaped = True
+        elif byte == ord('"'):
+            return position
+    raise ValueError('unterminated JSON string')
+
+
+def _scan_json_value_end(buffer, position: int, end: int) -> int:
+    position = _skip_json_whitespace(buffer, position, end)
+    if position >= end:
+        raise ValueError('missing JSON value')
+    first = buffer[position]
+    if first == ord('"'):
+        return _scan_json_string_end(buffer, position, end)
+    if first in (ord('{'), ord('[')):
+        stack = [first]
+        position += 1
+        while position < end and stack:
+            byte = buffer[position]
+            if byte == ord('"'):
+                position = _scan_json_string_end(buffer, position, end)
+                continue
+            if byte in (ord('{'), ord('[')):
+                stack.append(byte)
+            elif byte == ord('}'):
+                if stack[-1] != ord('{'):
+                    raise ValueError('mismatched JSON object close')
+                stack.pop()
+            elif byte == ord(']'):
+                if stack[-1] != ord('['):
+                    raise ValueError('mismatched JSON array close')
+                stack.pop()
+            position += 1
+        if stack:
+            raise ValueError('unterminated JSON container')
+        return position
+    while position < end and buffer[position] not in b',]} \t\r\n':
+        position += 1
+    return position
+
+
+def _scan_indexed_json_array(buffer, position: int, end: int, *, kind: str) -> tuple[list, int]:
+    position = _skip_json_whitespace(buffer, position, end)
+    if position >= end or buffer[position] != ord('['):
+        raise ValueError('expected indexed JSON array')
+    offsets = []
+    position = _skip_json_whitespace(buffer, position + 1, end)
+    while position < end and buffer[position] != ord(']'):
+        start = position
+        value_end = _scan_json_value_end(buffer, start, end)
+        if kind == 'messages':
+            todo_candidate = (
+                buffer.find(b'"todos"', start, value_end) >= 0
+                or buffer.find(b'\\"todos\\"', start, value_end) >= 0
+            )
+            offsets.append([start, value_end, todo_candidate])
+        else:
+            raw = buffer[start:value_end]
+            record = json.loads(raw)
+            assistant_idx = record.get('assistant_msg_idx') if isinstance(record, dict) else None
+            offsets.append([
+                start,
+                value_end,
+                assistant_idx if isinstance(assistant_idx, int) and not isinstance(assistant_idx, bool) else None,
+            ])
+        position = _skip_json_whitespace(buffer, value_end, end)
+        if position < end and buffer[position] == ord(','):
+            position = _skip_json_whitespace(buffer, position + 1, end)
+        elif position < end and buffer[position] != ord(']'):
+            raise ValueError('invalid indexed JSON array separator')
+    if position >= end:
+        raise ValueError('unterminated indexed JSON array')
+    return offsets, position + 1
+
+
+def _scan_indexed_json_object(buffer, position: int, end: int) -> tuple[dict, int]:
+    position = _skip_json_whitespace(buffer, position, end)
+    if position >= end or buffer[position] != ord('{'):
+        raise ValueError('expected indexed JSON object')
+    offsets = {}
+    position = _skip_json_whitespace(buffer, position + 1, end)
+    while position < end and buffer[position] != ord('}'):
+        key_end = _scan_json_string_end(buffer, position, end)
+        key = json.loads(buffer[position:key_end])
+        position = _skip_json_whitespace(buffer, key_end, end)
+        if position >= end or buffer[position] != ord(':'):
+            raise ValueError('missing indexed JSON object colon')
+        start = _skip_json_whitespace(buffer, position + 1, end)
+        value_end = _scan_json_value_end(buffer, start, end)
+        record = json.loads(buffer[start:value_end])
+        message_index = record.get('message_index') if isinstance(record, dict) else None
+        message_ref = record.get('message_ref') if isinstance(record, dict) else None
+        offsets[str(key)] = [
+            start,
+            value_end,
+            message_index if isinstance(message_index, int) and not isinstance(message_index, bool) else None,
+            str(message_ref) if message_ref else None,
+        ]
+        position = _skip_json_whitespace(buffer, value_end, end)
+        if position < end and buffer[position] == ord(','):
+            position = _skip_json_whitespace(buffer, position + 1, end)
+        elif position < end and buffer[position] != ord('}'):
+            raise ValueError('invalid indexed JSON object separator')
+    if position >= end:
+        raise ValueError('unterminated indexed JSON object')
+    return offsets, position + 1
+
+
+def _build_message_offset_index_from_sidecar(session_id: str, sidecar_path: Path) -> bool:
+    before_signature = _sidecar_stat_signature(sidecar_path)
+    if before_signature is None:
+        return False
+    index_data = {
+        'message_count': 0,
+        'visible_key_counts': {},
+        'last_message_timestamp': None,
+        'messages': [],
+        'tool_calls': [],
+        'anchor_activity_scenes': {},
+    }
+    try:
+        with sidecar_path.open('rb') as handle:
+            with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as buffer:
+                end = len(buffer)
+                position = _skip_json_whitespace(buffer, 0, end)
+                if position >= end or buffer[position] != ord('{'):
+                    return False
+                position = _skip_json_whitespace(buffer, position + 1, end)
+                while position < end and buffer[position] != ord('}'):
+                    key_end = _scan_json_string_end(buffer, position, end)
+                    key = json.loads(buffer[position:key_end])
+                    position = _skip_json_whitespace(buffer, key_end, end)
+                    if position >= end or buffer[position] != ord(':'):
+                        return False
+                    value_start = _skip_json_whitespace(buffer, position + 1, end)
+                    if key in {'messages', 'tool_calls'}:
+                        offsets, value_end = _scan_indexed_json_array(
+                            buffer,
+                            value_start,
+                            end,
+                            kind=str(key),
+                        )
+                        index_data[str(key)] = offsets
+                        if key == 'messages':
+                            index_data['message_count'] = len(offsets)
+                            counts = {}
+                            last_timestamp = None
+                            enriched_offsets = []
+                            for start, message_end, todo_candidate in offsets:
+                                message = json.loads(buffer[start:message_end])
+                                digest = _message_visible_key_digest(
+                                    message,
+                                    normalize_workspace_prefix=True,
+                                )
+                                counts[digest] = counts.get(digest, 0) + 1
+                                candidate_timestamp = _last_indexed_message_timestamp([message])
+                                if candidate_timestamp is not None:
+                                    last_timestamp = candidate_timestamp
+                                enriched_offsets.append([
+                                    start,
+                                    message_end,
+                                    todo_candidate,
+                                    digest,
+                                ])
+                            offsets = enriched_offsets
+                            index_data['messages'] = offsets
+                            index_data['visible_key_counts'] = counts
+                            index_data['last_message_timestamp'] = last_timestamp
+                    elif key == 'anchor_activity_scenes':
+                        offsets, value_end = _scan_indexed_json_object(buffer, value_start, end)
+                        index_data['anchor_activity_scenes'] = offsets
+                    else:
+                        value_end = _scan_json_value_end(buffer, value_start, end)
+                    position = _skip_json_whitespace(buffer, value_end, end)
+                    if position < end and buffer[position] == ord(','):
+                        position = _skip_json_whitespace(buffer, position + 1, end)
+                    elif position < end and buffer[position] != ord('}'):
+                        return False
+        if _sidecar_stat_signature(sidecar_path) != before_signature:
+            return False
+        return _write_message_offset_index(
+            session_id,
+            sidecar_path,
+            index_data,
+            expected_signature=before_signature,
+        )
+    except Exception:
+        logger.debug('Failed to build message offset index for %s', session_id, exc_info=True)
+        return False
+
+
+def _read_indexed_json_value(file_obj, start, end):
+    try:
+        start = int(start)
+        end = int(end)
+    except (TypeError, ValueError):
+        raise ValueError('invalid indexed JSON byte range')
+    if start < 0 or end <= start or end - start > _INDEXED_WINDOW_MAX_BYTES:
+        raise ValueError('indexed JSON byte range exceeds safety bound')
+    file_obj.seek(start)
+    raw = file_obj.read(end - start)
+    if len(raw) != end - start:
+        raise ValueError('short indexed JSON read')
+    return json.loads(raw)
+
+
+def read_indexed_session_message_window(
+    session_id: str,
+    *,
+    visible_limit: int,
+    is_renderable,
+    msg_before=None,
+) -> dict | None:
+    """Read a bounded display window without materializing the full sidecar.
+
+    The offset file is a disposable projection written with the authoritative
+    sidecar and bound to its exact stat signature. Any uncertainty returns None
+    so the caller can use the existing full reconciliation path.
+    """
+    index_path = _message_offset_index_path(session_id)
+    sidecar_path = SESSION_DIR / f'{session_id}.json'
+    if index_path is None or not callable(is_renderable):
+        return None
+    try:
+        if not index_path.exists() and not _build_message_offset_index_from_sidecar(
+            session_id,
+            sidecar_path,
+        ):
+            return None
+        if index_path.stat().st_size > _MESSAGE_OFFSET_INDEX_MAX_BYTES:
+            index_path.unlink(missing_ok=True)
+            if not _build_message_offset_index_from_sidecar(session_id, sidecar_path):
+                return None
+        index_data = json.loads(index_path.read_bytes())
+        signature = _sidecar_stat_signature(sidecar_path)
+
+        def index_matches_sidecar():
+            return (
+                isinstance(index_data, dict)
+                and index_data.get('version') == _MESSAGE_OFFSET_INDEX_VERSION
+                and index_data.get('session_id') == session_id
+                and index_data.get('sidecar_name') == sidecar_path.name
+                and signature is not None
+                and index_data.get('sidecar_signature') == list(signature[1:])
+            )
+
+        if not index_matches_sidecar():
+            if not _build_message_offset_index_from_sidecar(session_id, sidecar_path):
+                return None
+            index_data = json.loads(index_path.read_bytes())
+            signature = _sidecar_stat_signature(sidecar_path)
+            if not index_matches_sidecar():
+                return None
+        message_offsets = index_data.get('messages')
+        tool_offsets = index_data.get('tool_calls')
+        scene_offsets = index_data.get('anchor_activity_scenes')
+        if not isinstance(message_offsets, list) or not isinstance(tool_offsets, list) or not isinstance(scene_offsets, dict):
+            return None
+        if len(message_offsets) > _MESSAGE_OFFSET_INDEX_MAX_ROWS:
+            return None
+        total = len(message_offsets)
+        before = total if msg_before is None else max(0, min(int(msg_before), total))
+        limit = max(1, min(int(visible_limit), 500))
+        decoded = {}
+        decoded_bytes = 0
+
+        with sidecar_path.open('rb') as sidecar:
+            if _open_sidecar_stat_signature(sidecar_path, sidecar) != signature:
+                return None
+            def read_message(index):
+                nonlocal decoded_bytes
+                if index in decoded:
+                    return decoded[index]
+                entry = message_offsets[index]
+                if not isinstance(entry, list) or len(entry) < 2:
+                    raise ValueError('invalid message offset entry')
+                decoded_bytes += int(entry[1]) - int(entry[0])
+                if len(decoded) >= _INDEXED_WINDOW_MAX_ROWS or decoded_bytes > _INDEXED_WINDOW_MAX_BYTES:
+                    raise ValueError('indexed message window exceeds safety bound')
+                value = _read_indexed_json_value(sidecar, entry[0], entry[1])
+                decoded[index] = value
+                return value
+
+            last_renderable = None
+            visible_count = 0
+            start = 0
+            for index in range(before - 1, -1, -1):
+                message = read_message(index)
+                if not is_renderable(message):
+                    continue
+                if last_renderable is None:
+                    last_renderable = index
+                visible_count += 1
+                if visible_count >= limit:
+                    start = index
+                    break
+            if last_renderable is None:
+                start = max(0, before - limit)
+                end = before
+            else:
+                end = last_renderable + 1
+            messages = [read_message(index) for index in range(start, end)]
+            call_ids = set()
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                for tool_call in message.get('tool_calls') or []:
+                    if isinstance(tool_call, dict):
+                        call_id = tool_call.get('id') or tool_call.get('tool_call_id') or tool_call.get('tool_use_id')
+                        if call_id:
+                            call_ids.add(str(call_id))
+            for index in range(end, before):
+                message = read_message(index)
+                if is_renderable(message):
+                    break
+                if isinstance(message, dict) and str(message.get('role') or '').lower() == 'tool':
+                    tool_id = message.get('tool_call_id') or message.get('tool_use_id')
+                    if tool_id and str(tool_id) in call_ids:
+                        messages.append(message)
+                        end = index + 1
+
+            tool_calls = []
+            for entry in tool_offsets:
+                if not isinstance(entry, list) or len(entry) < 3:
+                    return None
+                assistant_idx = entry[2]
+                if isinstance(assistant_idx, int) and not isinstance(assistant_idx, bool) and start <= assistant_idx < end:
+                    record = _read_indexed_json_value(sidecar, entry[0], entry[1])
+                    if isinstance(record, dict):
+                        record['assistant_msg_idx'] = assistant_idx - start
+                        tool_calls.append(record)
+
+            scenes = {}
+            for key, entry in scene_offsets.items():
+                if not isinstance(entry, list) or len(entry) < 4:
+                    return None
+                message_index = entry[2]
+                if isinstance(message_index, int) and not isinstance(message_index, bool) and start <= message_index < end:
+                    scenes[str(key)] = _read_indexed_json_value(sidecar, entry[0], entry[1])
+
+            todo_state = None
+            todo_candidates = [
+                index for index, entry in enumerate(message_offsets[:before])
+                if isinstance(entry, list) and len(entry) >= 3 and entry[2] is True
+            ]
+            if todo_candidates:
+                from api.todo_state import derive_todo_state
+                for index in reversed(todo_candidates):
+                    todo_state = derive_todo_state([read_message(index)])
+                    if todo_state is not None:
+                        break
+        return {
+            'messages': messages,
+            'message_count': total,
+            'messages_offset': start,
+            'tool_calls': tool_calls,
+            'anchor_activity_scenes': scenes,
+            'todo_state': todo_state,
+            'visible_key_counts': dict(index_data.get('visible_key_counts') or {}),
+            'last_message_timestamp': index_data.get('last_message_timestamp'),
+        }
+    except Exception:
+        logger.debug('Indexed session window unavailable for %s', session_id, exc_info=True)
+        return None
+
+
+def _validated_message_offset_index(session_id: str):
+    """Return a signature-bound offset index tuple, rebuilding when needed."""
+    index_path = _message_offset_index_path(session_id)
+    sidecar_path = SESSION_DIR / f'{session_id}.json'
+    if index_path is None or not sidecar_path.exists():
+        return None
+    try:
+        for _attempt in range(2):
+            if not index_path.exists():
+                if not _build_message_offset_index_from_sidecar(session_id, sidecar_path):
+                    return None
+            if index_path.stat().st_size > _MESSAGE_OFFSET_INDEX_MAX_BYTES:
+                index_path.unlink(missing_ok=True)
+                continue
+            data = json.loads(index_path.read_bytes())
+            signature = _sidecar_stat_signature(sidecar_path)
+            if (
+                isinstance(data, dict)
+                and data.get('version') == _MESSAGE_OFFSET_INDEX_VERSION
+                and data.get('session_id') == session_id
+                and data.get('sidecar_name') == sidecar_path.name
+                and signature is not None
+                and data.get('sidecar_signature') == list(signature[1:])
+            ):
+                message_offsets = data.get('messages')
+                if not isinstance(message_offsets, list) or len(message_offsets) > _MESSAGE_OFFSET_INDEX_MAX_ROWS:
+                    return None
+                return data, sidecar_path, signature
+            index_path.unlink(missing_ok=True)
+        return None
+    except Exception:
+        logger.debug('Unable to validate message offset index for %s', session_id, exc_info=True)
+        return None
+
+
+def message_offset_index_is_current(session_id: str) -> bool:
+    """Return whether the disposable offset index matches the current sidecar.
+
+    Unlike ``_validated_message_offset_index`` this probe never creates,
+    removes, or repairs an index; startup maintenance uses it for dry runs.
+    """
+    index_path = _message_offset_index_path(session_id)
+    sidecar_path = SESSION_DIR / f'{session_id}.json'
+    if index_path is None or not index_path.exists() or not sidecar_path.exists():
+        return False
+    try:
+        if index_path.stat().st_size > _MESSAGE_OFFSET_INDEX_MAX_BYTES:
+            return False
+        data = json.loads(index_path.read_bytes())
+        signature = _sidecar_stat_signature(sidecar_path)
+        offsets = data.get('messages') if isinstance(data, dict) else None
+        return bool(
+            data.get('version') == _MESSAGE_OFFSET_INDEX_VERSION
+            and data.get('session_id') == session_id
+            and data.get('sidecar_name') == sidecar_path.name
+            and signature is not None
+            and data.get('sidecar_signature') == list(signature[1:])
+            and isinstance(offsets, list)
+            and len(offsets) <= _MESSAGE_OFFSET_INDEX_MAX_ROWS
+        )
+    except Exception:
+        return False
+
+
+def ensure_message_offset_index(session_id: str) -> bool:
+    """Ensure a signature-bound derived index exists without editing sidecar bytes."""
+    if message_offset_index_is_current(session_id):
+        return True
+    if not is_safe_session_id(session_id):
+        return False
+    return _build_message_offset_index_from_sidecar(
+        session_id,
+        SESSION_DIR / f'{session_id}.json',
+    ) and message_offset_index_is_current(session_id)
+
+
+def read_indexed_session_lineage_window(
+    session_id: str,
+    *,
+    visible_limit: int,
+    is_renderable,
+    msg_before=None,
+    max_hops: int = 20,
+) -> dict | None:
+    """Read a bounded logical window across compression sidecar segments."""
+    if not is_safe_session_id(session_id) or not callable(is_renderable):
+        return None
+    try:
+        tip_to_root = []
+        seen = set()
+        current_id = session_id
+        child_overlap = 0
+        lineage_profile = None
+        for hop in range(max(1, int(max_hops))):
+            if current_id in seen or not is_safe_session_id(current_id):
+                return None
+            seen.add(current_id)
+            validated = _validated_message_offset_index(current_id)
+            if validated is None:
+                return None
+            index_data, path, signature = validated
+            metadata = json.loads(_read_metadata_json_prefix(path) or '{}')
+            segment_profile = str(metadata.get('profile') or 'default').strip() or 'default'
+            if lineage_profile is None:
+                lineage_profile = segment_profile
+            elif segment_profile != lineage_profile:
+                return None
+            segment_source = str(
+                metadata.get('session_source')
+                or metadata.get('raw_source')
+                or metadata.get('source_tag')
+                or 'webui'
+            ).strip().lower()
+            if segment_source not in {'webui', ''} or metadata.get('read_only'):
+                return None
+            offsets = index_data.get('messages')
+            if not isinstance(offsets, list):
+                return None
+            overlap = child_overlap
+            if overlap < 0 or overlap > len(offsets):
+                return None
+            tip_to_root.append({
+                'session_id': current_id,
+                'path': path,
+                'signature': signature,
+                'index': index_data,
+                'overlap': overlap,
+            })
+            parent_id = str(metadata.get('parent_session_id') or '').strip()
+            if not parent_id:
+                break
+            next_overlap = _parse_nonnegative_int(metadata.get('lineage_parent_overlap_count'))
+            if next_overlap is None:
+                return None
+            parent_path = SESSION_DIR / f'{parent_id}.json'
+            parent_metadata = json.loads(_read_metadata_json_prefix(parent_path) or '{}')
+            parent_profile = str(parent_metadata.get('profile') or 'default').strip() or 'default'
+            if (
+                not parent_metadata.get('pre_compression_snapshot')
+                or parent_profile != lineage_profile
+            ):
+                return None
+            child_overlap = 0
+            current_id = parent_id
+            # ``next_overlap`` belongs to the child we just appended.
+            tip_to_root[-1]['overlap'] = next_overlap
+        else:
+            return None
+
+        segments = list(reversed(tip_to_root))
+        cumulative = []
+        total = 0
+        for segment in segments:
+            offsets = segment['index']['messages']
+            contribution = len(offsets) - int(segment['overlap'])
+            if contribution < 0:
+                return None
+            total += contribution
+            if total > _MESSAGE_OFFSET_INDEX_MAX_ROWS:
+                return None
+            cumulative.append(total)
+        before = total if msg_before is None else max(0, min(int(msg_before), total))
+        limit = max(1, min(int(visible_limit), 500))
+
+        from bisect import bisect_right
+        from contextlib import ExitStack
+
+        decoded = {}
+        decoded_bytes = 0
+
+        def locate(global_index):
+            segment_index = bisect_right(cumulative, global_index)
+            prior = cumulative[segment_index - 1] if segment_index else 0
+            segment = segments[segment_index]
+            local_index = int(segment['overlap']) + global_index - prior
+            return segment_index, local_index
+
+        with ExitStack() as stack:
+            handles = []
+            for segment in segments:
+                handle = stack.enter_context(segment['path'].open('rb'))
+                if _open_sidecar_stat_signature(segment['path'], handle) != segment['signature']:
+                    return None
+                handles.append(handle)
+
+            def read_message(global_index):
+                nonlocal decoded_bytes
+                if global_index in decoded:
+                    return decoded[global_index]
+                segment_index, local_index = locate(global_index)
+                entry = segments[segment_index]['index']['messages'][local_index]
+                if not isinstance(entry, list) or len(entry) < 4:
+                    raise ValueError('invalid lineage message offset entry')
+                decoded_bytes += int(entry[1]) - int(entry[0])
+                if len(decoded) >= _INDEXED_WINDOW_MAX_ROWS or decoded_bytes > _INDEXED_WINDOW_MAX_BYTES:
+                    raise ValueError('indexed lineage window exceeds safety bound')
+                value = _read_indexed_json_value(handles[segment_index], entry[0], entry[1])
+                decoded[global_index] = value
+                return value
+
+            last_renderable = None
+            visible_count = 0
+            start = 0
+            for global_index in range(before - 1, -1, -1):
+                message = read_message(global_index)
+                if not is_renderable(message):
+                    continue
+                if last_renderable is None:
+                    last_renderable = global_index
+                visible_count += 1
+                if visible_count >= limit:
+                    start = global_index
+                    break
+            if last_renderable is None:
+                start, end = max(0, before - limit), before
+            else:
+                end = last_renderable + 1
+            messages = [read_message(i) for i in range(start, end)]
+
+            call_ids = set()
+            for message in messages:
+                if isinstance(message, dict):
+                    for call in message.get('tool_calls') or []:
+                        if isinstance(call, dict):
+                            call_id = call.get('id') or call.get('tool_call_id') or call.get('tool_use_id')
+                            if call_id:
+                                call_ids.add(str(call_id))
+            for global_index in range(end, before):
+                message = read_message(global_index)
+                if is_renderable(message):
+                    break
+                tool_id = message.get('tool_call_id') or message.get('tool_use_id') if isinstance(message, dict) else None
+                if tool_id and str(tool_id) in call_ids:
+                    messages.append(message)
+                    end = global_index + 1
+
+            tool_calls = []
+            scenes = {}
+            todo_state = None
+            visible_key_counts = {}
+            global_base = 0
+            for segment_index, segment in enumerate(segments):
+                offsets = segment['index']['messages']
+                overlap = int(segment['overlap'])
+                for entry in offsets[overlap:]:
+                    if not isinstance(entry, list) or len(entry) < 4:
+                        return None
+                    digest = str(entry[3] or '')
+                    if not digest:
+                        return None
+                    visible_key_counts[digest] = visible_key_counts.get(digest, 0) + 1
+                for entry in segment['index'].get('tool_calls') or []:
+                    if not isinstance(entry, list) or len(entry) < 3:
+                        return None
+                    local_idx = entry[2]
+                    if not isinstance(local_idx, int) or isinstance(local_idx, bool) or local_idx < overlap:
+                        continue
+                    global_idx = global_base + local_idx - overlap
+                    if start <= global_idx < end:
+                        record = _read_indexed_json_value(handles[segment_index], entry[0], entry[1])
+                        if isinstance(record, dict):
+                            record['assistant_msg_idx'] = global_idx - start
+                            tool_calls.append(record)
+                for key, entry in (segment['index'].get('anchor_activity_scenes') or {}).items():
+                    if not isinstance(entry, list) or len(entry) < 4:
+                        return None
+                    local_idx = entry[2]
+                    if not isinstance(local_idx, int) or isinstance(local_idx, bool) or local_idx < overlap:
+                        continue
+                    global_idx = global_base + local_idx - overlap
+                    if start <= global_idx < end:
+                        record = _read_indexed_json_value(
+                            handles[segment_index], entry[0], entry[1]
+                        )
+                        if isinstance(record, dict):
+                            record['message_index'] = global_idx
+                            scenes[str(key)] = record
+                global_base += len(offsets) - overlap
+
+            from api.todo_state import derive_todo_state
+            for global_index in range(before - 1, -1, -1):
+                segment_index, local_index = locate(global_index)
+                entry = segments[segment_index]['index']['messages'][local_index]
+                if len(entry) >= 3 and entry[2] is True:
+                    todo_state = derive_todo_state([read_message(global_index)])
+                    if todo_state is not None:
+                        break
+        return {
+            'messages': messages,
+            'message_count': total,
+            'messages_offset': start,
+            'tool_calls': tool_calls,
+            'anchor_activity_scenes': scenes,
+            'todo_state': todo_state,
+            'visible_key_counts': visible_key_counts,
+            'last_message_timestamp': next(
+                (
+                    segment['index'].get('last_message_timestamp')
+                    for segment in reversed(segments)
+                    if segment['index'].get('last_message_timestamp') is not None
+                ),
+                None,
+            ),
+            'lineage_segment_count': len(segments),
+        }
+    except Exception:
+        logger.debug('Indexed lineage window unavailable for %s', session_id, exc_info=True)
+        return None
+
+
 def model_explicit_pick_signature(model, model_provider) -> str:
     """Stable signature of a (model, provider) selection for #5979 explicit-pick
     provenance. The persisted ``Session.model_explicit_pick_signature`` is set to
@@ -1334,6 +2197,8 @@ class Session:
                  llm_title_generated: bool=False,
                  manual_title: bool=False,
                 parent_session_id: str=None,
+                lineage_parent_overlap_count=None,
+                lineage_message_count=None,
                 worktree_path=None,
                 worktree_branch=None,
                  worktree_repo_root=None,
@@ -1432,6 +2297,12 @@ class Session:
         self.llm_title_generated = bool(llm_title_generated)
         self.manual_title = bool(manual_title)
         self.parent_session_id = parent_session_id
+        _overlap_count = _parse_nonnegative_int(lineage_parent_overlap_count)
+        self.lineage_parent_overlap_count = _overlap_count if _overlap_count is not None else None
+        self._messages_are_physical_segment = _overlap_count is not None
+        _lineage_count = _parse_nonnegative_int(lineage_message_count)
+        self.lineage_message_count = _lineage_count if _lineage_count is not None else None
+        self._loaded_physical_message_count = len(self.messages) if self._messages_are_physical_segment else None
         self.worktree_path = str(Path(worktree_path).expanduser().resolve()) if worktree_path else None
         self.worktree_branch = str(worktree_branch) if worktree_branch else None
         self.worktree_repo_root = str(Path(worktree_repo_root).expanduser().resolve()) if worktree_repo_root else None
@@ -1491,6 +2362,93 @@ class Session:
             )
         if touch_updated_at:
             self.updated_at = time.time()
+        # A live compression continuation may keep the full logical transcript
+        # in memory for the terminal SSE while persisting only its lineage-owned
+        # segment. The complete predecessor is already an atomically verified
+        # pre-compression snapshot. This private marker is never serialized; a
+        # reloaded child already contains only its physical segment.
+        persisted_messages = self.messages or []
+        segment_applied = False
+        segment_start = getattr(self, '_persist_message_segment_start', None)
+        if segment_start is not None:
+            try:
+                segment_start = int(segment_start)
+            except (TypeError, ValueError):
+                segment_start = -1
+            if 0 <= segment_start < len(persisted_messages):
+                persisted_messages = persisted_messages[segment_start:]
+                segment_applied = True
+            else:
+                logger.warning(
+                    "ignoring invalid persistence segment start for %s: %r",
+                    self.session_id,
+                    segment_start,
+                )
+                persisted_messages = self.messages or []
+        original_lineage_message_count = self.lineage_message_count
+        if segment_applied:
+            next_lineage_message_count = logical_message_count_for_session(self)
+        elif self._messages_are_physical_segment and self.lineage_message_count is not None:
+            baseline = self._loaded_physical_message_count
+            if isinstance(baseline, int) and baseline >= 0:
+                next_lineage_message_count = self.lineage_message_count + max(
+                    0, len(self.messages or []) - baseline
+                )
+            else:
+                next_lineage_message_count = self.lineage_message_count
+        else:
+            next_lineage_message_count = self.lineage_message_count
+        self.lineage_message_count = next_lineage_message_count
+        persisted_tool_calls = self.tool_calls
+        if persisted_messages is not self.messages and isinstance(self.tool_calls, list):
+            # Persisted tool summaries use message-local indexes. Rebase summaries
+            # that already carry an index; extraction code may also attach call IDs
+            # without one, which remain valid unchanged.
+            persisted_tool_calls = []
+            for tool_call in self.tool_calls:
+                if not isinstance(tool_call, dict):
+                    continue
+                rebased = dict(tool_call)
+                index_key = (
+                    'assistant_msg_idx'
+                    if 'assistant_msg_idx' in rebased
+                    else 'message_idx' if 'message_idx' in rebased else None
+                )
+                raw_idx = rebased.get(index_key) if index_key else None
+                if raw_idx is not None:
+                    try:
+                        local_idx = int(raw_idx) - int(segment_start)
+                    except (TypeError, ValueError):
+                        continue
+                    if local_idx < 0:
+                        continue
+                    rebased[index_key] = local_idx
+                persisted_tool_calls.append(rebased)
+        persisted_anchor_scenes = (
+            self.anchor_activity_scenes
+            if isinstance(self.anchor_activity_scenes, dict)
+            else {}
+        )
+        if persisted_messages is not self.messages:
+            persisted_anchor_scenes = {}
+            for key, record in (
+                self.anchor_activity_scenes.items()
+                if isinstance(self.anchor_activity_scenes, dict)
+                else []
+            ):
+                if not isinstance(record, dict):
+                    continue
+                rebased = dict(record)
+                raw_idx = rebased.get('message_index')
+                if raw_idx is not None:
+                    try:
+                        local_idx = int(raw_idx) - int(segment_start)
+                    except (TypeError, ValueError):
+                        continue
+                    if local_idx < 0:
+                        continue
+                    rebased['message_index'] = local_idx
+                persisted_anchor_scenes[str(key)] = rebased
         # Write metadata fields first so load_metadata_only() can read them
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
@@ -1515,6 +2473,8 @@ class Session:
             'intentional_shrink_generation',
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated', 'manual_title',
             'parent_session_id',
+            'lineage_parent_overlap_count',
+            'lineage_message_count',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
             'enabled_toolsets', 'composer_draft',
@@ -1528,8 +2488,8 @@ class Session:
         # scene bodies. message_count is placed BEFORE anchor_scene_index so a
         # legacy-format reader that stops at a scene key still finds the count.
         # The full anchor_activity_scenes bodies serialize AFTER messages.
-        meta['message_count'] = len(self.messages or [])
-        meta['anchor_scene_index'] = _anchor_scene_index_from_records(self.anchor_activity_scenes)
+        meta['message_count'] = len(persisted_messages)
+        meta['anchor_scene_index'] = _anchor_scene_index_from_records(persisted_anchor_scenes)
         # Keep the in-memory fingerprint aligned with what we just persisted, so a
         # later metadata-only reload of THIS object (or any fingerprint reader)
         # sees the current value rather than a stale load-time snapshot (#5854
@@ -1537,24 +2497,21 @@ class Session:
         # not this, so this is belt-and-suspenders).
         self._anchor_scene_index = dict(meta['anchor_scene_index'])
         # Preserve the existing indented metadata prefix and top-level boundary.
-        # Only body JSON whitespace changes; all transcript/context values stay.
+        # Large arrays are streamed below so a 100MB-class session never creates
+        # another 100MB JSON string during each checkpoint/final save.
         metadata_prefix = json.dumps(meta, ensure_ascii=False, indent=2)[:-2]
-        meta = {}
-        meta['messages'] = self.messages
-        meta['tool_calls'] = self.tool_calls
-        meta['anchor_activity_scenes'] = self.anchor_activity_scenes if isinstance(self.anchor_activity_scenes, dict) else {}
+        body_fields = [
+            ('messages', persisted_messages),
+            ('tool_calls', persisted_tool_calls),
+            ('anchor_activity_scenes', persisted_anchor_scenes),
+        ]
         # Fields not in METADATA_FIELDS (e.g. last_usage) go at the end. Exclude
         # the keys we placed explicitly above so they aren't emitted twice.
         _placed = {'message_count', 'anchor_scene_index', 'messages', 'tool_calls', 'anchor_activity_scenes'}
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
-        body = ',\n'.join(
-            f'  {json.dumps(k, ensure_ascii=False)}: '
-            f'{json.dumps(v, ensure_ascii=False, separators=(",", ":"))}'
-            for k, v in {**meta, **extra}.items()
-        )
-        payload = metadata_prefix + ',\n' + body + '\n}'
+        body_fields.extend(extra.items())
 
         # ── #1558 backup safeguard ──────────────────────────────────────
         # Before overwriting the session file, copy the previous version to
@@ -1570,13 +2527,10 @@ class Session:
         # their .bak get restored automatically.
         try:
             if self.path.exists():
-                existing_text = self.path.read_text(encoding='utf-8')
-                try:
-                    existing = json.loads(existing_text)
-                    existing_msg_count = len(existing.get('messages') or [])
-                except (json.JSONDecodeError, ValueError):
-                    existing_msg_count = -1  # corrupt → always back up
-                incoming_msg_count = len(self.messages or [])
+                existing_msg_count = _persisted_message_count(self.session_id)
+                if existing_msg_count is None:
+                    existing_msg_count = -1  # unknown/corrupt → always back up
+                incoming_msg_count = len(persisted_messages)
                 if (
                     existing_msg_count > 0
                     and incoming_msg_count == 0
@@ -1605,8 +2559,8 @@ class Session:
                         bak_tmp = bak_path.with_suffix(
                             f'.bak.tmp.{os.getpid()}.{threading.current_thread().ident}'
                         )
-                        with open(bak_tmp, 'w', encoding='utf-8') as bf:
-                            bf.write(existing_text)
+                        with self.path.open('rb') as source, open(bak_tmp, 'wb') as bf:
+                            shutil.copyfileobj(source, bf, length=1024 * 1024)
                             bf.flush()
                             os.fsync(bf.fileno())
                         _safe_replace(bak_tmp, bak_path)
@@ -1621,12 +2575,53 @@ class Session:
 
         tmp = self.path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
         try:
-            with open(tmp, 'w', encoding='utf-8') as f:
-                f.write(payload)
+            encoder = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"))
+            offset_index = {
+                'message_count': len(persisted_messages),
+                'visible_key_counts': _message_visible_key_counts(
+                    persisted_messages,
+                    normalize_workspace_prefix=True,
+                ),
+                'last_message_timestamp': _last_indexed_message_timestamp(persisted_messages),
+                'messages': [],
+                'tool_calls': [],
+                'anchor_activity_scenes': {},
+            }
+            with open(tmp, 'wb') as f:
+                f.write(metadata_prefix.encode('utf-8'))
+                for key, value in body_fields:
+                    f.write(b',\n  ')
+                    _write_encoded_json(f, encoder, key)
+                    f.write(b': ')
+                    if key == 'messages':
+                        offset_index['messages'] = _write_indexed_json_array(
+                            f, encoder, value, kind='messages',
+                        )
+                    elif key == 'tool_calls':
+                        offset_index['tool_calls'] = _write_indexed_json_array(
+                            f, encoder, value, kind='tool_calls',
+                        )
+                    elif key == 'anchor_activity_scenes':
+                        offset_index['anchor_activity_scenes'] = _write_indexed_json_object(
+                            f, encoder, value,
+                        )
+                    else:
+                        _write_encoded_json(f, encoder, value)
+                f.write(b'\n}')
                 f.flush()
                 os.fsync(f.fileno())
             _safe_replace(tmp, self.path)
+            sidecar_signature = _sidecar_stat_signature(self.path)
+            _write_message_offset_index(
+                self.session_id,
+                self.path,
+                offset_index,
+                expected_signature=sidecar_signature,
+            )
+            if self._messages_are_physical_segment:
+                self._loaded_physical_message_count = len(self.messages or [])
         except Exception:
+            self.lineage_message_count = original_lineage_message_count
             try:
                 tmp.unlink(missing_ok=True)
             except Exception:
@@ -1836,7 +2831,9 @@ class Session:
         active_stream_ids = active_stream_ids if active_stream_ids is not None else set()
         has_pending_user_message = bool(self.pending_user_message)
         message_count = (
-            self._metadata_message_count
+            self.lineage_message_count
+            if self.lineage_message_count is not None
+            else self._metadata_message_count
             if self._metadata_message_count is not None
             else len(self.messages)
         )
@@ -4252,6 +5249,20 @@ def _sidecar_stat_signature(path):
             int(st.st_size), int(getattr(st, 'st_ctime_ns', int(st.st_ctime * 1_000_000_000))))
 
 
+def _open_sidecar_stat_signature(path, file_obj):
+    """Return the stat signature of the already-open sidecar descriptor."""
+    try:
+        st = os.fstat(file_obj.fileno())
+    except OSError:
+        return None
+    return (
+        str(path),
+        int(getattr(st, 'st_mtime_ns', int(st.st_mtime * 1_000_000_000))),
+        int(st.st_size),
+        int(getattr(st, 'st_ctime_ns', int(st.st_ctime * 1_000_000_000))),
+    )
+
+
 def _legacy_sidecar_facts_get(sid):
     """Return cached authoritative facts for a LEGACY sidecar, or None (#5854).
 
@@ -4801,13 +5812,22 @@ class _FullSessionResolveRequired(RuntimeError):
     """Internal signal that a full sidecar load must enter the bounded path."""
 
 
-_FULL_SESSION_RESOLVE_MAX_CONCURRENT = 2
+_FULL_SESSION_RESOLVE_MAX_CONCURRENT = 1
 _FULL_SESSION_RESOLVE_SLOTS = threading.BoundedSemaphore(
     _FULL_SESSION_RESOLVE_MAX_CONCURRENT
 )
 _FULL_SESSION_RESOLVE_INFLIGHT: dict[str, threading.Event] = {}
 _FULL_SESSION_RESOLVE_INFLIGHT_LOCK = threading.Lock()
 _FULL_SESSION_RESOLVE_LOCAL = threading.local()
+
+
+def full_session_resolve_diagnostics() -> dict:
+    with _FULL_SESSION_RESOLVE_INFLIGHT_LOCK:
+        inflight = len(_FULL_SESSION_RESOLVE_INFLIGHT)
+    return {
+        'max_concurrent': _FULL_SESSION_RESOLVE_MAX_CONCURRENT,
+        'inflight_sessions': inflight,
+    }
 
 
 def _claim_full_session_resolve(session_id: str) -> tuple[bool, threading.Event]:
@@ -8592,6 +9612,122 @@ def get_state_db_session_messages(
     except Exception:
         return _state_db_session_messages_result([], None, with_revision=with_revision)
     return _state_db_session_messages_result(msgs, revision, with_revision=with_revision)
+
+
+def state_db_active_messages_are_indexed(
+    sid,
+    *,
+    profile=None,
+    available_visible_key_counts: dict | None,
+    sidecar_last_message_at=None,
+    batch_size: int = 500,
+) -> bool:
+    """Prove active state.db rows are a multiset subset of a sidecar index.
+
+    Rows are projected and hashed in bounded batches; message bodies never leave
+    this function as a list. Any schema, decode, timestamp, or read uncertainty
+    rejects the indexed fast path so the caller can use canonical reconciliation.
+    """
+    if not sid or not isinstance(available_visible_key_counts, dict):
+        return False
+    if isinstance(profile, str) and profile:
+        db_path = _get_profile_home(profile) / 'state.db'
+    else:
+        db_path = _active_state_db_path()
+    if not db_path.exists():
+        return True
+    try:
+        import sqlite3
+        limit = max(1, min(int(batch_size), 5000))
+        sidecar_last = (
+            float(sidecar_last_message_at)
+            if sidecar_last_message_at is not None
+            else None
+        )
+        if sidecar_last is not None and not math.isfinite(sidecar_last):
+            return False
+    except (ImportError, TypeError, ValueError):
+        return False
+
+    remaining = {
+        str(key): int(value)
+        for key, value in available_visible_key_counts.items()
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+    }
+    try:
+        with closing(open_state_db_readonly(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(messages)")
+            available = {str(row['name']) for row in cur.fetchall()}
+            if not {'session_id', 'role', 'content', 'timestamp'}.issubset(available):
+                return False
+            optional = [
+                'tool_call_id',
+                'tool_calls',
+                'tool_name',
+                'reasoning',
+                'reasoning_details',
+                'codex_reasoning_items',
+                'reasoning_content',
+                'codex_message_items',
+                'api_content',
+            ]
+            id_col = ['id'] if 'id' in available else []
+            selected = id_col + ['role', 'content', 'timestamp'] + [
+                column for column in optional if column in available
+            ]
+            active_clause = (
+                " AND (active IS NULL OR active != 0)"
+                if 'active' in available
+                else ""
+            )
+            cur.execute(
+                f"""
+                SELECT {', '.join(selected)}
+                FROM messages
+                WHERE session_id = ?
+                {active_clause}
+                """,
+                (str(sid),),
+            )
+            while True:
+                rows = cur.fetchmany(limit)
+                if not rows:
+                    break
+                for row in rows:
+                    message = _project_state_db_message(
+                        row,
+                        available,
+                        bool(id_col),
+                        optional,
+                    )
+                    raw_timestamp = message.get('timestamp')
+                    if sidecar_last is not None and raw_timestamp not in (None, ''):
+                        try:
+                            if float(raw_timestamp) > sidecar_last:
+                                return False
+                        except (TypeError, ValueError):
+                            return False
+                    digest = _message_visible_key_digest(
+                        message,
+                        normalize_workspace_prefix=True,
+                    )
+                    count = remaining.get(digest, 0)
+                    if count <= 0:
+                        return False
+                    if count == 1:
+                        remaining.pop(digest, None)
+                    else:
+                        remaining[digest] = count - 1
+    except Exception:
+        logger.debug(
+            'Failed to prove state.db active messages against sidecar index for %s',
+            sid,
+            exc_info=True,
+        )
+        return False
+    return True
 
 
 def get_state_db_session_message_prefix_summary(

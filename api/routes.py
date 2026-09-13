@@ -9626,6 +9626,91 @@ def _sidecar_file_exceeds_threshold(session_id, threshold_bytes) -> bool:
         return False
 
 
+def _sidecar_lineage_exceeds_threshold(session_id, threshold_bytes, *, max_hops=20) -> bool:
+    """Return whether a compression tip or any verified ancestor is oversized."""
+    from api.config import SESSION_DIR as current_session_dir
+
+    current = str(session_id or '')
+    seen = set()
+    for _ in range(max(1, int(max_hops))):
+        if not is_safe_session_id(current) or current in seen:
+            return True
+        seen.add(current)
+        path = current_session_dir / f'{current}.json'
+        try:
+            if path.stat().st_size > int(threshold_bytes):
+                return True
+            metadata = json.loads(_read_metadata_json_prefix(path) or '{}')
+        except Exception:
+            return True
+        parent_id = str(metadata.get('parent_session_id') or '').strip()
+        if not parent_id:
+            return False
+        if metadata.get('lineage_parent_overlap_count') is None:
+            return True
+        current = parent_id
+    return True
+
+
+def _indexed_session_window_if_safe(session, *, msg_limit, msg_before=None):
+    """Return an indexed display window only when the sidecar owns a safe view.
+
+    Active, foreign, read-only and state.db-ahead sessions fall back to the
+    canonical full path so this optimization cannot hide durable messages.
+    """
+    if msg_limit is None:
+        return None
+    sid = str(getattr(session, 'session_id', '') or '')
+    if not sid or (
+        not getattr(session, 'parent_session_id', None)
+        and not _sidecar_file_exceeds_threshold(sid, _SIDECAR_BYTE_TAIL_THRESHOLD)
+    ):
+        return None
+    source = str(
+        getattr(session, 'session_source', None)
+        or getattr(session, 'raw_source', None)
+        or getattr(session, 'source_tag', None)
+        or 'webui'
+    ).strip().lower()
+    if (
+        source not in {'webui', ''}
+        or bool(getattr(session, 'is_cli_session', False))
+        or bool(getattr(session, 'read_only', False))
+        or bool(getattr(session, 'pre_compression_snapshot', False))
+        or bool(getattr(session, 'active_stream_id', None))
+        or bool(getattr(session, 'pending_user_message', None))
+        or bool(getattr(session, 'pending_started_at', None))
+    ):
+        return None
+    relationship = str(getattr(session, 'relationship_type', None) or '').strip().lower()
+    if source == 'fork' or relationship == 'child_session':
+        return None
+    indexed_reader = (
+        read_indexed_session_lineage_window
+        if getattr(session, 'parent_session_id', None)
+        else read_indexed_session_message_window
+    )
+    indexed = indexed_reader(
+        sid,
+        visible_limit=msg_limit,
+        is_renderable=_message_counts_as_renderable_for_window,
+        msg_before=msg_before,
+    )
+    if indexed is None:
+        return None
+    sidecar_last = indexed.get('last_message_timestamp')
+    if sidecar_last is None:
+        sidecar_last = getattr(session, 'updated_at', 0) or 0
+    if not state_db_active_messages_are_indexed(
+        sid,
+        profile=getattr(session, 'profile', None) or None,
+        available_visible_key_counts=dict(indexed.get('visible_key_counts') or {}),
+        sidecar_last_message_at=sidecar_last,
+    ):
+        return None
+    return indexed
+
+
 def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before=None):
     """Return (timestamp floor, sidecar messages) for bounded state.db tail reads.
 
@@ -9983,7 +10068,9 @@ def _metadata_only_message_summary(sid: str, profile: str | None = None) -> dict
     sidecar_count = 0
     sidecar_last_message_at = 0.0
     if sidecar_session:
-        sidecar_count = _numeric_count(getattr(sidecar_session, "_metadata_message_count", None))
+        sidecar_count = _numeric_count(getattr(sidecar_session, "lineage_message_count", None))
+        if sidecar_count <= 0:
+            sidecar_count = _numeric_count(getattr(sidecar_session, "_metadata_message_count", None))
         if sidecar_count <= 0:
             sidecar_count = _numeric_count(sidecar_session.compact().get("message_count"))
         try:
@@ -10417,11 +10504,17 @@ from api.models import (
     get_state_db_session_message_prefix_summary,
     get_state_db_session_message_keys_before_timestamp,
     get_state_db_session_summary,
+    state_db_active_messages_are_indexed,
+    read_indexed_session_lineage_window,
+    read_indexed_session_message_window,
+    _read_metadata_json_prefix,
+    _message_visible_key_digest,
     merge_session_messages_append_only,
     _reconcile_api_content_sidecars,
     _enrich_sidebar_lineage_metadata,
     _active_stream_ids,
     _evict_sessions_over_cap,
+    full_session_resolve_diagnostics,
     _merge_session_display_metadata,
     _session_message_merge_key,
     _session_messages_have_prefix,
@@ -12431,6 +12524,44 @@ def _streams_lock_health(timeout_seconds: float = 0.5) -> dict:
         STREAMS_LOCK.release()
 
 
+def _sidecar_storage_health() -> dict:
+    """Return aggregate-only sidecar risk metrics without reading transcripts."""
+    thresholds = (10 * 1024 * 1024, 25 * 1024 * 1024, 50 * 1024 * 1024)
+    counts = {threshold: 0 for threshold in thresholds}
+    total = 0
+    maximum = 0
+    try:
+        for path in SESSION_DIR.glob('*.json'):
+            if path.name == '_index.json':
+                continue
+            size = int(path.stat().st_size)
+            total += 1
+            maximum = max(maximum, size)
+            for threshold in thresholds:
+                if size >= threshold:
+                    counts[threshold] += 1
+        index_dir = SESSION_DIR / '.message_offsets'
+        indexed = sum(1 for path in index_dir.glob('*.json') if path.is_file()) if index_dir.exists() else 0
+        try:
+            from api.session_sidecar_maintenance import sidecar_maintenance_status
+            maintenance = sidecar_maintenance_status()
+        except Exception:
+            maintenance = {"worker_running": False, "last_run": None}
+        return {
+            'status': 'ok',
+            'sidecar_count': total,
+            'indexed_sidecar_count': indexed,
+            'over_10mb': counts[thresholds[0]],
+            'over_25mb': counts[thresholds[1]],
+            'over_50mb': counts[thresholds[2]],
+            'max_sidecar_bytes': maximum,
+            'full_session_resolve': full_session_resolve_diagnostics(),
+            'maintenance': maintenance,
+        }
+    except Exception as exc:
+        return {'status': 'error', 'error': type(exc).__name__}
+
+
 def _stream_runtime_diagnostics() -> dict:
     """Return non-sensitive SSE stream diagnostics for health/deep status.
 
@@ -12580,6 +12711,8 @@ def _deep_health_checks(stream_check: dict | None = None) -> tuple[dict, bool]:
             "error": type(exc).__name__,
             "ms": round((time.time() - t0) * 1000, 1),
         }
+
+    checks["sidecar_storage"] = _sidecar_storage_health()
 
     healthy = all(
         check.get("status") in {"ok", "missing"}
@@ -13627,6 +13760,19 @@ def handle_get(handler, parsed) -> bool:
         # clamping live in _parse_msg_limit so the expression has direct test
         # coverage; None means the bare no-msg_limit path (full transcript).
         msg_limit = _parse_msg_limit(query.get("msg_limit", [None])[0])
+        server_bounded_large_sidecar = False
+        if (
+            load_messages
+            and msg_limit is None
+            and _sidecar_lineage_exceeds_threshold(sid, _SIDECAR_BYTE_TAIL_THRESHOLD)
+        ):
+            # Old clients and a few recovery paths historically omitted
+            # msg_limit. Returning a 100MB-class transcript makes redaction and
+            # JSON serialization multiply memory until the container is OOM-
+            # killed. Bound every browser/API display request server-side; full
+            # history remains reachable through msg_before pagination.
+            msg_limit = _MAX_MSG_LIMIT
+            server_bounded_large_sidecar = True
         # ?msg_before=N — 0-based index into the full message array.
         # Returns messages before this index (for scroll-to-top lazy loading).
         # Combined with msg_limit for paging.
@@ -13643,7 +13789,17 @@ def handle_get(handler, parsed) -> bool:
         try:
             _t1 = _time.monotonic()
             if _diag: _diag.stage("t1_after_get_session_check")
-            s = get_session(sid, metadata_only=(not load_messages))
+            indexed_window = None
+            if load_messages and msg_limit is not None:
+                metadata_session = get_session(sid, metadata_only=True)
+                indexed_window = _indexed_session_window_if_safe(
+                    metadata_session,
+                    msg_limit=msg_limit,
+                    msg_before=msg_before,
+                )
+                s = metadata_session if indexed_window is not None else get_session(sid)
+            else:
+                s = get_session(sid, metadata_only=(not load_messages))
             _session_profile = getattr(s, 'profile', None) or None
             if not _session_visible_to_active_profile(_session_profile, handler):
                 if _session_profile:
@@ -13679,7 +13835,7 @@ def handle_get(handler, parsed) -> bool:
             _display_state_db_signature = None
             if is_messaging_session:
                 cli_messages = get_cli_session_messages(sid)
-            elif load_messages:
+            elif load_messages and indexed_window is None:
                 if msg_limit is not None:
                     (
                         state_db_since_timestamp,
@@ -13767,7 +13923,9 @@ def handle_get(handler, parsed) -> bool:
             _t3 = _time.monotonic()
             if _diag: _diag.stage("t3_after_model_resolve")
             if load_messages:
-                if is_messaging_session and cli_messages:
+                if indexed_window is not None:
+                    _all_msgs = list(indexed_window.get("messages") or [])
+                elif is_messaging_session and cli_messages:
                     # Recovery/aggregate sidecars can intentionally contain a
                     # longer visible conversation than the single state.db
                     # segment for this messaging session id. Prefer the longer
@@ -13825,17 +13983,25 @@ def handle_get(handler, parsed) -> bool:
                 _summary_message_count = None
                 _summary_last_message_at = None
             if load_messages:
-                _truncated_msgs, _messages_offset = _message_window_for_display(
-                    _all_msgs,
-                    msg_limit=msg_limit,
-                    msg_before=msg_before,
-                    expand_renderable=expand_renderable,
-                )
-                if msg_limit is not None:
-                    _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
+                if indexed_window is not None:
+                    _truncated_msgs = _messages_for_limited_payload(_all_msgs)
+                    _messages_offset = int(indexed_window.get("messages_offset") or 0)
+                else:
+                    _truncated_msgs, _messages_offset = _message_window_for_display(
+                        _all_msgs,
+                        msg_limit=msg_limit,
+                        msg_before=msg_before,
+                        expand_renderable=expand_renderable,
+                    )
+                    if msg_limit is not None:
+                        _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
                 _truncated_msgs = _hydrate_anchor_activity_scenes(
                     _truncated_msgs,
-                    getattr(s, "anchor_activity_scenes", None),
+                    (
+                        indexed_window.get("anchor_activity_scenes")
+                        if indexed_window is not None
+                        else getattr(s, "anchor_activity_scenes", None)
+                    ),
                     message_offset=_messages_offset,
                     tool_calls=getattr(s, "tool_calls", None),
                 )
@@ -13905,7 +14071,11 @@ def handle_get(handler, parsed) -> bool:
                             _fb_cl,
                         )
                     _persisted_cl = _fb_cl
-            _session_tool_calls = getattr(s, "tool_calls", []) if load_messages else []
+            _session_tool_calls = (
+                list(indexed_window.get("tool_calls") or [])
+                if load_messages and indexed_window is not None
+                else (getattr(s, "tool_calls", []) if load_messages else [])
+            )
             # Always include session-level tool_calls so the browser can merge
             # them with per-message tool_calls for messages that lack the
             # per-message variant (older messages whose tool_calls live only
@@ -13917,7 +14087,11 @@ def handle_get(handler, parsed) -> bool:
                     _messages_offset,
                     len(_truncated_msgs),
                 )
-            _merged_message_count = _summary_message_count if _summary_message_count is not None else len(_all_msgs)
+            _merged_message_count = (
+                int(indexed_window.get("message_count") or 0)
+                if indexed_window is not None
+                else (_summary_message_count if _summary_message_count is not None else len(_all_msgs))
+            )
             _merged_last_message_at = _summary_last_message_at if _summary_last_message_at is not None else 0
             if _summary_last_message_at is None and _all_msgs:
                 try:
@@ -13949,6 +14123,8 @@ def handle_get(handler, parsed) -> bool:
                 "threshold_tokens": _threshold_tokens,
                 "last_prompt_tokens": getattr(s, "last_prompt_tokens", 0) or 0,
             }
+            if server_bounded_large_sidecar:
+                raw["_server_bounded_large_sidecar"] = True
             if original_stream_id:
                 try:
                     journal = find_run_summary(original_stream_id)
@@ -13979,7 +14155,10 @@ def handle_get(handler, parsed) -> bool:
             # tool result is outside msg_limit, and treats an explicit empty
             # todo list as the current state instead of falling through to an
             # older non-empty write.
-            if load_messages and _all_msgs:
+            if load_messages and indexed_window is not None:
+                if indexed_window.get("todo_state") is not None:
+                    raw["todo_state"] = indexed_window["todo_state"]
+            elif load_messages and _all_msgs:
                 attach_todo_state(raw, _all_msgs)
             if _merged_last_message_at:
                 raw["last_message_at"] = max(

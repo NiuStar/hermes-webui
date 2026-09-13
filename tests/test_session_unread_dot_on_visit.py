@@ -344,6 +344,7 @@ let _messagesTruncated = false;
 let _oldestIdx = 0;
 let _messageRenderWindowSize = 0;
 const _MSG_LIMIT_MAX = 500;
+const _INITIAL_MSG_LIMIT = 30;
 let _msgLimitMax = _MSG_LIMIT_MAX;
 let _pendingCarryForwardSnapshot = null;
 let _loadingSessionId = 'open';
