@@ -78,7 +78,7 @@ Hard bounds:
 
 - response page: 500 visible rows;
 - decoded indexed window: 5,000 rows / 16 MiB;
-- derived index: 64 MiB / 500,000 message offsets;
+- derived index: 64 MiB / 100,000 indexed rows, enforced while scanning;
 - lineage traversal: 20 segments;
 - concurrent full sidecar resolutions: 1.
 

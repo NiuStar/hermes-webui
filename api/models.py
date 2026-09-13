@@ -1285,7 +1285,29 @@ _MESSAGE_OFFSET_INDEX_DIR = '.message_offsets'
 _INDEXED_WINDOW_MAX_ROWS = 5000
 _INDEXED_WINDOW_MAX_BYTES = 16 * 1024 * 1024
 _MESSAGE_OFFSET_INDEX_MAX_BYTES = 64 * 1024 * 1024
-_MESSAGE_OFFSET_INDEX_MAX_ROWS = 500_000
+_MESSAGE_OFFSET_INDEX_MAX_ROWS = 100_000
+
+
+class _MessageOffsetIndexLimitExceeded(ValueError):
+    pass
+
+
+def _reserve_message_offset_index_entry(budget: dict | None, estimated_bytes: int) -> bool:
+    if budget is None:
+        return True
+    if not budget.get('valid', True):
+        return False
+    next_rows = int(budget.get('rows') or 0) + 1
+    next_bytes = int(budget.get('bytes') or 0) + max(1, int(estimated_bytes))
+    if (
+        next_rows > _MESSAGE_OFFSET_INDEX_MAX_ROWS
+        or next_bytes > _MESSAGE_OFFSET_INDEX_MAX_BYTES
+    ):
+        budget['valid'] = False
+        return False
+    budget['rows'] = next_rows
+    budget['bytes'] = next_bytes
+    return True
 
 
 def _message_offset_index_path(session_id: str) -> Path | None:
@@ -1431,6 +1453,9 @@ def _write_message_offset_index(
             json.dump(payload, handle, ensure_ascii=False, separators=(',', ':'))
             handle.flush()
             os.fsync(handle.fileno())
+        if tmp.stat().st_size > _MESSAGE_OFFSET_INDEX_MAX_BYTES:
+            tmp.unlink(missing_ok=True)
+            return False
         os.chmod(tmp, 0o600)
         if (
             expected_signature is not None
@@ -1506,7 +1531,7 @@ def _scan_json_value_end(buffer, position: int, end: int) -> int:
     return position
 
 
-def _scan_indexed_json_array(buffer, position: int, end: int, *, kind: str) -> tuple[list, int]:
+def _scan_indexed_json_array(buffer, position: int, end: int, *, kind: str, budget=None) -> tuple[list, int]:
     position = _skip_json_whitespace(buffer, position, end)
     if position >= end or buffer[position] != ord('['):
         raise ValueError('expected indexed JSON array')
@@ -1515,6 +1540,8 @@ def _scan_indexed_json_array(buffer, position: int, end: int, *, kind: str) -> t
     while position < end and buffer[position] != ord(']'):
         start = position
         value_end = _scan_json_value_end(buffer, start, end)
+        if not _reserve_message_offset_index_entry(budget, 160):
+            raise _MessageOffsetIndexLimitExceeded('offset index scan budget exceeded')
         if kind == 'messages':
             todo_candidate = (
                 buffer.find(b'"todos"', start, value_end) >= 0
@@ -1540,7 +1567,7 @@ def _scan_indexed_json_array(buffer, position: int, end: int, *, kind: str) -> t
     return offsets, position + 1
 
 
-def _scan_indexed_json_object(buffer, position: int, end: int) -> tuple[dict, int]:
+def _scan_indexed_json_object(buffer, position: int, end: int, *, budget=None) -> tuple[dict, int]:
     position = _skip_json_whitespace(buffer, position, end)
     if position >= end or buffer[position] != ord('{'):
         raise ValueError('expected indexed JSON object')
@@ -1549,6 +1576,11 @@ def _scan_indexed_json_object(buffer, position: int, end: int) -> tuple[dict, in
     while position < end and buffer[position] != ord('}'):
         key_end = _scan_json_string_end(buffer, position, end)
         key = json.loads(buffer[position:key_end])
+        if not _reserve_message_offset_index_entry(
+            budget,
+            128 + len(str(key).encode('utf-8', errors='surrogatepass')),
+        ):
+            raise _MessageOffsetIndexLimitExceeded('offset index scan budget exceeded')
         position = _skip_json_whitespace(buffer, key_end, end)
         if position >= end or buffer[position] != ord(':'):
             raise ValueError('missing indexed JSON object colon')
@@ -1585,6 +1617,7 @@ def _build_message_offset_index_from_sidecar(session_id: str, sidecar_path: Path
         'tool_calls': [],
         'anchor_activity_scenes': {},
     }
+    index_budget = {'valid': True, 'rows': 0, 'bytes': 512}
     try:
         with sidecar_path.open('rb') as handle:
             with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as buffer:
@@ -1606,6 +1639,7 @@ def _build_message_offset_index_from_sidecar(session_id: str, sidecar_path: Path
                             value_start,
                             end,
                             kind=str(key),
+                            budget=index_budget,
                         )
                         index_data[str(key)] = offsets
                         if key == 'messages':
@@ -1634,7 +1668,12 @@ def _build_message_offset_index_from_sidecar(session_id: str, sidecar_path: Path
                             index_data['visible_key_counts'] = counts
                             index_data['last_message_timestamp'] = last_timestamp
                     elif key == 'anchor_activity_scenes':
-                        offsets, value_end = _scan_indexed_json_object(buffer, value_start, end)
+                        offsets, value_end = _scan_indexed_json_object(
+                            buffer,
+                            value_start,
+                            end,
+                            budget=index_budget,
+                        )
                         index_data['anchor_activity_scenes'] = offsets
                     else:
                         value_end = _scan_json_value_end(buffer, value_start, end)
@@ -2576,32 +2615,52 @@ class Session:
         tmp = self.path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
         try:
             encoder = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"))
-            offset_index = {
-                'message_count': len(persisted_messages),
-                'visible_key_counts': _message_visible_key_counts(
-                    persisted_messages,
-                    normalize_workspace_prefix=True,
-                ),
-                'last_message_timestamp': _last_indexed_message_timestamp(persisted_messages),
-                'messages': [],
-                'tool_calls': [],
-                'anchor_activity_scenes': {},
-            }
+            index_entry_count = (
+                len(persisted_messages or [])
+                + len(persisted_tool_calls or [])
+                + len(persisted_anchor_scenes or {})
+            )
+            index_estimated_bytes = (
+                512
+                + len(persisted_messages or []) * 160
+                + len(persisted_tool_calls or []) * 96
+                + sum(
+                    128 + len(str(key).encode('utf-8', errors='surrogatepass'))
+                    for key in (persisted_anchor_scenes or {})
+                )
+            )
+            collect_offset_index = bool(
+                index_entry_count <= _MESSAGE_OFFSET_INDEX_MAX_ROWS
+                and index_estimated_bytes <= _MESSAGE_OFFSET_INDEX_MAX_BYTES
+            )
+            offset_index = None
+            if collect_offset_index:
+                offset_index = {
+                    'message_count': len(persisted_messages),
+                    'visible_key_counts': _message_visible_key_counts(
+                        persisted_messages,
+                        normalize_workspace_prefix=True,
+                    ),
+                    'last_message_timestamp': _last_indexed_message_timestamp(persisted_messages),
+                    'messages': [],
+                    'tool_calls': [],
+                    'anchor_activity_scenes': {},
+                }
             with open(tmp, 'wb') as f:
                 f.write(metadata_prefix.encode('utf-8'))
                 for key, value in body_fields:
                     f.write(b',\n  ')
                     _write_encoded_json(f, encoder, key)
                     f.write(b': ')
-                    if key == 'messages':
+                    if key == 'messages' and offset_index is not None:
                         offset_index['messages'] = _write_indexed_json_array(
                             f, encoder, value, kind='messages',
                         )
-                    elif key == 'tool_calls':
+                    elif key == 'tool_calls' and offset_index is not None:
                         offset_index['tool_calls'] = _write_indexed_json_array(
                             f, encoder, value, kind='tool_calls',
                         )
-                    elif key == 'anchor_activity_scenes':
+                    elif key == 'anchor_activity_scenes' and offset_index is not None:
                         offset_index['anchor_activity_scenes'] = _write_indexed_json_object(
                             f, encoder, value,
                         )
@@ -2612,12 +2671,17 @@ class Session:
                 os.fsync(f.fileno())
             _safe_replace(tmp, self.path)
             sidecar_signature = _sidecar_stat_signature(self.path)
-            _write_message_offset_index(
-                self.session_id,
-                self.path,
-                offset_index,
-                expected_signature=sidecar_signature,
-            )
+            if offset_index is not None:
+                _write_message_offset_index(
+                    self.session_id,
+                    self.path,
+                    offset_index,
+                    expected_signature=sidecar_signature,
+                )
+            else:
+                index_path = _message_offset_index_path(self.session_id)
+                if index_path is not None:
+                    index_path.unlink(missing_ok=True)
             if self._messages_are_physical_segment:
                 self._loaded_physical_message_count = len(self.messages or [])
         except Exception:

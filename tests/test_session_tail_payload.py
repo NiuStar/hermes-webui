@@ -507,6 +507,75 @@ def test_derived_index_row_limit_fails_closed(tmp_path, monkeypatch):
     ) is None
 
 
+def test_legacy_index_builder_stops_during_scan_at_row_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    sid = "scan_row_limit"
+    sidecar = tmp_path / f"{sid}.json"
+    sidecar.write_text(
+        json.dumps({
+            "session_id": sid,
+            "title": "rows",
+            "created_at": 1,
+            "updated_at": 1,
+            "messages": [
+                {"role": "assistant", "content": f"row-{idx}", "timestamp": idx}
+                for idx in range(5)
+            ],
+            "tool_calls": [],
+            "anchor_activity_scenes": {},
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(models, "_MESSAGE_OFFSET_INDEX_MAX_ROWS", 2)
+
+    assert models._build_message_offset_index_from_sidecar(sid, sidecar) is False
+    assert not models._message_offset_index_path(sid).exists()
+
+
+def test_legacy_index_builder_stops_before_index_byte_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    sid = "scan_byte_limit"
+    sidecar = tmp_path / f"{sid}.json"
+    sidecar.write_text(
+        json.dumps({
+            "session_id": sid,
+            "title": "bytes",
+            "created_at": 1,
+            "updated_at": 1,
+            "messages": [
+                {"role": "assistant", "content": f"unique-{idx}", "timestamp": idx}
+                for idx in range(20)
+            ],
+            "tool_calls": [],
+            "anchor_activity_scenes": {},
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(models, "_MESSAGE_OFFSET_INDEX_MAX_BYTES", 512)
+
+    assert models._build_message_offset_index_from_sidecar(sid, sidecar) is False
+    assert not models._message_offset_index_path(sid).exists()
+
+
+def test_save_keeps_full_sidecar_but_skips_unindexable_message_count(tmp_path, monkeypatch):
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "_MESSAGE_OFFSET_INDEX_MAX_ROWS", 2)
+    session = models.Session(
+        session_id="save_row_limit",
+        title="rows",
+        messages=[
+            {"role": "assistant", "content": f"row-{idx}", "timestamp": idx}
+            for idx in range(5)
+        ],
+    )
+
+    session.save(skip_index=True)
+
+    payload = json.loads(session.path.read_bytes())
+    assert len(payload["messages"]) == 5
+    assert not models._message_offset_index_path(session.session_id).exists()
+
+
 def test_index_builder_never_binds_old_offsets_to_replaced_sidecar(tmp_path, monkeypatch):
     import api.config as config
     import api.models as models
