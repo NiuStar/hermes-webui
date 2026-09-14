@@ -474,6 +474,7 @@ else
 
   echo ""; echo "== Adding hermes-agent's pyproject.toml base dependencies to the virtual environment"
   _agent_paths=(
+    "${HERMES_WEBUI_AGENT_DIR:-}"
     "/home/hermeswebui/.hermes/hermes-agent"
     "/opt/hermes"
   )

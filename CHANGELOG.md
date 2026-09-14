@@ -5,6 +5,8 @@
 
 ### Added
 
+- **Docker镜像现在内置构建时验证的Hermes Agent精确提交。** 生产镜像将`HERMES_AGENT_REVISION`对应源码固定到`/opt/hermes`，构建阶段校验40位提交SHA，移除运行时`.git`，并把Agent revision写入文件和OCI标签；默认`HERMES_WEBUI_AGENT_DIR=/opt/hermes`。显式只读源码挂载仍可覆盖该默认值，启动依赖安装会优先使用配置路径，但运维必须把覆盖后的实际源码身份作为独立运行契约审计。
+
 - **回复完成后可发送低噪音通知，不必一直盯着 WebUI。** 设置页新增默认关闭的“回复完成后通知”，可选浏览器、微信（Weixin）、企业微信（WeCom）和飞书；消息渠道复用当前 Hermes profile 已配置的凭据与 home channel，不在 WebUI 接收、保存或回显密钥和目标 ID。服务端只在最终回复成功落库后异步发送，取消、错误、部分流和断线均不触发；通知包含经过强制脱敏和限长的会话标题与最终输出结论，折叠控制字符且整条最多 500 字符，不发送 session ID、完整记录、凭据或目标 ID。每个 `profile + session + stream + channel` 持久化幂等，状态文件为 `0600`，官方 `send_message` 必须返回 `success=true` 才算成功，平台冷却限流按返回时间退避。
 
 ### Fixed

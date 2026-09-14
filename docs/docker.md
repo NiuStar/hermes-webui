@@ -54,6 +54,19 @@ If something stops working, **start with the single-container setup** — it's t
 
 ## Production image security model
 
+The published WebUI image includes a Hermes Agent source snapshot pinned to the
+exact `HERMES_AGENT_REVISION` build argument. The revision is verified during the
+build, recorded in `/opt/hermes/.hermes-agent-revision` and the
+`org.opencontainers.image.hermes-agent.revision` OCI label, and shipped without
+its `.git` directory so it cannot drift at runtime. `HERMES_WEBUI_AGENT_DIR`
+defaults to `/opt/hermes`.
+
+Multi-container and development deployments can still override that default with
+an explicit `HERMES_WEBUI_AGENT_DIR` and a read-only source mount. An override is
+a separate runtime contract: inspect the mounted source identity because the
+image's Agent revision label then describes the baked fallback, not the mounted
+checkout actually used by WebUI.
+
 The production Docker image is hardened for the normal single-tenant container threat model:
 Hermes WebUI assumes one operator controls the container, mounted Hermes home, and workspace.
 The image does **not** install `sudo`, does not add runtime users to a sudo group, and does not

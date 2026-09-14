@@ -30,6 +30,20 @@ RUN apt-get update -y --fix-missing --no-install-recommends \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# Bake a verified Hermes Agent source revision into the image. Deployments may
+# still override this path with a read-only bind mount, but the standalone image
+# no longer depends on a mutable host checkout for its Agent runtime.
+ARG HERMES_AGENT_REPOSITORY=https://github.com/NousResearch/hermes-agent.git
+ARG HERMES_AGENT_REVISION=d57c28a5541ca30bbaeaa72061d49baa9e5a2a16
+RUN test "$(printf '%s' "$HERMES_AGENT_REVISION" | wc -c)" -eq 40 \
+    && case "$HERMES_AGENT_REVISION" in *[!0-9a-f]*) exit 1;; esac \
+    && git clone --filter=blob:none --no-checkout "$HERMES_AGENT_REPOSITORY" /opt/hermes \
+    && cd /opt/hermes \
+    && git checkout --detach "$HERMES_AGENT_REVISION" \
+    && test "$(git rev-parse HEAD)" = "$HERMES_AGENT_REVISION" \
+    && printf '%s\n' "$HERMES_AGENT_REVISION" > /opt/hermes/.hermes-agent-revision \
+    && rm -rf /opt/hermes/.git
+
 # ── SQLite upgrade ──────────────────────────────────────────────────────────
 # The python:3.12-slim base ships SQLite 3.46.1 (Debian Trixie), which is
 # vulnerable to the WAL-reset corruption bug discovered March 2026.
@@ -138,11 +152,14 @@ COPY --chown=root:root . /apptoo
 # Local builds that omit the arg get "unknown" as the fallback.
 ARG HERMES_VERSION=unknown
 RUN echo "__version__ = '${HERMES_VERSION}'" > /apptoo/api/_version.py
-LABEL org.opencontainers.image.version="${HERMES_VERSION}"
+LABEL org.opencontainers.image.version="${HERMES_VERSION}" \
+      org.opencontainers.image.hermes-agent.repository="${HERMES_AGENT_REPOSITORY}" \
+      org.opencontainers.image.hermes-agent.revision="${HERMES_AGENT_REVISION}"
 
 # Default to binding all interfaces (required for container networking)
 ENV HERMES_WEBUI_HOST=0.0.0.0
 ENV HERMES_WEBUI_PORT=8787
+ENV HERMES_WEBUI_AGENT_DIR=/opt/hermes
 
 EXPOSE 8787
 
