@@ -11,6 +11,7 @@ import copy
 import json
 import logging
 import os
+import re
 import secrets
 import socket
 import sys
@@ -214,7 +215,54 @@ def _container_name(info: dict[str, Any]) -> str:
     return names.lstrip("/") or os.environ.get("HERMES_WEBUI_CONTAINER_NAME", "hermes-webui")
 
 
-def _create_payload(info: dict[str, Any], image: str) -> dict[str, Any]:
+_BAKED_AGENT_REVISION_LABEL = "org.opencontainers.image.hermes-agent.revision"
+_BAKED_AGENT_PATH_LABEL = "org.opencontainers.image.hermes-agent.path"
+_BAKED_AGENT_PATH = "/opt/hermes"
+_STANDARD_AGENT_DIRS = {
+    "/home/hermeswebui/.hermes/hermes-agent",
+    "/opt/hermes-agent",
+    _BAKED_AGENT_PATH,
+}
+
+
+def _baked_agent_contract(image_info: dict[str, Any] | None) -> tuple[str, str] | None:
+    labels = ((image_info or {}).get("Config") or {}).get("Labels") or {}
+    revision = str(labels.get(_BAKED_AGENT_REVISION_LABEL) or "").strip()
+    path = str(labels.get(_BAKED_AGENT_PATH_LABEL) or "").strip()
+    if path != _BAKED_AGENT_PATH or not re.fullmatch(r"[0-9a-f]{40}", revision):
+        return None
+    return path, revision
+
+
+def _env_value(env: list[Any], name: str) -> str | None:
+    prefix = name + "="
+    for item in env:
+        text = str(item)
+        if text.startswith(prefix):
+            return text[len(prefix):]
+    return None
+
+
+def _set_env_value(env: list[Any], name: str, value: str) -> list[str]:
+    prefix = name + "="
+    result = [str(item) for item in env if not str(item).startswith(prefix)]
+    result.append(prefix + value)
+    return result
+
+
+def _bind_destination(spec: Any) -> str:
+    parts = str(spec).rsplit(":", 2)
+    if len(parts) == 3 and parts[-1] in {"ro", "rw", "z", "Z", "ro,z", "rw,z", "ro,Z", "rw,Z"}:
+        return parts[-2]
+    return parts[-1] if len(parts) >= 2 else ""
+
+
+def _create_payload(
+    info: dict[str, Any],
+    image: str,
+    *,
+    image_info: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     config = copy.deepcopy(info.get("Config") or {})
     host = copy.deepcopy(info.get("HostConfig") or {})
     config["Image"] = image
@@ -232,6 +280,47 @@ def _create_payload(info: dict[str, Any], image: str) -> dict[str, Any]:
         "MemorySwappiness", "OomKillDisable", "OomScoreAdj", "BlkioWeight",
     }
     host = {key: value for key, value in host.items() if key in allowed_host and value not in (None, {}, [])}
+    image_labels = ((image_info or {}).get("Config") or {}).get("Labels") or {}
+    if image_labels:
+        labels = dict(config.get("Labels") or {})
+        for key, value in image_labels.items():
+            if str(key).startswith("org.opencontainers.image."):
+                labels[str(key)] = value
+        config["Labels"] = labels
+
+    baked_agent = _baked_agent_contract(image_info)
+    env = list(config.get("Env") or [])
+    configured_agent = _env_value(env, "HERMES_WEBUI_AGENT_DIR")
+    binds = list(host.get("Binds") or [])
+    has_standard_agent_mount = any(
+        _bind_destination(spec) == "/home/hermeswebui/.hermes/hermes-agent"
+        for spec in binds
+    )
+    standard_override = configured_agent in _STANDARD_AGENT_DIRS or (
+        configured_agent is None and has_standard_agent_mount
+    )
+    if baked_agent is not None and standard_override:
+        env = _set_env_value(env, "HERMES_WEBUI_AGENT_DIR", baked_agent[0])
+        env = _set_env_value(env, "PYTHONPATH", baked_agent[0])
+        config["Env"] = env
+        filtered_binds = [
+            spec for spec in binds
+            if _bind_destination(spec) != "/home/hermeswebui/.hermes/hermes-agent"
+        ]
+        if filtered_binds:
+            host["Binds"] = filtered_binds
+        else:
+            host.pop("Binds", None)
+        mounts = list(host.get("Mounts") or [])
+        filtered_mounts = [
+            mount for mount in mounts
+            if str((mount or {}).get("Target") or (mount or {}).get("Destination") or "")
+            != "/home/hermeswebui/.hermes/hermes-agent"
+        ]
+        if filtered_mounts:
+            host["Mounts"] = filtered_mounts
+        else:
+            host.pop("Mounts", None)
     payload: dict[str, Any] = config
     payload["HostConfig"] = host
     networks = (info.get("NetworkSettings") or {}).get("Networks") or {}
@@ -289,7 +378,12 @@ def _normalize_runtime_value(value: Any) -> Any:
     return value
 
 
-def _verify_runtime_contract(old: dict[str, Any], new: dict[str, Any]) -> None:
+def _verify_runtime_contract(
+    old: dict[str, Any],
+    new: dict[str, Any],
+    *,
+    expected_payload: dict[str, Any] | None = None,
+) -> None:
     keys = (
         "Binds", "Mounts", "PortBindings", "RestartPolicy", "NetworkMode",
         "IpcMode", "PidMode", "UTSMode", "CgroupnsMode", "Runtime",
@@ -297,7 +391,11 @@ def _verify_runtime_contract(old: dict[str, Any], new: dict[str, Any]) -> None:
         "NanoCpus", "CpuShares", "CpusetCpus", "CpusetMems", "GroupAdd",
         "SecurityOpt", "Tmpfs", "Ulimits", "Sysctls", "DeviceRequests",
     )
-    old_host = old.get("HostConfig") or {}
+    old_host = (
+        expected_payload.get("HostConfig") or {}
+        if expected_payload is not None
+        else old.get("HostConfig") or {}
+    )
     new_host = new.get("HostConfig") or {}
     mismatches = [
         key
@@ -307,6 +405,19 @@ def _verify_runtime_contract(old: dict[str, Any], new: dict[str, Any]) -> None:
     ]
     if _normalized_networks(old) != _normalized_networks(new):
         mismatches.append("Networks")
+    if expected_payload is not None:
+        expected_env = sorted(str(item) for item in (expected_payload.get("Env") or []))
+        actual_env = sorted(str(item) for item in ((new.get("Config") or {}).get("Env") or []))
+        if expected_env != actual_env:
+            mismatches.append("Env")
+        expected_labels = expected_payload.get("Labels") or {}
+        actual_labels = (new.get("Config") or {}).get("Labels") or {}
+        identity_keys = {
+            str(key) for key in expected_labels
+            if str(key).startswith("org.opencontainers.image.")
+        }
+        if any(actual_labels.get(key) != expected_labels.get(key) for key in identity_keys):
+            mismatches.append("ImageLabels")
     if mismatches:
         raise DockerEngineError(
             "replacement runtime contract mismatch: " + ", ".join(mismatches)
@@ -319,8 +430,14 @@ def _start_if_stopped(engine: DockerEngine, name: str) -> None:
         engine.start(name)
 
 
-def _verified_image_id(engine: DockerEngine, image: str, version: str) -> str:
-    inspected = engine.inspect_image(image)
+def _verified_image_id(
+    engine: DockerEngine,
+    image: str,
+    version: str,
+    *,
+    inspected: dict[str, Any] | None = None,
+) -> str:
+    inspected = inspected if inspected is not None else engine.inspect_image(image)
     labels = (inspected.get("Config") or {}).get("Labels") or {}
     actual = str(labels.get("org.opencontainers.image.version") or "").strip()
     expected = version.removeprefix("exp-").removeprefix("v")
@@ -360,14 +477,16 @@ def replace_container(
     engine.pull(image)
     create_image = image
     report("verifying_image", 2)
+    image_info = engine.inspect_image(image)
     if version:
-        create_image = _verified_image_id(engine, image, version)
+        create_image = _verified_image_id(engine, image, version, inspected=image_info)
+    create_payload = _create_payload(old, create_image, image_info=image_info)
     report("stopping_old_container", 3)
     engine.rename(target, backup)
     try:
         engine.stop(backup)
         report("starting_new_container", 4)
-        engine.create(temp, _create_payload(old, create_image))
+        engine.create(temp, create_payload)
         engine.rename(temp, name)
         engine.start(name)
         report("waiting_for_health", 5)
@@ -381,7 +500,7 @@ def replace_container(
         if not became_healthy:
             raise DockerEngineError("replacement container did not become healthy")
         report("verifying_runtime", 6)
-        _verify_runtime_contract(old, engine.inspect(name))
+        _verify_runtime_contract(old, engine.inspect(name), expected_payload=create_payload)
     except Exception:
         failed_stage = current_stage
         report("rolling_back", 0, failed_stage=failed_stage)

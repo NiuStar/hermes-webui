@@ -59,6 +59,87 @@ def test_create_payload_excludes_container_generated_network_aliases():
     payload = dsu._create_payload(old, 'repo/webui:new')
     assert payload['NetworkingConfig']['EndpointsConfig']['project_default']['Aliases'] == ['hermes-webui']
 
+
+def test_create_payload_migrates_standard_agent_override_to_baked_image():
+    old = _old_info()
+    old['Config']['Env'] = [
+        'A=1',
+        'HERMES_WEBUI_AGENT_DIR=/home/hermeswebui/.hermes/hermes-agent',
+        'PYTHONPATH=/opt/hermes-agent',
+    ]
+    old['Config']['Labels'] = {
+        'com.docker.compose.project': 'hermes-webui',
+        'org.opencontainers.image.version': 'old-version',
+        'org.opencontainers.image.hermes-agent.revision': 'a' * 40,
+    }
+    old['HostConfig']['Binds'] = [
+        '/host/state:/state',
+        '/host/agent:/home/hermeswebui/.hermes/hermes-agent:ro',
+    ]
+    image_info = {
+        'Config': {'Labels': {
+            'org.opencontainers.image.version': 'new-version',
+            'org.opencontainers.image.hermes-agent.revision': 'b' * 40,
+            'org.opencontainers.image.hermes-agent.path': '/opt/hermes',
+        }},
+    }
+
+    payload = dsu._create_payload(old, 'sha256:new', image_info=image_info)
+
+    assert payload['Env'] == [
+        'A=1',
+        'HERMES_WEBUI_AGENT_DIR=/opt/hermes',
+        'PYTHONPATH=/opt/hermes',
+    ]
+    assert payload['HostConfig']['Binds'] == ['/host/state:/state']
+    assert payload['Labels']['com.docker.compose.project'] == 'hermes-webui'
+    assert payload['Labels']['org.opencontainers.image.version'] == 'new-version'
+    assert payload['Labels']['org.opencontainers.image.hermes-agent.revision'] == 'b' * 40
+
+
+def test_create_payload_preserves_custom_agent_override_without_standard_mount():
+    old = _old_info()
+    old['Config']['Env'] = [
+        'HERMES_WEBUI_AGENT_DIR=/custom/agent',
+        'PYTHONPATH=/custom/agent:/custom/lib',
+    ]
+    old['HostConfig']['Binds'] = ['/host/custom:/custom/agent:ro']
+    image_info = {
+        'Config': {'Labels': {
+            'org.opencontainers.image.hermes-agent.revision': 'b' * 40,
+            'org.opencontainers.image.hermes-agent.path': '/opt/hermes',
+        }},
+    }
+
+    payload = dsu._create_payload(old, 'sha256:new', image_info=image_info)
+
+    assert payload['Env'] == old['Config']['Env']
+    assert payload['HostConfig']['Binds'] == old['HostConfig']['Binds']
+
+
+def test_create_payload_preserves_explicit_custom_agent_with_stale_standard_mount():
+    old = _old_info()
+    old['Config']['Env'] = [
+        'HERMES_WEBUI_AGENT_DIR=/custom/agent',
+        'PYTHONPATH=/custom/agent:/custom/lib',
+    ]
+    old['HostConfig']['Binds'] = [
+        '/host/custom:/custom/agent:ro',
+        '/host/old:/home/hermeswebui/.hermes/hermes-agent:ro',
+    ]
+    image_info = {
+        'Config': {'Labels': {
+            'org.opencontainers.image.hermes-agent.revision': 'b' * 40,
+            'org.opencontainers.image.hermes-agent.path': '/opt/hermes',
+        }},
+    }
+
+    payload = dsu._create_payload(old, 'sha256:new', image_info=image_info)
+
+    assert payload['Env'] == old['Config']['Env']
+    assert payload['HostConfig']['Binds'] == old['HostConfig']['Binds']
+
+
 def test_docker_requests_use_compatible_version_prefix():
     assert dsu.API_PREFIX == '/v1.41'
 
@@ -87,6 +168,30 @@ def test_runtime_contract_rejects_changed_port_binding():
         assert 'PortBindings' in str(exc)
     else:
         raise AssertionError('runtime contract mismatch must fail closed')
+
+
+def test_runtime_contract_rejects_failed_baked_agent_migration():
+    old = _old_info()
+    expected = dsu._create_payload(
+        old,
+        'sha256:new',
+        image_info={'Config': {'Labels': {
+            'org.opencontainers.image.version': 'new-version',
+            'org.opencontainers.image.hermes-agent.revision': 'b' * 40,
+            'org.opencontainers.image.hermes-agent.path': '/opt/hermes',
+        }}},
+    )
+    new = _old_info()
+    new['Config']['Env'] = ['A=1', 'HERMES_WEBUI_AGENT_DIR=/old/agent']
+    new['Config']['Labels'] = {'org.opencontainers.image.version': 'old-version'}
+
+    try:
+        dsu._verify_runtime_contract(old, new, expected_payload=expected)
+    except dsu.DockerEngineError as exc:
+        assert 'Env' in str(exc)
+        assert 'ImageLabels' in str(exc)
+    else:
+        raise AssertionError('failed baked-agent migration must fail closed')
 
 
 def test_pull_uses_bounded_long_stream_mode(monkeypatch):
@@ -380,7 +485,11 @@ def test_replace_container_reports_real_stage_order(monkeypatch):
 
     engine = Engine()
     monkeypatch.setattr(dsu, 'DockerEngine', lambda: engine)
-    monkeypatch.setattr(dsu, '_verify_runtime_contract', lambda _old, _new: None)
+    monkeypatch.setattr(
+        dsu,
+        '_verify_runtime_contract',
+        lambda _old, _new, expected_payload=None: None,
+    )
     stages = []
     result = dsu.replace_container(
         'hermes-webui', 'repo/webui:latest', 'v1.2.3',
@@ -404,6 +513,7 @@ def test_replace_container_rolls_back_when_new_container_unhealthy(monkeypatch):
             if target == 'hermes-webui.hermes-update-old': return {'State': {'Running': False}}
             return {'State': {'Running': False, 'Health': {'Status': 'unhealthy'}}}
         def pull(self, image): self.calls.append(('pull', image))
+        def inspect_image(self, _image): return {'Config': {'Labels': {}}}
         def rename(self, old, new): self.calls.append(('rename', old, new))
         def stop(self, target): self.calls.append(('stop', target))
         def create(self, name, payload): self.calls.append(('create', name)); return {'Id': 'new-id'}

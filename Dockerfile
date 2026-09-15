@@ -34,7 +34,7 @@ RUN apt-get update -y --fix-missing --no-install-recommends \
 # still override this path with a read-only bind mount, but the standalone image
 # no longer depends on a mutable host checkout for its Agent runtime.
 ARG HERMES_AGENT_REPOSITORY=https://github.com/NousResearch/hermes-agent.git
-ARG HERMES_AGENT_REVISION=d57c28a5541ca30bbaeaa72061d49baa9e5a2a16
+ARG HERMES_AGENT_REVISION=24fd22b94df040d843eb280ff197a4bcd99a6fc3
 RUN test "$(printf '%s' "$HERMES_AGENT_REVISION" | wc -c)" -eq 40 \
     && case "$HERMES_AGENT_REVISION" in *[!0-9a-f]*) exit 1;; esac \
     && git clone --filter=blob:none --no-checkout "$HERMES_AGENT_REPOSITORY" /opt/hermes \
@@ -154,7 +154,8 @@ ARG HERMES_VERSION=unknown
 RUN echo "__version__ = '${HERMES_VERSION}'" > /apptoo/api/_version.py
 LABEL org.opencontainers.image.version="${HERMES_VERSION}" \
       org.opencontainers.image.hermes-agent.repository="${HERMES_AGENT_REPOSITORY}" \
-      org.opencontainers.image.hermes-agent.revision="${HERMES_AGENT_REVISION}"
+      org.opencontainers.image.hermes-agent.revision="${HERMES_AGENT_REVISION}" \
+      org.opencontainers.image.hermes-agent.path="/opt/hermes"
 
 # Default to binding all interfaces (required for container networking)
 ENV HERMES_WEBUI_HOST=0.0.0.0

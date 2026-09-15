@@ -19,6 +19,7 @@ def test_docker_image_exposes_baked_agent_identity_and_default_path():
     assert 'ENV HERMES_WEBUI_AGENT_DIR=/opt/hermes' in DOCKERFILE
     assert 'org.opencontainers.image.hermes-agent.revision="${HERMES_AGENT_REVISION}"' in DOCKERFILE
     assert 'org.opencontainers.image.hermes-agent.repository="${HERMES_AGENT_REPOSITORY}"' in DOCKERFILE
+    assert 'org.opencontainers.image.hermes-agent.path="/opt/hermes"' in DOCKERFILE
 
 
 def test_docker_init_prioritizes_configured_baked_agent_source():

@@ -67,6 +67,15 @@ a separate runtime contract: inspect the mounted source identity because the
 image's Agent revision label then describes the baked fallback, not the mounted
 checkout actually used by WebUI.
 
+For online updates, images that declare both a valid 40-character
+`org.opencontainers.image.hermes-agent.revision` and
+`org.opencontainers.image.hermes-agent.path=/opt/hermes` migrate the legacy
+default `~/.hermes/hermes-agent` source mount to the baked Agent. The updater
+removes only that standard legacy mount and changes `HERMES_WEBUI_AGENT_DIR` and
+`PYTHONPATH` to `/opt/hermes`; an explicitly configured custom Agent directory is
+left unchanged. The replacement's exact environment, mounts, and OCI identity
+are read back after health succeeds, and any mismatch triggers rollback.
+
 The production Docker image is hardened for the normal single-tenant container threat model:
 Hermes WebUI assumes one operator controls the container, mounted Hermes home, and workspace.
 The image does **not** install `sudo`, does not add runtime users to a sudo group, and does not
