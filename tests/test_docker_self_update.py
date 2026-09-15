@@ -65,7 +65,7 @@ def test_create_payload_migrates_standard_agent_override_to_baked_image():
     old['Config']['Env'] = [
         'A=1',
         'HERMES_WEBUI_AGENT_DIR=/home/hermeswebui/.hermes/hermes-agent',
-        'PYTHONPATH=/opt/hermes-agent',
+        'PYTHONPATH=:/opt/hermes-agent:/custom/lib:/custom/lib:',
     ]
     old['Config']['Labels'] = {
         'com.docker.compose.project': 'hermes-webui',
@@ -75,6 +75,7 @@ def test_create_payload_migrates_standard_agent_override_to_baked_image():
     old['HostConfig']['Binds'] = [
         '/host/state:/state',
         '/host/agent:/home/hermeswebui/.hermes/hermes-agent:ro',
+        '/host/other-old-agent:/opt/hermes-agent:ro',
     ]
     image_info = {
         'Config': {'Labels': {
@@ -89,7 +90,7 @@ def test_create_payload_migrates_standard_agent_override_to_baked_image():
     assert payload['Env'] == [
         'A=1',
         'HERMES_WEBUI_AGENT_DIR=/opt/hermes',
-        'PYTHONPATH=/opt/hermes',
+        'PYTHONPATH=:/opt/hermes:/custom/lib:/custom/lib:',
     ]
     assert payload['HostConfig']['Binds'] == ['/host/state:/state']
     assert payload['Labels']['com.docker.compose.project'] == 'hermes-webui'

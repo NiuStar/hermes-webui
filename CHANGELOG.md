@@ -11,7 +11,7 @@
 
 ### Fixed
 
-- **Docker在线更新现在会迁移遗留的默认Agent运行契约，避免“WebUI镜像已更新但实际Agent仍是旧版”。** 当目标镜像同时声明有效的40位`org.opencontainers.image.hermes-agent.revision`和`org.opencontainers.image.hermes-agent.path=/opt/hermes`时，更新器会移除旧的`~/.hermes/hermes-agent`源码挂载，并把`HERMES_WEBUI_AGENT_DIR`与`PYTHONPATH`切换为镜像内`/opt/hermes`；目标OCI身份、迁移后的环境和挂载均会在新容器健康后精确读回，不一致即回滚。显式自定义Agent路径和挂载保持不变。本发布镜像固定执行时官方`main`提交`24fd22b94df040d843eb280ff197a4bcd99a6fc3`（CLI `0.21.3`）。
+- **Docker在线更新现在会迁移遗留的默认Agent运行契约，避免“WebUI镜像已更新但实际Agent仍是旧版”。** 当目标镜像同时声明有效的40位`org.opencontainers.image.hermes-agent.revision`和`org.opencontainers.image.hermes-agent.path=/opt/hermes`时，更新器会移除旧的`~/.hermes/hermes-agent`源码挂载，把`HERMES_WEBUI_AGENT_DIR`切换为镜像内`/opt/hermes`，并仅替换`PYTHONPATH`中的已知旧Agent路径、保留其他自定义库路径；目标OCI身份、迁移后的环境和挂载均会在新容器健康后精确读回，不一致即回滚。显式自定义Agent路径和挂载保持不变。本发布镜像固定执行时官方`main`提交`24fd22b94df040d843eb280ff197a4bcd99a6fc3`（CLI `0.21.3`）。
 
 - **Docker stable 在线更新不再因 `latest` 浮动标签尚未同步而卡在“正在校验发布镜像”。** 更新器此前先从 GitHub 验证目标 release（如 `v2026.09.13-r3`），却固定拉 Docker Hub 的 `:latest`；当精确版本镜像已发布而浮动标签仍指向旧版时，合法更新会因 OCI 版本不一致而失败关闭。stable 更新现在直接拉经过验证的精确 `:v…` release tag，然后继续执行原有 OCI label、镜像 ID、健康和运行契约校验；experimental 保留现有 `:experimental` 发布契约，浏览器仍不能指定仓库或任意镜像。
 

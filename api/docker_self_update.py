@@ -250,6 +250,20 @@ def _set_env_value(env: list[Any], name: str, value: str) -> list[str]:
     return result
 
 
+def _migrated_pythonpath(value: str | None, baked_path: str) -> str:
+    if value is None:
+        return baked_path
+    paths = value.split(":")
+    replaced = False
+    for index, path in enumerate(paths):
+        if path in _STANDARD_AGENT_DIRS:
+            paths[index] = baked_path
+            replaced = True
+    if not replaced:
+        paths.insert(0, baked_path)
+    return ":".join(paths)
+
+
 def _bind_destination(spec: Any) -> str:
     parts = str(spec).rsplit(":", 2)
     if len(parts) == 3 and parts[-1] in {"ro", "rw", "z", "Z", "ro,z", "rw,z", "ro,Z", "rw,Z"}:
@@ -293,19 +307,22 @@ def _create_payload(
     configured_agent = _env_value(env, "HERMES_WEBUI_AGENT_DIR")
     binds = list(host.get("Binds") or [])
     has_standard_agent_mount = any(
-        _bind_destination(spec) == "/home/hermeswebui/.hermes/hermes-agent"
-        for spec in binds
+        _bind_destination(spec) in _STANDARD_AGENT_DIRS for spec in binds
     )
     standard_override = configured_agent in _STANDARD_AGENT_DIRS or (
         configured_agent is None and has_standard_agent_mount
     )
     if baked_agent is not None and standard_override:
         env = _set_env_value(env, "HERMES_WEBUI_AGENT_DIR", baked_agent[0])
-        env = _set_env_value(env, "PYTHONPATH", baked_agent[0])
+        env = _set_env_value(
+            env,
+            "PYTHONPATH",
+            _migrated_pythonpath(_env_value(env, "PYTHONPATH"), baked_agent[0]),
+        )
         config["Env"] = env
         filtered_binds = [
             spec for spec in binds
-            if _bind_destination(spec) != "/home/hermeswebui/.hermes/hermes-agent"
+            if _bind_destination(spec) not in _STANDARD_AGENT_DIRS
         ]
         if filtered_binds:
             host["Binds"] = filtered_binds
@@ -315,7 +332,7 @@ def _create_payload(
         filtered_mounts = [
             mount for mount in mounts
             if str((mount or {}).get("Target") or (mount or {}).get("Destination") or "")
-            != "/home/hermeswebui/.hermes/hermes-agent"
+            not in _STANDARD_AGENT_DIRS
         ]
         if filtered_mounts:
             host["Mounts"] = filtered_mounts
