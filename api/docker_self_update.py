@@ -218,10 +218,9 @@ def _container_name(info: dict[str, Any]) -> str:
 _BAKED_AGENT_REVISION_LABEL = "org.opencontainers.image.hermes-agent.revision"
 _BAKED_AGENT_PATH_LABEL = "org.opencontainers.image.hermes-agent.path"
 _BAKED_AGENT_PATH = "/opt/hermes"
-_STANDARD_AGENT_DIRS = {
+_LEGACY_AGENT_DIRS = {
     "/home/hermeswebui/.hermes/hermes-agent",
     "/opt/hermes-agent",
-    _BAKED_AGENT_PATH,
 }
 
 
@@ -256,10 +255,10 @@ def _migrated_pythonpath(value: str | None, baked_path: str) -> str:
     paths = value.split(":")
     replaced = False
     for index, path in enumerate(paths):
-        if path in _STANDARD_AGENT_DIRS:
+        if path in _LEGACY_AGENT_DIRS:
             paths[index] = baked_path
             replaced = True
-    if not replaced:
+    if not replaced and baked_path not in paths:
         paths.insert(0, baked_path)
     return ":".join(paths)
 
@@ -306,11 +305,16 @@ def _create_payload(
     env = list(config.get("Env") or [])
     configured_agent = _env_value(env, "HERMES_WEBUI_AGENT_DIR")
     binds = list(host.get("Binds") or [])
-    has_standard_agent_mount = any(
-        _bind_destination(spec) in _STANDARD_AGENT_DIRS for spec in binds
+    mounts = list(host.get("Mounts") or [])
+    has_legacy_agent_mount = any(
+        _bind_destination(spec) in _LEGACY_AGENT_DIRS for spec in binds
+    ) or any(
+        str((mount or {}).get("Target") or (mount or {}).get("Destination") or "")
+        in _LEGACY_AGENT_DIRS
+        for mount in mounts
     )
-    standard_override = configured_agent in _STANDARD_AGENT_DIRS or (
-        configured_agent is None and has_standard_agent_mount
+    standard_override = configured_agent in _LEGACY_AGENT_DIRS or (
+        configured_agent is None and has_legacy_agent_mount
     )
     if baked_agent is not None and standard_override:
         env = _set_env_value(env, "HERMES_WEBUI_AGENT_DIR", baked_agent[0])
@@ -322,17 +326,16 @@ def _create_payload(
         config["Env"] = env
         filtered_binds = [
             spec for spec in binds
-            if _bind_destination(spec) not in _STANDARD_AGENT_DIRS
+            if _bind_destination(spec) not in _LEGACY_AGENT_DIRS
         ]
         if filtered_binds:
             host["Binds"] = filtered_binds
         else:
             host.pop("Binds", None)
-        mounts = list(host.get("Mounts") or [])
         filtered_mounts = [
             mount for mount in mounts
             if str((mount or {}).get("Target") or (mount or {}).get("Destination") or "")
-            not in _STANDARD_AGENT_DIRS
+            not in _LEGACY_AGENT_DIRS
         ]
         if filtered_mounts:
             host["Mounts"] = filtered_mounts

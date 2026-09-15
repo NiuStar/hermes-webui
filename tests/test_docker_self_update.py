@@ -141,6 +141,49 @@ def test_create_payload_preserves_explicit_custom_agent_with_stale_standard_moun
     assert payload['HostConfig']['Binds'] == old['HostConfig']['Binds']
 
 
+def test_create_payload_migrates_legacy_agent_hostconfig_mount_without_env():
+    old = _old_info()
+    old['Config']['Env'] = ['A=1']
+    old['HostConfig']['Mounts'] = [
+        {'Type': 'bind', 'Source': '/host/agent', 'Target': '/opt/hermes-agent', 'ReadOnly': True},
+        {'Type': 'bind', 'Source': '/host/data', 'Target': '/data', 'ReadOnly': False},
+    ]
+    image_info = {
+        'Config': {'Labels': {
+            'org.opencontainers.image.hermes-agent.revision': 'b' * 40,
+            'org.opencontainers.image.hermes-agent.path': '/opt/hermes',
+        }},
+    }
+
+    payload = dsu._create_payload(old, 'sha256:new', image_info=image_info)
+
+    assert 'HERMES_WEBUI_AGENT_DIR=/opt/hermes' in payload['Env']
+    assert 'PYTHONPATH=/opt/hermes' in payload['Env']
+    assert payload['HostConfig']['Mounts'] == [
+        {'Type': 'bind', 'Source': '/host/data', 'Target': '/data', 'ReadOnly': False},
+    ]
+
+
+def test_create_payload_preserves_explicit_mount_over_baked_agent_path():
+    old = _old_info()
+    old['Config']['Env'] = [
+        'HERMES_WEBUI_AGENT_DIR=/opt/hermes',
+        'PYTHONPATH=/opt/hermes',
+    ]
+    old['HostConfig']['Binds'] = ['/host/custom:/opt/hermes:ro']
+    image_info = {
+        'Config': {'Labels': {
+            'org.opencontainers.image.hermes-agent.revision': 'b' * 40,
+            'org.opencontainers.image.hermes-agent.path': '/opt/hermes',
+        }},
+    }
+
+    payload = dsu._create_payload(old, 'sha256:new', image_info=image_info)
+
+    assert payload['Env'] == old['Config']['Env']
+    assert payload['HostConfig']['Binds'] == old['HostConfig']['Binds']
+
+
 def test_docker_requests_use_compatible_version_prefix():
     assert dsu.API_PREFIX == '/v1.41'
 
