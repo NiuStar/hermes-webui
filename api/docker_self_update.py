@@ -222,6 +222,22 @@ _LEGACY_AGENT_DIRS = {
     "/home/hermeswebui/.hermes/hermes-agent",
     "/opt/hermes-agent",
 }
+_BIND_OPTION_NAMES = {
+    "ro", "rw", "z", "Z", "shared", "rshared", "slave", "rslave",
+    "private", "rprivate", "nocopy",
+}
+_PRESERVED_HOST_CONFIG_KEYS = (
+    "Binds", "Mounts", "PortBindings", "RestartPolicy", "LogConfig",
+    "NetworkMode", "ExtraHosts", "Dns", "DnsSearch", "DnsOptions",
+    "CapAdd", "CapDrop", "SecurityOpt", "ReadonlyRootfs", "Init",
+    "PidsLimit", "ShmSize", "Memory", "NanoCpus", "CpuShares",
+    "Devices", "DeviceRequests", "GroupAdd", "Privileged", "UsernsMode",
+    "Tmpfs", "IpcMode", "PidMode", "UTSMode", "CgroupnsMode", "Runtime",
+    "MaskedPaths", "ReadonlyPaths", "Ulimits", "Sysctls", "CpuPeriod",
+    "CpuQuota", "CpuRealtimePeriod", "CpuRealtimeRuntime", "CpusetCpus",
+    "CpusetMems", "MemoryReservation", "MemorySwap", "MemorySwappiness",
+    "OomKillDisable", "OomScoreAdj", "BlkioWeight",
+)
 
 
 def _baked_agent_contract(image_info: dict[str, Any] | None) -> tuple[str, str] | None:
@@ -265,7 +281,8 @@ def _migrated_pythonpath(value: str | None, baked_path: str) -> str:
 
 def _bind_destination(spec: Any) -> str:
     parts = str(spec).rsplit(":", 2)
-    if len(parts) == 3 and parts[-1] in {"ro", "rw", "z", "Z", "ro,z", "rw,z", "ro,Z", "rw,Z"}:
+    options = parts[-1].split(",") if len(parts) == 3 else []
+    if options and all(option in _BIND_OPTION_NAMES for option in options):
         return parts[-2]
     return parts[-1] if len(parts) >= 2 else ""
 
@@ -280,19 +297,11 @@ def _create_payload(
     host = copy.deepcopy(info.get("HostConfig") or {})
     config["Image"] = image
     config.pop("Hostname", None)
-    allowed_host = {
-        "Binds", "Mounts", "PortBindings", "RestartPolicy", "LogConfig",
-        "NetworkMode", "ExtraHosts", "Dns", "DnsSearch", "DnsOptions",
-        "CapAdd", "CapDrop", "SecurityOpt", "ReadonlyRootfs", "Init",
-        "PidsLimit", "ShmSize", "Memory", "NanoCpus", "CpuShares",
-        "Devices", "DeviceRequests", "GroupAdd", "Privileged", "UsernsMode", "Tmpfs",
-        "IpcMode", "PidMode", "UTSMode", "CgroupnsMode", "Runtime",
-        "MaskedPaths", "ReadonlyPaths", "Ulimits", "Sysctls",
-        "CpuPeriod", "CpuQuota", "CpuRealtimePeriod", "CpuRealtimeRuntime",
-        "CpusetCpus", "CpusetMems", "MemoryReservation", "MemorySwap",
-        "MemorySwappiness", "OomKillDisable", "OomScoreAdj", "BlkioWeight",
+    host = {
+        key: value
+        for key, value in host.items()
+        if key in _PRESERVED_HOST_CONFIG_KEYS and value not in (None, {}, [])
     }
-    host = {key: value for key, value in host.items() if key in allowed_host and value not in (None, {}, [])}
     image_labels = ((image_info or {}).get("Config") or {}).get("Labels") or {}
     if image_labels:
         labels = dict(config.get("Labels") or {})
@@ -404,13 +413,7 @@ def _verify_runtime_contract(
     *,
     expected_payload: dict[str, Any] | None = None,
 ) -> None:
-    keys = (
-        "Binds", "Mounts", "PortBindings", "RestartPolicy", "NetworkMode",
-        "IpcMode", "PidMode", "UTSMode", "CgroupnsMode", "Runtime",
-        "ReadonlyRootfs", "Privileged", "ShmSize", "PidsLimit", "Memory",
-        "NanoCpus", "CpuShares", "CpusetCpus", "CpusetMems", "GroupAdd",
-        "SecurityOpt", "Tmpfs", "Ulimits", "Sysctls", "DeviceRequests",
-    )
+
     old_host = (
         expected_payload.get("HostConfig") or {}
         if expected_payload is not None
@@ -419,24 +422,28 @@ def _verify_runtime_contract(
     new_host = new.get("HostConfig") or {}
     mismatches = [
         key
-        for key in keys
+        for key in _PRESERVED_HOST_CONFIG_KEYS
         if _normalize_runtime_value(old_host.get(key))
         != _normalize_runtime_value(new_host.get(key))
     ]
     if _normalized_networks(old) != _normalized_networks(new):
         mismatches.append("Networks")
     if expected_payload is not None:
-        expected_env = sorted(str(item) for item in (expected_payload.get("Env") or []))
-        actual_env = sorted(str(item) for item in ((new.get("Config") or {}).get("Env") or []))
+        expected_env = [str(item) for item in (expected_payload.get("Env") or [])]
+        actual_env = [str(item) for item in ((new.get("Config") or {}).get("Env") or [])]
         if expected_env != actual_env:
             mismatches.append("Env")
         expected_labels = expected_payload.get("Labels") or {}
         actual_labels = (new.get("Config") or {}).get("Labels") or {}
-        identity_keys = {
-            str(key) for key in expected_labels
+        expected_identity = {
+            str(key): value for key, value in expected_labels.items()
             if str(key).startswith("org.opencontainers.image.")
         }
-        if any(actual_labels.get(key) != expected_labels.get(key) for key in identity_keys):
+        actual_identity = {
+            str(key): value for key, value in actual_labels.items()
+            if str(key).startswith("org.opencontainers.image.")
+        }
+        if actual_identity != expected_identity:
             mismatches.append("ImageLabels")
     if mismatches:
         raise DockerEngineError(
@@ -500,6 +507,8 @@ def replace_container(
     image_info = engine.inspect_image(image)
     if version:
         create_image = _verified_image_id(engine, image, version, inspected=image_info)
+    if _baked_agent_contract(image_info) is None:
+        raise DockerEngineError("pulled image has no valid baked Hermes Agent identity")
     create_payload = _create_payload(old, create_image, image_info=image_info)
     report("stopping_old_container", 3)
     engine.rename(target, backup)

@@ -74,7 +74,7 @@ def test_create_payload_migrates_standard_agent_override_to_baked_image():
     }
     old['HostConfig']['Binds'] = [
         '/host/state:/state',
-        '/host/agent:/home/hermeswebui/.hermes/hermes-agent:ro',
+        '/host/agent:/home/hermeswebui/.hermes/hermes-agent:ro,rshared',
         '/host/other-old-agent:/opt/hermes-agent:ro',
     ]
     image_info = {
@@ -236,6 +236,45 @@ def test_runtime_contract_rejects_failed_baked_agent_migration():
         assert 'ImageLabels' in str(exc)
     else:
         raise AssertionError('failed baked-agent migration must fail closed')
+
+
+def test_runtime_contract_rejects_env_order_hostconfig_and_extra_oci_drift():
+    old = _old_info()
+    old['Config']['Env'] = ['A=1', 'B=2']
+    image_info = {'Config': {'Labels': {
+        'org.opencontainers.image.version': 'new-version',
+        'org.opencontainers.image.hermes-agent.revision': 'b' * 40,
+        'org.opencontainers.image.hermes-agent.path': '/opt/hermes',
+    }}}
+    expected = dsu._create_payload(old, 'sha256:new', image_info=image_info)
+
+    cases = []
+    env_order = _old_info()
+    env_order['Config']['Env'] = list(reversed(expected['Env']))
+    env_order['Config']['Labels'] = dict(expected['Labels'])
+    cases.append(('Env', env_order))
+
+    host_drift = _old_info()
+    host_drift['Config']['Env'] = list(expected['Env'])
+    host_drift['Config']['Labels'] = dict(expected['Labels'])
+    host_drift['HostConfig']['MaskedPaths'] = ['/different']
+    cases.append(('MaskedPaths', host_drift))
+
+    label_drift = _old_info()
+    label_drift['Config']['Env'] = list(expected['Env'])
+    label_drift['Config']['Labels'] = {
+        **expected['Labels'],
+        'org.opencontainers.image.unexpected': 'drift',
+    }
+    cases.append(('ImageLabels', label_drift))
+
+    for expected_mismatch, new in cases:
+        try:
+            dsu._verify_runtime_contract(old, new, expected_payload=expected)
+        except dsu.DockerEngineError as exc:
+            assert expected_mismatch in str(exc)
+        else:
+            raise AssertionError(f'{expected_mismatch} drift must fail closed')
 
 
 def test_pull_uses_bounded_long_stream_mode(monkeypatch):
@@ -518,7 +557,11 @@ def test_replace_container_reports_real_stage_order(monkeypatch):
             return {'State': {'Running': False}}
         def pull(self, _image): pass
         def inspect_image(self, _image):
-            return {'Id': 'sha256:new', 'Config': {'Labels': {'org.opencontainers.image.version': 'v1.2.3'}}}
+            return {'Id': 'sha256:new', 'Config': {'Labels': {
+                'org.opencontainers.image.version': 'v1.2.3',
+                'org.opencontainers.image.hermes-agent.revision': 'b' * 40,
+                'org.opencontainers.image.hermes-agent.path': '/opt/hermes',
+            }}}
         def rename(self, _old, _new): pass
         def stop(self, _target): pass
         def create(self, _name, _payload): return {'Id': 'new'}
@@ -548,6 +591,31 @@ def test_replace_container_reports_real_stage_order(monkeypatch):
     ]
 
 
+def test_replace_container_rejects_missing_baked_agent_contract_before_stop(monkeypatch):
+    old = _old_info()
+
+    class Engine:
+        def __init__(self): self.calls = []
+        def inspect(self, _target): return old
+        def pull(self, image): self.calls.append(('pull', image))
+        def inspect_image(self, _image):
+            return {'Id': 'sha256:new', 'Config': {'Labels': {
+                'org.opencontainers.image.version': 'v1.2.3',
+            }}}
+        def rename(self, old_name, new_name): self.calls.append(('rename', old_name, new_name))
+        def stop(self, target): self.calls.append(('stop', target))
+
+    engine = Engine()
+    monkeypatch.setattr(dsu, 'DockerEngine', lambda: engine)
+    try:
+        dsu.replace_container('hermes-webui', 'repo/webui:v1.2.3', 'v1.2.3')
+    except dsu.DockerEngineError as exc:
+        assert 'baked Hermes Agent identity' in str(exc)
+    else:
+        raise AssertionError('missing baked Agent contract must fail closed')
+    assert engine.calls == [('pull', 'repo/webui:v1.2.3')]
+
+
 
 def test_replace_container_rolls_back_when_new_container_unhealthy(monkeypatch):
     class Engine:
@@ -557,7 +625,10 @@ def test_replace_container_rolls_back_when_new_container_unhealthy(monkeypatch):
             if target == 'hermes-webui.hermes-update-old': return {'State': {'Running': False}}
             return {'State': {'Running': False, 'Health': {'Status': 'unhealthy'}}}
         def pull(self, image): self.calls.append(('pull', image))
-        def inspect_image(self, _image): return {'Config': {'Labels': {}}}
+        def inspect_image(self, _image): return {'Config': {'Labels': {
+            'org.opencontainers.image.hermes-agent.revision': 'b' * 40,
+            'org.opencontainers.image.hermes-agent.path': '/opt/hermes',
+        }}}
         def rename(self, old, new): self.calls.append(('rename', old, new))
         def stop(self, target): self.calls.append(('stop', target))
         def create(self, name, payload): self.calls.append(('create', name)); return {'Id': 'new-id'}

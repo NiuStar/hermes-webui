@@ -67,16 +67,18 @@ a separate runtime contract: inspect the mounted source identity because the
 image's Agent revision label then describes the baked fallback, not the mounted
 checkout actually used by WebUI.
 
-For online updates, images that declare both a valid 40-character
+For online updates, images must declare both a valid 40-character
 `org.opencontainers.image.hermes-agent.revision` and
-`org.opencontainers.image.hermes-agent.path=/opt/hermes` migrate the legacy
-default `~/.hermes/hermes-agent` source mount to the baked Agent. The updater
-removes only that standard legacy mount, changes `HERMES_WEBUI_AGENT_DIR` to
-`/opt/hermes`, and replaces only known legacy Agent entries in `PYTHONPATH` while
-preserving other custom library paths; an explicitly configured custom Agent
-directory is left unchanged. The replacement's exact environment, mounts, and
-OCI identity are read back after health succeeds, and any mismatch triggers
-rollback.
+`org.opencontainers.image.hermes-agent.path=/opt/hermes`; missing or malformed
+identity fails before the old container is stopped. The updater migrates legacy
+Agent mounts targeting `~/.hermes/hermes-agent` or `/opt/hermes-agent` from both
+Docker `Binds` and `HostConfig.Mounts`, including combined propagation options.
+It changes `HERMES_WEBUI_AGENT_DIR` to `/opt/hermes` and replaces only known
+legacy Agent entries in `PYTHONPATH`, preserving every other component exactly.
+An explicitly configured custom Agent directory and an explicit mount over
+`/opt/hermes` are left unchanged. After health succeeds, the replacement's OCI
+label set, ordered environment, full protected HostConfig, and network contract
+are read back; any mismatch triggers rollback.
 
 The production Docker image is hardened for the normal single-tenant container threat model:
 Hermes WebUI assumes one operator controls the container, mounted Hermes home, and workspace.
