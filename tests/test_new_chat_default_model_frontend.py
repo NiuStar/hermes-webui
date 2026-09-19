@@ -129,6 +129,17 @@ def test_new_session_posts_picker_model_before_server_default():
     assert "_readPersistedModelState" in fn
 
 
+def test_session_model_update_adopts_server_provider_readback():
+    boot_js = Path("static/boot.js").read_text(encoding="utf-8")
+    start = boot_js.index("function _applySessionContextMetadataUpdate(data)")
+    end = boot_js.index("\n$('modelSelect').onchange", start)
+    body = boot_js[start:end]
+    assert "data.session.model" in body
+    assert "S.session.model=data.session.model" in body
+    assert "data.session.model_provider" in body
+    assert "S.session.model_provider=data.session.model_provider||null" in body
+
+
 def test_model_picker_persists_without_active_session():
     boot_js = Path("static/boot.js").read_text(encoding="utf-8")
     body = boot_js[boot_js.index("$('modelSelect').onchange=async()=>") : boot_js.index("$('msg').addEventListener", boot_js.index("$('modelSelect').onchange=async()=>"))]

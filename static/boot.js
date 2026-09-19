@@ -2238,6 +2238,17 @@ $('btnClearPreview').onclick=handleWorkspaceClose;
 // workspacePath click handler removed -- use topbar workspace chip dropdown instead
 function _applySessionContextMetadataUpdate(data){
   if(!S.session||!data||!data.session)return;
+  if(data.session.model){
+    S.session.model=data.session.model;
+    S.session.model_provider=data.session.model_provider||null;
+    if(typeof _writePersistedModelState==='function'){
+      _writePersistedModelState(S.session.model,S.session.model_provider);
+    }
+    const sel=$('modelSelect');
+    if(sel&&typeof _ensureModelOptionInDropdown==='function'){
+      _ensureModelOptionInDropdown(S.session.model,sel,S.session.model_provider);
+    }
+  }
   S.session.context_length=data.session.context_length||0;
   S.session.threshold_tokens=data.session.threshold_tokens||0;
   S.session.last_prompt_tokens=data.session.last_prompt_tokens||0;
