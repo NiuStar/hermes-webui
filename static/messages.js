@@ -6368,7 +6368,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           }else if(_doneLiveScrollSnapshot&&typeof _restoreMessageScrollSnapshotSameFrame==='function'){
             _restoreMessageScrollSnapshotSameFrame(_doneLiveScrollSnapshot);
           }
-          if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
+          if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom({settle:false});
           if(typeof noteWorkspaceMutationsFromToolCalls==='function') noteWorkspaceMutationsFromToolCalls(S.toolCalls);
           loadDir('.', { preservePreview: true });
           // TTS auto-read: speak the last assistant response if enabled (#499)

@@ -7258,7 +7258,8 @@ function scrollIfPinned(options){
   if(_messageBottomDistance()>500) _setMessageScrollToBottom();
   _settleMessageScrollToBottom(false);
 }
-function scrollToBottom(){
+function scrollToBottom(options){
+  const settle=!(options&&options.settle===false);
   // An explicit scroll-to-bottom (End button, or any definitive pin-to-bottom)
   // supersedes a pending jump-to-question reconciliation: cancel the active jump
   // owner first so its deferred _finishMessageJumpScroll() can't restore the
@@ -7269,6 +7270,25 @@ function scrollToBottom(){
   _clearNewMessageScrollCue();
   _scrollPinned=true;
   _messageUserUnpinned=false;
+  _cancelBottomSettle();
+  if(!settle){
+    // Stream settlement can be followed immediately by a mobile touch gesture.
+    // Do one write now and one after the pending collapsed-worklog layout pass,
+    // but do not install ResizeObserver or a delayed settle loop that can fight
+    // the reader after the turn is already complete.
+    const inputGeneration=typeof _messageScrollInputGeneration==='number'
+      ? _messageScrollInputGeneration : 0;
+    _setMessageScrollToBottom({settle:false,streaming:true});
+    requestAnimationFrame(()=>{
+      if(typeof _messageScrollInputGeneration==='number'&&_messageScrollInputGeneration!==inputGeneration) return;
+      if(_messageUserUnpinned||!_scrollPinned||_recentMessageScrollIntent()||_recentMessageTouchScrollIntent()||_recentMessageWheelIntent()||_recentMessageKeyScrollIntent()) return;
+      _setMessageScrollToBottom({settle:false,streaming:true});
+    });
+    _syncScrollToBottomCue(false,{newMessage:false});
+    if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
+    if(typeof _flushDeferredActiveSessionExternalRefresh==='function') _flushDeferredActiveSessionExternalRefresh();
+    return;
+  }
   // Write scrollTop once synchronously to anchor the viewport, then let
   // ResizeObserver settle handle any late layout growth (Prism, KaTeX,
   // Mermaid, images).  Using force=false so the observer runs — force=true

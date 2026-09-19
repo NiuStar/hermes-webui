@@ -157,10 +157,22 @@ def test_stream_follow_does_not_start_layout_settle_loop_per_render():
     assert "_settleMessageScrollToBottom(false);" not in streaming_block
     assert "scrollIfPinned({streaming:true});" in MESSAGES_JS
 
+def test_stream_settlement_does_not_start_long_scroll_settle_loop():
+    """Done-time mobile follow must yield to the next touch gesture."""
+    scroll_idx = UI_JS.find("function scrollToBottom(options){")
+    assert scroll_idx != -1, "scrollToBottom(options) not found"
+    scroll_body = UI_JS[scroll_idx:UI_JS.find("\nfunction _fmtOllamaLabel", scroll_idx)]
+    assert "const settle=!(options&&options.settle===false);" in scroll_body
+    assert "if(!settle){" in scroll_body
+    settle_block = scroll_body.split("if(!settle){", 1)[1].split("return;", 1)[0]
+    assert "_setMessageScrollToBottom({settle:false,streaming:true});" in settle_block
+    assert "_settleMessageScrollToBottom(false,true)" not in settle_block
+    assert "_messageScrollInputGeneration" in settle_block
+    assert "scrollToBottom({settle:false});" in MESSAGES_JS
+
 import json  # noqa: E402
 import shutil  # noqa: E402
 import subprocess  # noqa: E402
-
 import pytest  # noqa: E402
 
 NODE = shutil.which("node")
