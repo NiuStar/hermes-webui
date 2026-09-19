@@ -2444,6 +2444,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _pendingStreamEndRecovery=true;
     _streamEndRecoveryTimer=setTimeout(()=>{void _runStreamEndRecovery(source);},delay);
   }
+  function _boundTerminalMessageRenderWindow(){
+    if(typeof _messageRenderWindowSize==='undefined') return;
+    const current=typeof _currentMessageRenderWindowSize==='function'
+      ? _currentMessageRenderWindowSize()
+      : 50;
+    // Terminal settlement only needs the recent tail plus the just-settled
+    // Activity scene. Never expand to the complete transcript here: a long
+    // session can contain thousands of messages, and materializing all of them
+    // after `done` freezes scrolling until a reload resets the window.
+    const terminalTailLimit=100;
+    _messageRenderWindowSize=Math.max(50,Math.min(current,terminalTailLimit));
+    if(typeof _messageVirtualWindowKey!=='undefined') _messageVirtualWindowKey='';
+  }
+
   function _finalizeStreamEndFallback(source){
     _clearStreamEndRecovery();
     if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
@@ -6328,11 +6342,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // delivered the final messages and tool calls.
           if(typeof window!=='undefined') window._streamJustFinished=true;
           setTimeout(()=>{ if(typeof window!=='undefined') window._streamJustFinished=false; }, 5000);
-          // Expand render window to cover all messages so the done render
-          // doesn't hide Activity behind a tiny window (winSize=50).
-          if(typeof _messageRenderableMessageCount==='function'&&typeof _messageRenderWindowSize!=='undefined'){
-            _messageRenderWindowSize=Math.max(typeof _currentMessageRenderWindowSize==='function'?_currentMessageRenderWindowSize():50, _messageRenderableMessageCount());
-          }
+          // Keep terminal rendering bounded. The virtual tail already includes
+          // the just-settled Activity scene; expanding to every historical
+          // message freezes long conversations until reload resets the window.
+          _boundTerminalMessageRenderWindow();
           // #4650 review: the agent turn that just completed may have changed
           // server-side reasoning config (e.g. a `/reasoning <level>` slash
           // command writes agent.reasoning_effort) WITHOUT changing the model/
@@ -7114,10 +7127,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           S.toolCalls=[];
         }
         if(isSessionViewed) _markSessionViewed(completedSid, session.message_count ?? S.messages.length);
-        // Expand render window so the settled render doesn't hide Activity.
-        if(typeof _messageRenderableMessageCount==='function'&&typeof _messageRenderWindowSize!=='undefined'){
-          _messageRenderWindowSize=Math.max(typeof _currentMessageRenderWindowSize==='function'?_currentMessageRenderWindowSize():50, _messageRenderableMessageCount());
-        }
+        // Recovery/error terminal rendering uses the same bounded tail as the
+        // normal done path; never materialize the full historical transcript.
+        _boundTerminalMessageRenderWindow();
         syncTopbar();renderMessages({preserveScroll:true});
         if(typeof projectSessionArtifactsForOwner==='function') projectSessionArtifactsForOwner(completedSid);
       }

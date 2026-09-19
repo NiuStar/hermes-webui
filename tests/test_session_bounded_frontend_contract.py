@@ -56,6 +56,13 @@ def test_terminal_paths_merge_segmented_snapshots_without_resetting_cursor():
     assert "if(!_settledMergedWindow&&typeof _oldestIdx" in text
 
 
+def test_terminal_paths_keep_frontend_render_window_bounded():
+    text = (STATIC / "messages.js").read_text(encoding="utf-8")
+    assert "function _boundTerminalMessageRenderWindow" in text
+    assert text.count("_boundTerminalMessageRenderWindow();") >= 2
+    assert "_messageRenderWindowSize=Math.max(typeof _currentMessageRenderWindowSize==='function'?_currentMessageRenderWindowSize():50, _messageRenderableMessageCount());" not in text
+
+
 def _js_function(source: str, name: str) -> str:
     start = source.index(f"function {name}")
     brace = source.index("{", start)
