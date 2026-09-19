@@ -9688,6 +9688,40 @@ _CAPACITY_CONTINUATION_PREFIX = (
 )
 
 
+def _capacity_continuation_prompt(source):
+    """Build a stable association header from the authoritative parent metadata."""
+    source_id = str(getattr(source, "session_id", None) or "").strip() or "(unknown)"
+    source_title = str(getattr(source, "title", None) or "Untitled").strip() or "Untitled"
+    project_id = str(getattr(source, "project_id", None) or "").strip()
+    project_title = "(none)"
+    if project_id:
+        try:
+            profile = getattr(source, "profile", None)
+            project = next(
+                (
+                    item for item in load_projects()
+                    if str(item.get("project_id") or "") == project_id
+                    and (not profile or str(item.get("profile") or "") == str(profile))
+                ),
+                None,
+            )
+            if project:
+                project_title = str(project.get("name") or "").strip() or "(unnamed)"
+        except Exception:
+            # The session identity remains usable even if project metadata is
+            # temporarily unavailable; do not invent a project title.
+            project_title = "(unavailable)"
+    return (
+        f"{_CAPACITY_CONTINUATION_PREFIX}\n\n"
+        "Association metadata from the previous conversation (treat these as "
+        "authoritative; do not replace them with guesses):\n"
+        f"- Original project title: {project_title}\n"
+        f"- Original project ID: {project_id or '(none)'}\n"
+        f"- Original session title: {source_title}\n"
+        f"- Original session ID: {source_id}"
+    )
+
+
 def _sidecar_lineage_exceeds_threshold(session_id, threshold_bytes, *, max_hops=20) -> bool:
     """Return whether a compression tip or any verified ancestor is oversized."""
     from api.config import SESSION_DIR as current_session_dir
@@ -15792,7 +15826,7 @@ def handle_post(handler, parsed) -> bool:
             "source_session_id": sid,
             "session": public_session_projection(child.compact() | {"messages": []}),
             "capacity": status,
-            "continuation_prompt_prefix": _CAPACITY_CONTINUATION_PREFIX,
+            "continuation_prompt_prefix": _capacity_continuation_prompt(source),
         })
 
     if parsed.path == "/api/session/duplicate":
@@ -24580,7 +24614,7 @@ def _handle_chat_start(handler, body, diag=None):
                     _capacity_child = _create_capacity_continuation(_capacity_source)
                     body = dict(body)
                     body["session_id"] = _capacity_child.session_id
-                    body["message"] = f"{_CAPACITY_CONTINUATION_PREFIX}\n\nNew request:\n{str(body.get('message') or '').strip()}"
+                    body["message"] = f"{_capacity_continuation_prompt(_capacity_source)}\n\nNew request:\n{str(body.get('message') or '').strip()}"
                     diag.stage("capacity_continuation") if diag else None
             except KeyError:
                 pass

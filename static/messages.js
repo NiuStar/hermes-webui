@@ -1620,20 +1620,22 @@ async function send(){
   try{
     const _capacity=await api('/api/session/capacity-continuation',{method:'POST',body:JSON.stringify({session_id:activeSid})});
     if(_capacity&&_capacity.continued&&_capacity.session&&_capacity.session.session_id){
-      const _oldSid=activeSid;
-      activeSid=_capacity.session.session_id;
-      S.session=_capacity.session;
-      S.messages=[];
-      S.toolCalls=[];
-      _messagesTruncated=false;
-      _oldestIdx=0;
-      if(typeof clearLiveToolCards==='function') clearLiveToolCards();
+      const _childSid=String(_capacity.session.session_id);
+      // Use the canonical navigation path so URL/localStorage, stream
+      // subscription, per-session draft state, and top-bar metadata all move
+      // with the continuation. Assigning S.session alone leaves the browser
+      // visually on the parent while the next request targets the child.
+      if(typeof loadSession==='function') await loadSession(_childSid);
+      else throw new Error('Session continuation navigation is unavailable');
+      activeSid=S.session&&S.session.session_id===_childSid
+        ? _childSid
+        : null;
+      if(!activeSid) throw new Error('Session continuation navigation did not activate the child');
+      _sendInProgressSid=activeSid;
       _continuationPrefix=String(_capacity.continuation_prompt_prefix||'').trim();
-      if(typeof renderMessages==='function') renderMessages();
-      if(typeof renderSessionList==='function') void renderSessionList();
+      if(typeof renderSessionList==='function') await renderSessionList();
       if(typeof showToast==='function') showToast('已达到会话容量上限，已自动创建续接会话。',3200);
       // The old parent remains intact; only the new turn is written to the child.
-      void _oldSid;
     }
   }catch(_capacityError){
     // Capacity inspection is fail-closed: do not send to an unknown oversized

@@ -37,11 +37,36 @@ def test_capacity_continuation_preserves_parent_and_starts_empty_child():
     assert "source.save" not in body
 
 
+def test_capacity_prompt_contains_authoritative_project_and_parent_identity():
+    start = ROUTES.index("def _capacity_continuation_prompt(")
+    end = ROUTES.index("def _sidecar_lineage_exceeds_threshold(", start)
+    body = ROUTES[start:end]
+    assert "Original project title" in body
+    assert "Original project ID" in body
+    assert "Original session title" in body
+    assert "Original session ID" in body
+    assert "load_projects()" in body
+    assert "project_id" in body
+    assert "profile" in body
+
+
+def test_both_capacity_paths_use_parent_metadata_prompt():
+    endpoint = ROUTES[ROUTES.index('parsed.path == "/api/session/capacity-continuation"'):]
+    chat_start = ROUTES[ROUTES.index("def _handle_chat_start("):]
+    assert "_capacity_continuation_prompt(source)" in endpoint
+    assert "_capacity_continuation_prompt(_capacity_source)" in chat_start
+
+
 def test_send_checks_capacity_before_upload_and_optimistic_render():
     guard = MESSAGES.index("// Capacity guard:")
     upload = MESSAGES.index("uploadPendingFiles", guard)
     optimistic = MESSAGES.index("const userMsg=", guard)
     assert "/api/session/capacity-continuation" in MESSAGES[guard:upload]
     assert guard < upload < optimistic
-    assert "continuation_prompt_prefix" in MESSAGES[guard:upload]
-    assert "S.messages=[]" in MESSAGES[guard:upload]
+    guard_body = MESSAGES[guard:upload]
+    assert "continuation_prompt_prefix" in guard_body
+    assert "await loadSession(_childSid)" in guard_body
+    assert "S.session&&S.session.session_id===_childSid" in guard_body
+    assert "_sendInProgressSid=activeSid" in guard_body
+    assert "_setActiveSessionUrl" not in guard_body
+    assert "S.messages=[]" not in guard_body
