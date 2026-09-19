@@ -7036,14 +7036,26 @@ document.addEventListener('DOMContentLoaded',function(){
   tooltip.addEventListener('click',function(e){e.stopPropagation();});
 });
 
-function _setMessageScrollToBottom(){
+function _setMessageScrollToBottom(options){
   const el=$('messages');
   if(!el) return;
-  _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
+  const settle=!(options&&options.settle===false);
+  const streaming=!!(options&&options.streaming);
+  if(!streaming){
+    _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
+  }
   el.scrollTop=el.scrollHeight;
   _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
   _nearBottomCount=2;
   _scrollPinned=true;
+  if(streaming){
+    _programmaticScroll=false;
+    return;
+  }
+  if(!settle){
+    _deferClearProgrammaticScroll();
+    return;
+  }
   requestAnimationFrame(()=>{
     // Retry the bottom write on the next layout frame so a DOM rebuild that
     // grows the transcript after the first write doesn't strand a pinned
@@ -7206,7 +7218,8 @@ function _settleFinalScroll(token){
   _scrollPinned=true;
   _deferClearProgrammaticScroll();
 }
-function scrollIfPinned(){
+function scrollIfPinned(options){
+  const streaming=!!(options&&options.streaming);
   if(!window._autoScrollFollow) return;
   // A jump-to-question owner is mid-flight: it deliberately holds the reader at
   // the jump target across smooth-scroll frames, so never let a live token
@@ -7233,6 +7246,15 @@ function scrollIfPinned(){
   }
   if(!_scrollPinned) return;
   if(_recentNonMessageScrollIntent()) return;
+  // Streaming already runs from a throttled render frame. Starting the full
+  // ResizeObserver/settle cycle here on every token makes the observer, rAF,
+  // and scroll listener compete while the DOM is growing, which produces a
+  // visible one-row bounce and steals manual scroll input. The next render
+  // frame observes any late layout growth, so one direct write is sufficient.
+  if(streaming){
+    _setMessageScrollToBottom({settle:false,streaming:true});
+    return;
+  }
   if(_messageBottomDistance()>500) _setMessageScrollToBottom();
   _settleMessageScrollToBottom(false);
 }

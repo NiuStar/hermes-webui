@@ -5666,7 +5666,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(typeof _syncLiveWorklogReasonsForAnchor==='function') _syncLiveWorklogReasonsForAnchor(assistantRow, displayText);
       }
       if(anchorProcessText) _upsertAnchorProcessProse(anchorProcessText);
-      scrollIfPinned();
+      scrollIfPinned({streaming:true});
       _throttledSnapshotLiveTurn();
     };
     const frameIntervalMs=_shouldUseLiveProseFade()?33:66;

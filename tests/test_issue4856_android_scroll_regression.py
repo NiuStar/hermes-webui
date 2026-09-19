@@ -139,7 +139,24 @@ def test_recent_render_scroll_artifact_window_suppresses_upward_unpin():
     )
 
 
-# ── #4970 low-delta wheel intent: behavioral node-harness ────────────────────
+def test_stream_follow_does_not_start_layout_settle_loop_per_render():
+    """Streaming follow must use one direct write per render frame.
+
+    Starting ResizeObserver plus delayed bottom writes for every token makes
+    the growing transcript fight the user's scroll position and causes visible
+    jumps. The full settle path remains reserved for non-streaming layout.
+    """
+    scroll_idx = UI_JS.find("function scrollIfPinned(")
+    assert scroll_idx != -1, "scrollIfPinned() not found"
+    scroll_body = UI_JS[scroll_idx:UI_JS.find("\nfunction scrollToBottom", scroll_idx)]
+    assert "const streaming=!!(options&&options.streaming);" in scroll_body
+    assert "if(streaming){" in scroll_body
+    streaming_block = scroll_body.split("if(streaming){", 1)[1].split("return;", 1)[0]
+    assert "_setMessageScrollToBottom({settle:false,streaming:true});" in streaming_block
+    assert "_programmaticScroll=false" not in streaming_block
+    assert "_settleMessageScrollToBottom(false);" not in streaming_block
+    assert "scrollIfPinned({streaming:true});" in MESSAGES_JS
+
 import json  # noqa: E402
 import shutil  # noqa: E402
 import subprocess  # noqa: E402
