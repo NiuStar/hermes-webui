@@ -1611,8 +1611,39 @@ async function send(){
   }
   if(!S.session){await newSession();await renderSessionList();}
 
-  const activeSid=S.session.session_id;
+  let activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;
+
+  // Capacity guard: move the next turn to an empty child before any upload,
+  // optimistic render, or agent lock touches the oversized parent.
+  let _continuationPrefix='';
+  try{
+    const _capacity=await api('/api/session/capacity-continuation',{method:'POST',body:JSON.stringify({session_id:activeSid})});
+    if(_capacity&&_capacity.continued&&_capacity.session&&_capacity.session.session_id){
+      const _oldSid=activeSid;
+      activeSid=_capacity.session.session_id;
+      S.session=_capacity.session;
+      S.messages=[];
+      S.toolCalls=[];
+      _messagesTruncated=false;
+      _oldestIdx=0;
+      if(typeof clearLiveToolCards==='function') clearLiveToolCards();
+      _continuationPrefix=String(_capacity.continuation_prompt_prefix||'').trim();
+      if(typeof renderMessages==='function') renderMessages();
+      if(typeof renderSessionList==='function') void renderSessionList();
+      if(typeof showToast==='function') showToast('已达到会话容量上限，已自动创建续接会话。',3200);
+      // The old parent remains intact; only the new turn is written to the child.
+      void _oldSid;
+    }
+  }catch(_capacityError){
+    // Capacity inspection is fail-closed: do not send to an unknown oversized
+    // session when the guard cannot determine its state.
+    setComposerStatus('无法确认会话容量，请稍后重试');
+    _sendInProgress=false;_sendInProgressSid=null;
+    return;
+  }
+
+  if(_continuationPrefix) text=`${_continuationPrefix}\n\nNew request:\n${text}`;
 
   // Salvage of #4750 (@harryazj): capture the composer text and clear the
   // textarea NOW — immediately after capture and BEFORE the uploadPendingFiles()

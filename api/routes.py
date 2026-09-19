@@ -9626,6 +9626,68 @@ def _sidecar_file_exceeds_threshold(session_id, threshold_bytes) -> bool:
         return False
 
 
+def _create_capacity_continuation(source):
+    """Create an empty writable child and leave the parent transcript unchanged."""
+    title = str(getattr(source, "title", None) or "Untitled").strip() or "Untitled"
+    if not title.endswith(" (continuation)"):
+        title = f"{title} (continuation)"
+    child = Session(
+        session_id=uuid.uuid4().hex[:12], title=title,
+        workspace=getattr(source, "workspace", get_last_workspace()),
+        model=getattr(source, "model", None),
+        model_provider=getattr(source, "model_provider", None),
+        messages=[], tool_calls=[], pinned=False, archived=False,
+        project_id=getattr(source, "project_id", None),
+        profile=getattr(source, "profile", None), session_source="fork",
+        personality=getattr(source, "personality", None),
+        enabled_toolsets=copy.deepcopy(getattr(source, "enabled_toolsets", None)),
+        context_length=getattr(source, "context_length", None),
+        threshold_tokens=getattr(source, "threshold_tokens", None),
+        gateway_routing=copy.deepcopy(getattr(source, "gateway_routing", None)),
+        gateway_routing_history=copy.deepcopy(getattr(source, "gateway_routing_history", None) or []),
+        parent_session_id=getattr(source, "session_id", None),
+    )
+    child.composer_draft = {"text": "", "files": []}
+    child.continuation_reason = "capacity_limit"
+    child.continuation_source_session_id = getattr(source, "session_id", None)
+    child.save()
+    with LOCK:
+        SESSIONS[child.session_id] = child
+        SESSIONS.move_to_end(child.session_id)
+        _evict_sessions_over_cap()
+    _publish_session_list_changed("session_capacity_continuation", profile=getattr(child, "profile", None), session_id=child.session_id)
+    return child
+
+
+def _capacity_status_from_disk(session_id):
+    """Read capacity metadata without deserializing the transcript."""
+    from api.config import SESSION_DIR
+    path = SESSION_DIR / f"{session_id}.json"
+    try:
+        byte_count = int(path.stat().st_size)
+        from api.models import _read_metadata_json_prefix
+        metadata = json.loads(_read_metadata_json_prefix(path) or "{}")
+        message_count = int(metadata.get("message_count") or 0)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    settings = load_settings()
+    max_messages = int(settings.get("session_continuation_max_messages", 8000) or 8000)
+    max_bytes = int(settings.get("session_continuation_max_bytes", 50 * 1024 * 1024) or 50 * 1024 * 1024)
+    return {
+        "exceeded": message_count >= max_messages or byte_count >= max_bytes,
+        "message_count": message_count, "byte_count": byte_count,
+        "max_messages": max_messages, "max_bytes": max_bytes,
+    }
+
+
+_CAPACITY_CONTINUATION_PREFIX = (
+    "This is an automatic continuation of the previous conversation, which reached "
+    "the system capacity limit. Do not repeat external actions already completed in "
+    "the previous conversation. Continue from its completed results and handle the "
+    "new request below."
+)
+
+
 def _sidecar_lineage_exceeds_threshold(session_id, threshold_bytes, *, max_hops=20) -> bool:
     """Return whether a compression tip or any verified ancestor is oversized."""
     from api.config import SESSION_DIR as current_session_dir
@@ -15708,6 +15770,30 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/session/compression-recovery/start":
         return _handle_session_compression_recovery_start(handler, body)
+
+    if parsed.path == "/api/session/capacity-continuation":
+        sid = str(body.get("session_id") or "").strip()
+        if not sid:
+            return bad(handler, "session_id is required", 400)
+        try:
+            source = get_session(sid, metadata_only=True)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        if not _session_visible_to_active_profile(getattr(source, "profile", None), handler):
+            return bad(handler, "Session not found", 404)
+        status = _capacity_status_from_disk(sid)
+        if status is None:
+            return bad(handler, "Session capacity could not be determined", 503)
+        if not status["exceeded"]:
+            return j(handler, {"continued": False, "session": public_session_projection(source.compact() | {"messages": []}), "capacity": status})
+        child = _create_capacity_continuation(source)
+        return j(handler, {
+            "continued": True,
+            "source_session_id": sid,
+            "session": public_session_projection(child.compact() | {"messages": []}),
+            "capacity": status,
+            "continuation_prompt_prefix": _CAPACITY_CONTINUATION_PREFIX,
+        })
 
     if parsed.path == "/api/session/duplicate":
         try:
@@ -24485,6 +24571,19 @@ def _handle_chat_start(handler, body, diag=None):
         if stale_response is not None:
             return j(handler, stale_response, status=409)
         diag.stage("get_session") if diag else None
+        _capacity_sid = str(body.get("session_id") or "").strip()
+        _capacity_status = _capacity_status_from_disk(_capacity_sid) if _capacity_sid else None
+        if _capacity_status and _capacity_status.get("exceeded") and body.get("regenerate") is not True:
+            try:
+                _capacity_source = get_session(_capacity_sid, metadata_only=True)
+                if _session_visible_to_active_profile(getattr(_capacity_source, "profile", None), handler):
+                    _capacity_child = _create_capacity_continuation(_capacity_source)
+                    body = dict(body)
+                    body["session_id"] = _capacity_child.session_id
+                    body["message"] = f"{_CAPACITY_CONTINUATION_PREFIX}\n\nNew request:\n{str(body.get('message') or '').strip()}"
+                    diag.stage("capacity_continuation") if diag else None
+            except KeyError:
+                pass
         try:
             s = _get_or_materialize_session(
                 body["session_id"],

@@ -9697,6 +9697,8 @@ _SETTINGS_DEFAULTS = {
     "inflight_state_max_tool_calls": 48,  # max recent tool-call records kept per recovery snapshot
     "inflight_state_max_string_chars": 60000,  # max string length kept inside a recovery snapshot field
     "inflight_state_max_json_chars": 1500000,  # max serialized recovery snapshot payload before pruning
+    "session_continuation_max_messages": 8000,  # start a fresh continuation before a session becomes a global-load hazard
+    "session_continuation_max_bytes": 50 * 1024 * 1024,  # same guard for large tool outputs
     "hidden_tabs": [],  # sidebar tab panel names hidden by user (e.g. ["tasks","kanban"]); chat and settings are always visible
     "tab_order": [],  # user-defined sidebar/rail tab order for reorderable tabs; chat/settings stay fixed
     "composer_control_order": [],  # user-defined composer footer control order; invalid/duplicate keys are ignored
@@ -9967,6 +9969,8 @@ _SETTINGS_ENUM_VALUES = {
     "structured_code_default_view": {"auto", "on", "off"},
 }
 _SETTINGS_INT_RANGES = {
+    "session_continuation_max_messages": (100, 1000000),
+    "session_continuation_max_bytes": (1048576, 1073741824),
     "pinned_sessions_limit": (1, 99),
     "inflight_state_max_sessions": (1, 25),
     "inflight_state_max_messages": (1, 100),
