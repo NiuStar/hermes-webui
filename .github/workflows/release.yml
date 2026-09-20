@@ -45,15 +45,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Extract tags from the git ref (supports vX.Y and vX.Y.Z formats)
+      # The WebUI self-updater pulls the Docker Hub image by default. Keep the
+      # Docker Hub publication in the same release transaction as GHCR.
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Publish both registries. The exact ref is required by the stable
+      # self-updater; floating tags remain available for manual/experimental use.
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: |
+            ghcr.io/${{ github.repository }}
+            24802117/hermes-webui
           tags: |
-            type=match,pattern=v(\d+\.\d+(?:\.\d+)?),group=1
-            type=match,pattern=exp-v(\d+\.\d+(?:\.\d+)?),group=1
+            type=raw,value=${{ github.ref_name }},enable=${{ steps.channel.outputs.is_stable == 'true' }}
             type=raw,value=latest,enable=${{ steps.channel.outputs.is_stable == 'true' }}
             type=raw,value=experimental,enable=${{ steps.channel.outputs.is_stable == 'false' }}
 
