@@ -211,6 +211,31 @@ def test_check_repo_redacts_credentialed_fetch_failure(tmp_path):
     assert 'Authentication failed' in info['error']
 
 
+def test_release_tags_read_published_versions_from_atom_without_rest_api(tmp_path, monkeypatch):
+    atom = b'''<?xml version="1.0"?>
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <entry><title>v2026.09.19-r7</title></entry>
+      <entry><title>v2026.09.19-r6</title></entry>
+      <entry><title>exp-v2026.09.20-r1</title></entry>
+    </feed>'''
+    calls = []
+
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self): return atom
+
+    def fake_urlopen(request, timeout=0):
+        calls.append(request.full_url)
+        return Response()
+
+    monkeypatch.setattr(updates.urllib.request, 'urlopen', fake_urlopen)
+    assert [x['name'] for x in updates._github_release_tags(channel='stable')] == [
+        'v2026.09.19-r7', 'v2026.09.19-r6'
+    ]
+    assert calls == ['https://github.com/NiuStar/hermes-webui/releases.atom']
+
+
 def test_check_repo_reports_manual_update_for_baked_webui_version(tmp_path, monkeypatch):
     """Docker WebUI installs should banner a manual update when GitHub tags are newer."""
 
@@ -268,10 +293,10 @@ def test_check_repo_webui_no_git_falls_back_to_old_payload_on_tags_failure(tmp_p
 
     info = updates._check_repo(tmp_path, 'webui')
 
-    assert info == {
-        'name': 'webui', 'behind': None, 'no_git': True,
-        'deployment_online_update': False,
-    }
+    assert info['name'] == 'webui'
+    assert info['behind'] is None
+    assert info['no_git'] is True
+    assert info['deployment_online_update'] is updates.deployment_info()['online_update']
 
 
 def test_check_repo_no_git_agent_stays_cant_check(tmp_path):

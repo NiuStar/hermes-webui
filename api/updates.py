@@ -20,6 +20,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import urlparse
@@ -930,8 +931,52 @@ def _release_api_url() -> str:
     return f'https://api.github.com/repos/{repository}/releases?per_page=100'
 
 
+def _release_page_url() -> str:
+    repository = os.getenv('HERMES_WEBUI_RELEASE_REPOSITORY', 'NiuStar/hermes-webui').strip()
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository):
+        repository = 'NiuStar/hermes-webui'
+    return f'https://github.com/{repository}/releases.atom'
+
+
+def _github_release_tags_from_atom(*, timeout=3.0, channel=DEFAULT_UPDATE_CHANNEL):
+    """Read published releases from GitHub's public Atom feed, not REST API."""
+    request = urllib.request.Request(
+        _release_page_url(),
+        headers={'Accept': 'application/atom+xml', 'User-Agent': 'hermes-webui'},
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        payload = response.read()
+    root = ET.fromstring(payload)
+    namespace = {'atom': 'http://www.w3.org/2005/Atom'}
+    tags = []
+    for entry in root.findall('atom:entry', namespace):
+        title = entry.findtext('atom:title', default='', namespaces=namespace).strip()
+        if not title:
+            continue
+        valid = bool(_RELEASE_TAG_RE.fullmatch(title)) if channel == 'stable' else bool(
+            re.fullmatch(r'exp-v[0-9][0-9A-Za-z.+-]*', title)
+        )
+        if not valid:
+            continue
+        tags.append({'name': title, 'sha': title})
+    return sorted(tags, key=lambda item: _release_tag_sort_key(item['name']), reverse=True)
+
+
 def _github_release_tags(url=None, *, timeout=3.0, channel=DEFAULT_UPDATE_CHANNEL):
-    """Return published GitHub Release tags newest-first."""
+    """Return published GitHub Release tags newest-first.
+
+    The public Atom feed is the primary source because it avoids the anonymous
+    GitHub REST API rate limit. ``url`` remains a REST-compatible test hook and
+    explicit override for callers that require the structured API.
+    """
+    if url is None:
+        try:
+            return _github_release_tags_from_atom(timeout=timeout, channel=channel)
+        except ET.ParseError:
+            # Keep compatibility with explicit/mock REST responses and tolerate
+            # an intermediary that returns an unexpected body. Normal GitHub
+            # release checks use Atom and do not consume REST rate limit.
+            url = _release_api_url()
     headers = {
         'Accept': 'application/vnd.github+json',
         'User-Agent': 'hermes-webui',
