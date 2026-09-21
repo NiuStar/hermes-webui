@@ -21530,7 +21530,21 @@ def _read_anchored_file_bytes(ws_root: Path, target: Path) -> bytes:
 
 def _handle_approval_pending(handler, parsed):
     sid = parse_qs(parsed.query).get("session_id", [""])[0]
+    orphan_run_ids = []
     with _lock:
+        queue_before = _pending.get(sid)
+        entries_before = queue_before if isinstance(queue_before, list) else [queue_before] if queue_before else []
+        if not (_gateway_queues.get(sid) or []):
+            now = time.time()
+            orphan_run_ids = [
+                str(entry.get("run_id") or "").strip()
+                for entry in entries_before
+                if _is_gateway_mirror_entry(entry)
+                and str(entry.get("run_id") or "").strip()
+                and entry.get(_GATEWAY_MIRROR_RETAINED)
+                and now - float(entry.get("_gateway_mirror_created_at") or now)
+                    >= _GATEWAY_ORPHAN_APPROVAL_TTL_SECONDS
+            ]
         _head, _total, _changed = reconcile_gateway_pending_mirror_locked(sid)
         queue = _pending.get(sid)
         # Support both the new list format and a legacy single-dict value.
@@ -21552,6 +21566,12 @@ def _handle_approval_pending(handler, parsed):
                     total = len(gw_queue)
                 else:
                     logger.warning("Gateway queue entry for %s has no .data attribute", sid)
+    for orphan_run_id in orphan_run_ids:
+        try:
+            from api.gateway_chat import stop_gateway_run
+            stop_gateway_run(orphan_run_id)
+        except Exception:
+            logger.warning("Failed to stop orphan approval run %s", orphan_run_id, exc_info=True)
     if p:
         return j(handler, {"pending": dict(p), "pending_count": total})
     return j(handler, {"pending": None, "pending_count": 0})

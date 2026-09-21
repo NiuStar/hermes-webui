@@ -70,6 +70,15 @@ def post(path, body=None):
 
 # ── Unit tests (in-process, no HTTP server needed) ──────────────────────────
 
+def test_gateway_orphan_mirrors_have_bounded_retention():
+    """A retained mirror with no live producer must expire instead of pinning a card."""
+    src = (Path(__file__).resolve().parents[1] / "api" / "route_approvals.py").read_text(encoding="utf-8")
+    assert "_GATEWAY_ORPHAN_APPROVAL_TTL_SECONDS" in src
+    assert "_gateway_mirror_created_at" in src
+    assert "not live_token and not live_gateway_queue" in src
+    assert "time.time() - created_at" in src
+
+
 class TestGatewayApprovalUnblocking:
     """Unit tests for the gateway queue unblocking mechanism."""
 

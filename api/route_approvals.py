@@ -5,6 +5,7 @@ Extracts approval state, not handlers, by design.
 """
 import queue
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 
@@ -50,6 +51,7 @@ _GATEWAY_MIRROR_TOKEN = "_gateway_mirror_token"
 _GATEWAY_MIRROR_RETAINED = "_gateway_mirror_retained"
 _GATEWAY_ENTRY_DATA_TOKEN_KEY = "_webui_mirror_token"
 _GATEWAY_AGENT_IDENTITY_V1 = "_gateway_agent_identity_v1"
+_GATEWAY_ORPHAN_APPROVAL_TTL_SECONDS = 120.0
 _gateway_relay_owners: dict[tuple[str, str], str] = {}
 _yolo_transition_lock = threading.Lock()
 _yolo_transitions: dict[str, dict] = {}
@@ -297,6 +299,11 @@ def reconcile_gateway_pending_mirror_locked(session_key: str) -> tuple[dict | No
                 matches_live_head = True
 
         if entry_run_id:
+            if not live_token and not live_gateway_queue and entry.get(_GATEWAY_MIRROR_RETAINED):
+                created_at = float(entry.get("_gateway_mirror_created_at") or 0)
+                if created_at and time.time() - created_at >= _GATEWAY_ORPHAN_APPROVAL_TTL_SECONDS:
+                    changed = True
+                    continue
             if matches_live_head and not live_mirror_present:
                 if entry_token != live_token:
                     entry[_GATEWAY_MIRROR_TOKEN] = live_token
@@ -698,6 +705,7 @@ def submit_gateway_pending_mirror(session_key: str, approval: dict) -> tuple[dic
                 mirror_entry[_GATEWAY_MIRROR_FLAG] = True
                 mirror_entry[_GATEWAY_MIRROR_TOKEN] = uuid.uuid4().hex
                 mirror_entry[_GATEWAY_MIRROR_RETAINED] = True
+                mirror_entry["_gateway_mirror_created_at"] = time.time()
                 if not _gateway_pending_mirror_locked(session_key, approval_id=approval_id, run_id=run_id):
                     _normalize_pending_queue_locked(session_key).append(mirror_entry)
         elif not exact_local_entry:
