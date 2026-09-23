@@ -70,6 +70,14 @@ def post(path, body=None):
 
 # ── Unit tests (in-process, no HTTP server needed) ──────────────────────────
 
+def test_empty_approval_poll_forces_card_cleanup():
+    src = (Path(__file__).resolve().parents[1] / "static" / "messages.js").read_text(encoding="utf-8")
+    start = src.index("function _startApprovalFallbackPoll")
+    end = src.index("function stopApprovalPollingForSession", start)
+    body = src[start:end]
+    assert "_hideApprovalCardIfOwner(sid, true)" in body
+
+
 def test_gateway_orphan_mirrors_have_bounded_retention():
     """A retained mirror with no live producer must expire instead of pinning a card."""
     src = (Path(__file__).resolve().parents[1] / "api" / "route_approvals.py").read_text(encoding="utf-8")

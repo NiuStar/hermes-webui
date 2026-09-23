@@ -7970,7 +7970,7 @@ function _startApprovalFallbackPoll(sid) {
         _clearApprovalPendingForSession(sid);
         const _resolvedId = _resolvedEntry && _resolvedEntry.pending && _resolvedEntry.pending.approval_id;
         if (_resolvedId) _unmarkApprovalDismissed(sid, _resolvedId);
-        _hideApprovalCardIfOwner(sid);
+        _hideApprovalCardIfOwner(sid, true);
         if (!S.busy) {
           stopApprovalPollingForSession(sid);
         }
