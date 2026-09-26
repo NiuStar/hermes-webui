@@ -37,6 +37,21 @@
   :root[data-font-size="large"]{--message-body-font-size:16px;--message-code-font-size:14.5px;--message-pre-code-font-size:15px;--message-table-font-size:14px;font-size:16px;}
   :root[data-font-size="xlarge"]{--message-body-font-size:18px;--message-code-font-size:16px;--message-pre-code-font-size:16.5px;--message-table-font-size:16px;font-size:18px;}
 
+  /* Background session inventory stays visible even when the main list is filtered. */
+  .active-session-inventory{padding:8px 10px;border-bottom:1px solid var(--border);font-size:12px;color:var(--muted)}
+  .active-session-inventory[hidden]{display:none}
+  .active-session-inventory-summary{font-weight:600;color:var(--text)}
+  .active-session-inventory-link{display:block;width:100%;padding:5px 7px;margin-top:4px;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text);cursor:pointer}
+  .active-session-inventory-link:hover,.active-session-inventory-link:focus-visible{border-color:var(--accent);background:var(--hover-bg)}
+  .active-session-inventory-ended{margin-top:5px;color:var(--muted)}
+  .active-session-inventory-answer{white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;overflow:auto;padding:8px;margin-top:4px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-family:var(--font-mono)}
+  .app-titlebar-background{flex-shrink:0;-webkit-app-region:no-drag;min-height:28px;padding:3px 9px;border:1px solid var(--border2);border-radius:6px;background:none;color:var(--text);font:inherit;cursor:pointer;white-space:nowrap}
+  .app-titlebar-background:hover,.app-titlebar-background:focus-visible{background:var(--hover-bg);border-color:var(--accent)}
+  .app-titlebar-background[data-state="running"]{border-color:var(--accent)}
+  .app-titlebar-background[data-state="unknown"]{color:var(--muted)}
+  .active-task-count-compact{display:none}
+  @media(max-width:640px){.app-titlebar-background{max-width:105px;overflow:hidden;text-overflow:ellipsis}.app-titlebar-inner{min-width:0}.app-titlebar-title{max-width:100%;overflow:hidden}.app-titlebar-spacer{display:none}.active-task-count-full{display:none}.active-task-count-compact{display:inline;font-variant-numeric:tabular-nums}}
+  @media(max-width:420px){.app-titlebar-background{padding:3px 6px;font-size:11px}.app-titlebar-new-chat,.app-titlebar-spacer{display:none!important}.app-titlebar-profile-label{max-width:42px}}
   /* Sidebar session list */
   :root[data-font-size="small"] .session-item { font-size: 11px; }
   :root[data-font-size="large"] .session-item { font-size: 15px; }

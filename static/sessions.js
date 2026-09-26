@@ -5711,7 +5711,222 @@ async function _drainRenderSessionListQueue(initialRequest){
   }
 }
 
+function _activeSessionInventoryView(model){
+  if(!model || !model.known) return {label:t('active_sessions_unknown'),count:null,entries:[],runningBackground:[],unknownBackground:[],doneBackground:[],auxiliary:[],endedAuxiliary:[],ended:[]};
+  const entries=Array.isArray(model.sessions)?model.sessions:[];
+  const background=Array.isArray(model.background)?model.background:[];
+  const runningBackground=background.filter(row=>row.status==='running');
+  const unknownBackground=background.filter(row=>row.status==='unknown');
+  const doneBackground=background.filter(row=>row.status==='done');
+  // A /background worker has its own session, but is one task, not two.
+  const childIds=new Set(background.map(row=>row.bg_session_id).filter(Boolean));
+  const ordinary=entries.filter(row=>!childIds.has(row.session_id));
+  const auxiliary=Array.isArray(model.auxiliary)?model.auxiliary:[];
+  const count=Number.isInteger(model.count)&&model.count>=0?model.count:null;
+  return {label:count===null?t('active_sessions_unknown'):t('active_sessions_count').replace('{0}', String(count)),count,
+    entries:count===null?[]:ordinary,runningBackground:count===null?[]:runningBackground,
+    unknownBackground:count===null?[]:unknownBackground,doneBackground:count===null?[]:doneBackground,
+    auxiliary:count===null?[]:auxiliary,endedAuxiliary:count===null?[]:(model.endedAuxiliary||[])};
+}
+
+async function openBackgroundRunInventory(){
+  if(typeof switchPanel==='function' && await switchPanel('chat')===false) return;
+  if(typeof _isSidebarCollapsed==='function'&&_isSidebarCollapsed()&&typeof expandSidebar==='function') expandSidebar();
+  if(typeof window!=='undefined'&&window.matchMedia&&window.matchMedia('(max-width: 900px)').matches){
+    const sidebar=document.querySelector('.sidebar');
+    if(sidebar&&!sidebar.classList.contains('mobile-open')&&typeof toggleMobileSidebar==='function') toggleMobileSidebar();
+  }
+  const root=$('activeSessionInventory');
+  if(root&&typeof root.scrollIntoView==='function') root.scrollIntoView({block:'nearest'});
+}
+
+function _renderActiveSessionInventory(model){
+  const root=$('activeSessionInventory');
+  if(!root) return;
+  const view=_activeSessionInventoryView(model);
+  const titlebar=$('backgroundRunCount');
+  if(titlebar){
+    const number=view.count===null?'?':String(view.count);
+    const full=document.createElement('span');
+    full.className='active-task-count-full';
+    full.textContent=t('active_sessions_titlebar').replace('{0}',number);
+    const compact=document.createElement('span');
+    compact.className='active-task-count-compact';
+    compact.textContent=number;
+    titlebar.replaceChildren(full,compact);
+    titlebar.title=view.label;
+    titlebar.setAttribute('aria-label', view.label);
+    titlebar.dataset.state=view.count===null?'unknown':(view.count?'running':'idle');
+  }
+  root.replaceChildren();
+  root.hidden=false;
+  const summary=document.createElement('div');
+  summary.className='active-session-inventory-summary';
+  summary.textContent=view.label;
+  root.appendChild(summary);
+  if(view.count===null){
+    root.replaceChildren(summary);
+    return;
+  }
+  for(const row of view.entries){
+    if(!row||!row.session_id) continue;
+    const link=document.createElement('button');
+    link.type='button';
+    link.className='active-session-inventory-link';
+    link.textContent=String(row.title||row.session_id);
+    link.title=String(row.session_id);
+    link.onclick=()=>{
+      const target={session_id:row.session_id, profile:model.profile, archived:!!row.archived};
+      void _openSidebarSession(target);
+    };
+    root.appendChild(link);
+  }
+  for(const row of view.runningBackground){
+    if(!row||!row.parent_session_id) continue;
+    const link=document.createElement('button');
+    link.type='button';
+    link.className='active-session-inventory-link';
+    link.textContent=t('active_background_running')+' · '+String(row.prompt||row.task_id).slice(0,70);
+    link.title=String(row.task_id);
+    link.onclick=()=>{ void _openSidebarSession({session_id:row.parent_session_id,profile:model.profile}); };
+    root.appendChild(link);
+  }
+  for(const row of view.auxiliary){
+    if(!row||!row.parent_session_id) continue;
+    const link=document.createElement('button');
+    link.type='button';
+    link.className='active-session-inventory-link';
+    link.textContent=t(row.type==='delegation'?'active_delegation_running':'active_process_running')+
+      (row.count>1?' ×'+row.count:'')+' · '+String(row.id);
+    link.onclick=()=>{ void _openSidebarSession({session_id:row.parent_session_id,profile:model.profile}); };
+    root.appendChild(link);
+  }
+  for(const row of [...view.unknownBackground,...view.doneBackground]){
+    if(!row||!row.parent_session_id) continue;
+    const label=document.createElement('div');
+    label.className='active-session-inventory-ended';
+    label.textContent=t(row.status==='done'?'active_background_done':'active_background_unknown');
+    root.appendChild(label);
+    const link=document.createElement('button');
+    link.type='button';
+    link.className='active-session-inventory-link';
+    link.textContent=String(row.prompt||row.task_id).slice(0,70);
+    link.title=String(row.task_id);
+    if(row.status==='done'){
+      link.onclick=async()=>{
+        try{
+          const result=await api('/api/background/status?session_id='+encodeURIComponent(row.parent_session_id)+'&task_id='+encodeURIComponent(row.task_id),{timeoutToast:false});
+          const answer=result&&Array.isArray(result.results)&&result.results[0]&&result.results[0].answer;
+          if(!answer){showToast(t('active_background_result_unavailable'));return;}
+          const detail=document.createElement('pre');
+          detail.className='active-session-inventory-answer';
+          detail.textContent=String(answer);
+          const old=link.nextElementSibling;
+          if(old&&old.classList.contains('active-session-inventory-answer')) old.remove();
+          else link.insertAdjacentElement('afterend',detail);
+        }catch(_){showToast(t('active_background_result_unavailable'));}
+      };
+    }else link.onclick=()=>{ void _openSidebarSession({session_id:row.parent_session_id,profile:model.profile}); };
+    root.appendChild(link);
+  }
+  for(const row of view.endedAuxiliary){
+    if(!row||!row.parent_session_id) continue;
+    const link=document.createElement('button');
+    link.type='button';
+    link.className='active-session-inventory-link';
+    link.textContent=t('active_auxiliary_ended')+' · '+String(row.id);
+    link.onclick=()=>{ void _openSidebarSession({session_id:row.parent_session_id,profile:model.profile}); };
+    root.appendChild(link);
+  }
+  if(model.ended&&model.ended.length){
+    const ended=document.createElement('div');
+    ended.className='active-session-inventory-ended';
+    ended.textContent=t('active_sessions_ended').replace('{0}', String(model.ended.length));
+    root.appendChild(ended);
+    for(const row of model.ended){
+      if(!row||!row.session_id) continue;
+      const link=document.createElement('button');
+      link.type='button';
+      link.className='active-session-inventory-link';
+      link.textContent=String(row.title||row.session_id);
+      link.title=String(row.session_id);
+      link.onclick=()=>{ void _openSidebarSession({session_id:row.session_id,profile:model.profile,archived:!!row.archived}); };
+      root.appendChild(link);
+    }
+  }
+}
+
+let _activeSessionInventoryTimer=null;
+let _activeSessionInventoryInFlight=false;
+let _activeSessionInventoryModel=null;
+async function _refreshActiveSessionInventory(){
+  if(_activeSessionInventoryInFlight) return;
+  _activeSessionInventoryInFlight=true;
+  const expectedProfile=(S&&S.activeProfile)||'default';
+  if(_activeSessionInventoryModel&&_activeSessionInventoryModel.profile!==expectedProfile){
+    _activeSessionInventoryModel=null;
+    _renderActiveSessionInventory(null);
+  }
+  // Preserve the last snapshot for ended-session transitions. Mark a pending
+  // request unknown only when the last successful read has gone stale.
+  const previous=_activeSessionInventoryModel;
+  if(previous&&previous.known&&Date.now()-(previous.checkedAt||0)>15000){
+    _activeSessionInventoryModel={...previous,known:false};
+    _renderActiveSessionInventory(_activeSessionInventoryModel);
+  }
+  try{
+    const data=await api('/api/sessions/active',{timeoutToast:false});
+    if(_activeSessionInventoryModel&&_activeSessionInventoryModel.profile!==expectedProfile) return;
+    if(!data||!(data.count===null||(Number.isInteger(data.count)&&data.count>=0))||!Array.isArray(data.sessions)||
+       !Array.isArray(data.background_tasks)||!Array.isArray(data.auxiliary_tasks)||data.active_profile!==expectedProfile||
+       ((S&&S.activeProfile)||'default')!==expectedProfile){
+      if(((S&&S.activeProfile)||'default')===expectedProfile){
+        _activeSessionInventoryModel={known:false,profile:expectedProfile,sessions:[],ended:[]};
+      }
+      return;
+    }
+    const prior=previous&&previous.profile===expectedProfile?previous:null;
+    const current=new Set(data.sessions.map(row=>row.session_id));
+    const ended=prior
+      ?[...(prior.sessions||[]).filter(row=>!current.has(row.session_id)),
+         ...(prior.ended||[]).filter(row=>!current.has(row.session_id))]
+      :[];
+    const uniqueEnded=[...new Map(ended.map(row=>[row.session_id,row])).values()];
+    const auxiliaryKeys=new Set(data.auxiliary_tasks.map(row=>row.type+':'+row.id));
+    const endedAuxiliary=[...new Map([
+      ...((prior&&prior.auxiliary)||[]).filter(row=>!auxiliaryKeys.has(row.type+':'+row.id)),
+      ...((prior&&prior.endedAuxiliary)||[]).filter(row=>!auxiliaryKeys.has(row.type+':'+row.id)),
+    ].map(row=>[row.type+':'+row.id,row])).values()].slice(-30);
+    _activeSessionInventoryModel={known:true,profile:expectedProfile,checkedAt:Date.now(),count:data.count,sessions:data.sessions,background:data.background_tasks,auxiliary:data.auxiliary_tasks,ended:uniqueEnded,endedAuxiliary};
+  }catch(_){
+    if(((S&&S.activeProfile)||'default')===expectedProfile){
+      _activeSessionInventoryModel={known:false,profile:expectedProfile,sessions:[],ended:[]};
+    }
+  }finally{
+    _activeSessionInventoryInFlight=false;
+    if(((S&&S.activeProfile)||'default')===expectedProfile)
+      _renderActiveSessionInventory(_activeSessionInventoryModel);
+    else {
+      _activeSessionInventoryModel=null;
+      _renderActiveSessionInventory(null);
+      void _refreshActiveSessionInventory();
+    }
+  }
+}
+function _startActiveSessionInventoryPoll(){
+  if(_activeSessionInventoryTimer) return;
+  void _refreshActiveSessionInventory();
+  _activeSessionInventoryTimer=setInterval(()=>{
+    if(typeof document!=='undefined'&&document.hidden) return;
+    void _refreshActiveSessionInventory();
+  },5000);
+  if(typeof document!=='undefined') document.addEventListener('visibilitychange',()=>{
+    if(!document.hidden) void _refreshActiveSessionInventory();
+  });
+}
+
 async function renderSessionList(opts={}){
+  _startActiveSessionInventoryPoll();
   const request={opts:opts||{},gen:++_renderSessionListGen};
   if(_renderSessionListInFlight){
     _renderSessionListQueuedRequest={

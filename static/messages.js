@@ -9384,6 +9384,7 @@ function attachBtwStream(parentSid, streamId, question){
 
 let _bgPollTimers={};
 let _bgActiveTasks=new Set();
+let _bgNotifiedTasks=new Set();
 
 function showBackgroundBadge(taskId){
   _bgActiveTasks.add(taskId);
@@ -9402,25 +9403,34 @@ function hideBackgroundBadge(taskId){
   }
 }
 function startBackgroundPolling(parentSid, taskId, prompt){
-  if(_bgPollTimers[taskId]) return;
+  const key=parentSid+':'+taskId;
+  if(_bgPollTimers[key]||_bgNotifiedTasks.has(key)) return;
+  showBackgroundBadge(key);
   async function _poll(){
     try{
-      const r=await api('/api/background/status?session_id='+encodeURIComponent(parentSid));
+      const r=await api('/api/background/status?session_id='+encodeURIComponent(parentSid)+'&task_id='+encodeURIComponent(taskId));
+      if(_bgNotifiedTasks.has(key)) return;
       if(r&&r.results){
         for(const res of r.results){
           if(res.task_id===taskId){
-            hideBackgroundBadge(taskId);
-            delete _bgPollTimers[taskId];
+            hideBackgroundBadge(key);
+            delete _bgPollTimers[key];
+            _bgNotifiedTasks.add(key);
+            // The status panel owns durable result retrieval. Only append to
+            // the live transcript when this parent is still the visible chat.
             const msg={role:'assistant',content:`**${t('bg_label')}** ${prompt.slice(0,80)}\n\n${res.answer||t('bg_no_answer')}`,'_background':true,_ts:Date.now()/1000};
-            S.messages.push(msg);
-            renderMessages({preserveScroll:true});
-            showToast(t('bg_complete'));
+            if(S.session&&S.session.session_id===parentSid){
+              S.messages.push(msg);
+              renderMessages({preserveScroll:true});
+              showToast(t('bg_complete'));
+            }
             return;
           }
         }
       }
     }catch(_){}
-    _bgPollTimers[taskId]=setTimeout(_poll,3000);
+    if(_bgNotifiedTasks.has(key)) return;
+    _bgPollTimers[key]=setTimeout(_poll,3000);
   }
   _poll();
 }

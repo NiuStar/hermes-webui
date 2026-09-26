@@ -1798,7 +1798,6 @@ async function cmdBackground(args){
     const r=await api('/api/background',{method:'POST',body:JSON.stringify({session_id:activeSid,prompt})});
     if(r&&r.error){showToast(r.error);return;}
     // Show background badge and start polling
-    if(typeof showBackgroundBadge==='function') showBackgroundBadge(r.task_id);
     if(typeof startBackgroundPolling==='function') startBackgroundPolling(activeSid,r.task_id,prompt);
   }catch(e){showToast(t('bg_failed')+e.message);}
 }

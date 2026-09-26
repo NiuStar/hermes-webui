@@ -12707,6 +12707,148 @@ def _stream_runtime_diagnostics() -> dict:
     }
 
 
+def _active_auxiliary_task_inventory(profile: str) -> list[dict]:
+    """Profile-scoped detached subagents and terminal processes.
+
+    Resolve ownership through the originating WebUI session, never the
+    process/delegation count for the entire Hermes instance.
+    """
+    candidates = []
+    try:
+        from tools import async_delegation as delegation
+        with delegation._records_lock:
+            records = [dict(row) for row in delegation._records.values()
+                       if row.get("status") in delegation._LIVE_STATES]
+        for row in records:
+            sid = str(row.get("origin_ui_session_id") or "")
+            if not sid:
+                # CLI/gateway delegations use other identifiers. A WebUI turn
+                # explicitly stamps origin_ui_session_id; never guess ownership.
+                continue
+            indexes = row.get("task_indexes")
+            goals = row.get("goals")
+            count = len(indexes if indexes is not None else goals) if row.get("is_batch") and goals else 1
+            if row.get("is_batch") and not goals:
+                raise RuntimeError("Running delegation batch has no child inventory")
+            if count > 1:
+                with delegation._DB_LOCK, delegation._transaction() as conn:
+                    partial = conn.execute("SELECT result_json FROM async_delegations WHERE delegation_id=?",
+                                           (row.get("delegation_id"),)).fetchone()
+                if partial and partial[0]:
+                    finished = json.loads(partial[0]).get("results") or []
+                    count -= len({item.get("task_index") for item in finished if isinstance(item, dict) and
+                                  isinstance(item.get("task_index"), int) and
+                                  (indexes is None or item["task_index"] in indexes)})
+            if count <= 0:
+                continue
+            candidates.append({"type": "delegation", "id": str(row.get("delegation_id") or ""),
+                               "parent_session_id": sid, "count": count})
+    except Exception:
+        logger.warning("Could not inspect active delegations", exc_info=True)
+        raise
+    try:
+        from tools.process_registry import process_registry
+        for row in process_registry.list_sessions():
+            if row.get("status") != "running":
+                continue
+            process_id = str(row.get("session_id") or "")
+            process = process_registry.get(process_id)
+            if process is None:
+                raise RuntimeError("Active process registry entry unavailable")
+            sid = str(getattr(process, "session_key", "") or "")
+            if not sid or not re.fullmatch(r"[0-9a-f]{12}", sid):
+                continue  # Other platforms' session keys are not WebUI IDs.
+            candidates.append({"type": "process", "id": process_id,
+                               "parent_session_id": sid, "count": 1})
+    except Exception:
+        logger.warning("Could not inspect background processes", exc_info=True)
+        raise
+    visible = []
+    for row in candidates:
+        try:
+            parent = get_session(row["parent_session_id"], metadata_only=True)
+        except (KeyError, FileNotFoundError):
+            raise RuntimeError("Auxiliary task parent session metadata unavailable") from None
+        if not _profiles_match(getattr(parent, "profile", None), profile):
+            continue
+        visible.append(row)
+    return visible
+
+
+def _active_webui_session_inventory(profile: str) -> dict:
+    """Authenticated, profile-scoped view of genuinely live WebUI workers.
+
+    The public /health deliberately omits session identity. Copy registry data
+    under its lock, then resolve session metadata outside it to avoid lock
+    inversion with the session store. Never infer success from a vanished run.
+    """
+    from api import config as _live_config
+
+    with _live_config.ACTIVE_RUNS_LOCK:
+        snapshot = [(str(stream_id), dict(raw)) for stream_id, raw in
+                    (_live_config.ACTIVE_RUNS or {}).items() if isinstance(raw, dict)]
+        invalid_runs = any(not isinstance(raw, dict) for raw in (_live_config.ACTIVE_RUNS or {}).values())
+    if invalid_runs:
+        raise RuntimeError("Active run registry contains unreadable entries")
+    started_by_sid = {}
+    for _stream_id, entry in snapshot:
+        sid = str(entry.get("session_id") or "").strip()
+        if not sid:
+            raise RuntimeError("Active run lacks session identity")
+        try:
+            started = float(entry.get("started_at") or 0)
+        except (TypeError, ValueError):
+            started = 0.0
+        started_by_sid[sid] = min(started_by_sid.get(sid, started), started)
+
+    sessions = []
+    from api.background import background_child_ids
+    background_children = background_child_ids({stream_id for stream_id, _ in snapshot})
+    for sid, started in started_by_sid.items():
+        if sid in background_children:
+            continue
+        try:
+            session = get_session(sid, metadata_only=True)
+        except (KeyError, FileNotFoundError):
+            raise RuntimeError("Active run session metadata unavailable") from None
+        except Exception:
+            logger.warning("Could not resolve running session metadata for inventory", exc_info=True)
+            raise
+        if not _profiles_match(getattr(session, "profile", None), profile):
+            continue
+        title = _redact_text(str(getattr(session, "title", "") or "Untitled"))[:80]
+        sessions.append({
+            "session_id": sid,
+            "title": title,
+            "started_at": started,
+            "archived": bool(getattr(session, "archived", False)),
+        })
+    sessions.sort(key=lambda row: (-row["started_at"], row["session_id"]))
+    from api.background import background_parent_ids, list_background_status
+    parents = set(background_parent_ids({stream_id for stream_id, _ in snapshot}))
+    visible_parents = set()
+    for sid in parents:
+        try:
+            parent = get_session(sid, metadata_only=True)
+            if _profiles_match(getattr(parent, "profile", None), profile):
+                visible_parents.add(sid)
+        except (KeyError, FileNotFoundError):
+            raise RuntimeError("Background parent session metadata unavailable") from None
+        except Exception:
+            logger.warning("Could not resolve background parent metadata", exc_info=True)
+            raise
+    background = list_background_status(visible_parents, {stream_id for stream_id, _ in snapshot})
+    auxiliary = _active_auxiliary_task_inventory(profile)
+    count = (len(sessions) + sum(1 for row in background if row["status"] == "running")
+             + sum(row["count"] for row in auxiliary))
+    # An orphaned /background entry is not proof of completion. Do not report
+    # a definitive zero (or any definitive total) while its liveness is unknown.
+    if any(row["status"] == "unknown" for row in background):
+        count = None
+    return {"count": count, "active_profile": profile,
+            "sessions": sessions, "background_tasks": background, "auxiliary_tasks": auxiliary}
+
+
 def _run_lifecycle_health() -> dict:
     """Return active worker-run state independent of SSE stream presence."""
     # Import the module rather than relying only on imported scalar aliases so
@@ -14499,11 +14641,32 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
 
     if parsed.path == "/api/background/status":
-        sid = parse_qs(parsed.query).get("session_id", [""])[0]
+        qs = parse_qs(parsed.query)
+        sid = qs.get("session_id", [""])[0]
+        task_id = qs.get("task_id", [""])[0]
         if not sid:
             return bad(handler, "Missing session_id")
-        from api.background import get_results
+        from api import profiles as profiles_api
+        try:
+            parent = get_session(sid, metadata_only=True)
+        except (KeyError, FileNotFoundError):
+            return bad(handler, "Session not found", 404)
+        if not _profiles_match(getattr(parent, "profile", None), profiles_api.get_active_profile_name()):
+            return bad(handler, "Session not found", 404)
+        from api.background import get_results, get_task_result
+        if task_id:
+            result = get_task_result(sid, task_id)
+            return j(handler, {"results": [result] if result else []})
         return j(handler, {"results": get_results(sid)})
+
+    if parsed.path == "/api/sessions/active":
+        from api import profiles as profiles_api
+        try:
+            inventory = _active_webui_session_inventory(profiles_api.get_active_profile_name())
+        except Exception:
+            logger.warning("Active task inventory unavailable", exc_info=True)
+            return bad(handler, "Active task status unavailable", 503)
+        return j(handler, inventory, pretty=False)
 
     if parsed.path == "/api/sessions":
         diag = RequestDiagnostics.maybe_start("GET", parsed.path, logger=logger, print_fn=getattr(handler, '_safe_webui_print', None))
