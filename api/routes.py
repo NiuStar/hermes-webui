@@ -12764,13 +12764,23 @@ def _active_auxiliary_task_inventory(profile: str) -> list[dict]:
         logger.warning("Could not inspect background processes", exc_info=True)
         raise
     visible = []
+    parent_titles = {}
     for row in candidates:
-        try:
-            parent = get_session(row["parent_session_id"], metadata_only=True)
-        except (KeyError, FileNotFoundError):
-            raise RuntimeError("Auxiliary task parent session metadata unavailable") from None
-        if not _profiles_match(getattr(parent, "profile", None), profile):
+        sid = row["parent_session_id"]
+        if sid not in parent_titles:
+            try:
+                parent = get_session(sid, metadata_only=True)
+            except (KeyError, FileNotFoundError):
+                raise RuntimeError("Auxiliary task parent session metadata unavailable") from None
+            if not _profiles_match(getattr(parent, "profile", None), profile):
+                parent_titles[sid] = None
+            else:
+                title = _redact_text(str(getattr(parent, "title", "") or "").strip())
+                parent_titles[sid] = title[:5] if title and title != "Untitled" else ""
+        if parent_titles[sid] is None:
             continue
+        if parent_titles[sid]:
+            row["parent_title_prefix"] = parent_titles[sid]
         visible.append(row)
     return visible
 

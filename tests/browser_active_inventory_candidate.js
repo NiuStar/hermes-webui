@@ -42,6 +42,11 @@ const js = source.slice(start, end);
       assert(await page.evaluate(()=>window.panelSwitched),`${width}: chat panel not selected`);
       if(width<=640)assert(await page.locator('.sidebar').evaluate(el=>el.classList.contains('mobile-open')),`${width}: mobile drawer not opened`);
       assert((await page.locator('#activeSessionInventory button').count())>=2,`${width}: detail not rendered`);
+      await page.evaluate(()=>_renderActiveSessionInventory({known:true,profile:'default',count:2,sessions:[],background:[],auxiliary:[
+        {type:'delegation',id:'d1',parent_session_id:'here',count:1,parent_title_prefix:'系统架构设'},
+        {type:'process',id:'p1',parent_session_id:'here',count:1,parent_title_prefix:'需求分析复'}],ended:[]}));
+      assert.deepStrictEqual(await page.locator('#activeSessionInventory button').allTextContents(),
+        ['系统架构设 · 子代理运行中 · d1','需求分析复 · 进程运行中 · p1'],`${width}: parent theme missing`);
       await page.evaluate(()=>_renderActiveSessionInventory({known:false,profile:'default'}));
       assert((await button.innerText()).includes('?'),`${width}: unknown became zero`);
       assert.equal(await page.locator('#activeSessionInventory button').count(),0,`${width}: stale entries stayed visible`);

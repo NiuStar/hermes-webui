@@ -5796,7 +5796,8 @@ function _renderActiveSessionInventory(model){
     const link=document.createElement('button');
     link.type='button';
     link.className='active-session-inventory-link';
-    link.textContent=t(row.type==='delegation'?'active_delegation_running':'active_process_running')+
+    link.textContent=(row.parent_title_prefix?String(row.parent_title_prefix)+' · ':'')+
+      t(row.type==='delegation'?'active_delegation_running':'active_process_running')+
       (row.count>1?' ×'+row.count:'')+' · '+String(row.id);
     link.onclick=()=>{ void _openSidebarSession({session_id:row.parent_session_id,profile:model.profile}); };
     root.appendChild(link);

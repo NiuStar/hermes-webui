@@ -8,8 +8,8 @@ def test_auxiliary_tasks_profile_scoped_and_batch_count(monkeypatch):
     from tools import async_delegation as delegation
     from tools import process_registry as processes
     rows = {
-        "aaaaaaaaaaaa": SimpleNamespace(profile="default"),
-        "bbbbbbbbbbbb": SimpleNamespace(profile="other"),
+        "aaaaaaaaaaaa": SimpleNamespace(profile="default", title="WebUI 后台任务"),
+        "bbbbbbbbbbbb": SimpleNamespace(profile="other", title="Private task"),
     }
     monkeypatch.setattr(routes, "get_session", lambda sid, **kw: rows[sid])
     from contextlib import nullcontext
@@ -31,8 +31,8 @@ def test_auxiliary_tasks_profile_scoped_and_batch_count(monkeypatch):
     monkeypatch.setattr(processes, "process_registry", fake)
     inventory=routes._active_auxiliary_task_inventory("default")
     assert inventory == [
-        {"type":"delegation","id":"batch","parent_session_id":"aaaaaaaaaaaa","count":2},
-        {"type":"process","id":"proc-a","parent_session_id":"aaaaaaaaaaaa","count":1},
+        {"type":"delegation","id":"batch","parent_session_id":"aaaaaaaaaaaa","count":2,"parent_title_prefix":"WebUI"},
+        {"type":"process","id":"proc-a","parent_session_id":"aaaaaaaaaaaa","count":1,"parent_title_prefix":"WebUI"},
     ]
 
 
@@ -61,3 +61,47 @@ def test_missing_running_process_record_is_not_a_false_zero(monkeypatch):
         list_sessions=lambda: [{"session_id": "proc", "status": "running"}], get=lambda _id: None))
     with pytest.raises(RuntimeError, match="registry entry unavailable"):
         routes._active_auxiliary_task_inventory("default")
+
+
+def test_auxiliary_inventory_uses_scoped_parent_title_prefix(monkeypatch):
+    from api import routes
+    from tools import async_delegation as delegation
+    from tools import process_registry as processes
+
+    parent = "aaaaaaaaaaaa"
+    foreign = "bbbbbbbbbbbb"
+    monkeypatch.setattr(routes, "get_session", lambda sid, **kw: {
+        parent: SimpleNamespace(profile="default", title="系统架构设计复核任务"),
+        foreign: SimpleNamespace(profile="other", title="私人项目保密主题"),
+    }[sid])
+    monkeypatch.setattr(routes, "_redact_text", lambda text, **kw: text)
+    monkeypatch.setattr(delegation, "_records", {
+        "d1": {"status": "running", "delegation_id": "d1", "origin_ui_session_id": parent},
+        "d2": {"status": "running", "delegation_id": "d2", "origin_ui_session_id": foreign},
+    })
+    monkeypatch.setattr(processes, "process_registry", SimpleNamespace(
+        list_sessions=lambda: [{"session_id": "p1", "status": "running"}],
+        get=lambda _id: SimpleNamespace(session_key=parent),
+    ))
+    assert routes._active_auxiliary_task_inventory("default") == [
+        {"type": "delegation", "id": "d1", "parent_session_id": parent,
+         "count": 1, "parent_title_prefix": "系统架构设"},
+        {"type": "process", "id": "p1", "parent_session_id": parent,
+         "count": 1, "parent_title_prefix": "系统架构设"},
+    ]
+
+
+def test_auxiliary_inventory_does_not_invent_prefix_without_title(monkeypatch):
+    from api import routes
+    from tools import async_delegation as delegation
+    from tools import process_registry as processes
+
+    monkeypatch.setattr(routes, "get_session", lambda sid, **kw: SimpleNamespace(
+        profile="default", title="Untitled"))
+    monkeypatch.setattr(delegation, "_records", {
+        "d1": {"status": "running", "delegation_id": "d1", "origin_ui_session_id": "aaaaaaaaaaaa"},
+    })
+    monkeypatch.setattr(processes, "process_registry", SimpleNamespace(list_sessions=lambda: []))
+    assert routes._active_auxiliary_task_inventory("default") == [
+        {"type": "delegation", "id": "d1", "parent_session_id": "aaaaaaaaaaaa", "count": 1},
+    ]
