@@ -71,7 +71,7 @@ def test_normalize_settings_rejects_unknown_or_unconfigured_channels(notificatio
 def test_send_completion_is_idempotent_and_uses_bounded_preview(notifications, monkeypatch):
     sent = []
     credential = "sk-" + "abcdefghijklmnop"
-    monkeypatch.setattr(notifications, "_send_via_hermes", lambda channel, message, home=None: sent.append((channel, message, home)) or {"success": True, "message_id": "m"})
+    monkeypatch.setattr(notifications, "_run_feishu_card_process", lambda card, home: sent.append(("feishu", card, home)) or {"success": True, "message_id": "m"})
     settings = {
         "completion_notifications_enabled": True,
         "completion_notification_channels": ["feishu"],
@@ -94,13 +94,14 @@ def test_send_completion_is_idempotent_and_uses_bounded_preview(notifications, m
     assert result1["sent"] == ["feishu"]
     assert result2["sent"] == []
     assert len(sent) == 1
-    message = sent[0][1]
-    assert len(message) <= 500
-    assert message.startswith("Hermes 回复完成\n会话：生产验收 会话 sk-abc...mnop\n结论摘要：部署成功，所有检查通过。 API_KEY=***")
-    assert "session-1" not in message
-    assert "super-secret-value" not in message
-    assert "abcdefghijklmnop" not in message
-    assert "\n会话\n" not in message
+    card = sent[0][1]
+    message = card["elements"][0]["content"]
+    assert len(message) < 550
+    assert r"生产验收 会话 sk\-abc\.\.\.mnop" in message
+    assert "部署成功，所有检查通过。 API\\_KEY=\\*\\*\\*" in message
+    assert "session-1" not in repr(card)
+    assert "super-secret-value" not in repr(card)
+    assert "abcdefghijklmnop" not in repr(card)
 
 
 def test_completion_counts_are_for_this_session_only(notifications, monkeypatch):
@@ -116,15 +117,14 @@ def test_completion_counts_are_for_this_session_only(notifications, monkeypatch)
     ])
     monkeypatch.setattr("api.profiles.get_hermes_home_for_profile", lambda name: home)
     sent = []
-    monkeypatch.setattr(notifications, "_send_via_hermes", lambda channel, text, profile_home: sent.append(text) or {"success": True})
+    monkeypatch.setattr(notifications, "_run_feishu_card_process", lambda card, profile_home: sent.append(card) or {"success": True, "message_id": "m"})
     result = notifications.send_completion(
         {"completion_notifications_enabled": True, "completion_notification_channels": ["feishu"]},
         session_id="session-1", stream_id="stream-1", title="主题", text="完成", hermes_home=home,
     )
     assert result["sent"] == ["feishu"]
-    assert "当前会话正在进行中子代理数量：2" in sent[0]
-    assert "后台进程数量：1" in sent[0]
-    assert "9" not in sent[0]
+    assert "子代理 2 · 后台进程 1" in sent[0]["elements"][0]["content"]
+    assert "9" not in repr(sent[0])
 
 
 def test_completion_inventory_failure_never_reports_false_zero(notifications, monkeypatch):
@@ -132,13 +132,12 @@ def test_completion_inventory_failure_never_reports_false_zero(notifications, mo
 
     monkeypatch.setattr(routes, "get_session", lambda sid, **kw: (_ for _ in ()).throw(RuntimeError("inventory unavailable")))
     sent = []
-    monkeypatch.setattr(notifications, "_send_via_hermes", lambda channel, text, home: sent.append(text) or {"success": True})
+    monkeypatch.setattr(notifications, "_run_feishu_card_process", lambda card, home: sent.append(card) or {"success": True, "message_id": "m"})
     notifications.send_completion(
         {"completion_notifications_enabled": True, "completion_notification_channels": ["feishu"]},
         session_id="session-1", stream_id="stream-2", title="主题", text="完成",
     )
-    assert "当前会话正在进行中子代理数量：未知" in sent[0]
-    assert "后台进程数量：未知" in sent[0]
+    assert "子代理 未知 · 后台进程 未知" in sent[0]["elements"][0]["content"]
 
 
 def test_completion_counts_reject_mismatched_profile_home(notifications, monkeypatch, tmp_path):
@@ -158,6 +157,133 @@ def test_completion_preview_reserves_space_for_counts(notifications):
     assert len(message) <= 500
     assert "当前会话正在进行中子代理数量：3" in message
     assert "后台进程数量：4" in message
+
+
+def test_feishu_card_has_hierarchy_and_safe_session_link(notifications, monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_PUBLIC_URL", "https://10.126.126.10:8787/")
+    card = notifications._feishu_completion_card("A **title**", "结论\n第二行", (2, 3), "session-1")
+    assert card["header"]["title"]["content"] == "Hermes · 回复完成"
+    assert card["header"]["template"] == "blue"
+    body = card["elements"][0]["content"]
+    assert r"A \*\*title\*\*" in body and "子代理 2 · 后台进程 3" in body
+    assert "通知生成时" in body
+    assert card["elements"][1]["actions"][0]["url"] == "https://10.126.126.10:8787/session/session-1"
+
+
+def test_feishu_card_rejects_untrusted_link_and_redacts_content(notifications, monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_PUBLIC_URL", "https://attacker.example/?token=secret")
+    card = notifications._feishu_completion_card("A", "API_KEY=secret-value", None, "session-1")
+    assert len(card["elements"]) == 1
+    assert "secret-value" not in repr(card)
+    assert "未知" in card["elements"][0]["content"]
+
+
+def test_feishu_card_invalid_port_does_not_block_delivery(notifications, monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_PUBLIC_URL", "http://10.126.126.10:bad")
+    card = notifications._feishu_completion_card("test", "done", (0, 0), "session-1")
+    assert len(card["elements"]) == 1
+
+
+def test_feishu_card_supports_explicit_private_webui_origin(notifications, monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_PUBLIC_URL", "http://10.126.126.10:8787")
+    card = notifications._feishu_completion_card("标题", "完成", None, "session-1")
+    assert card["elements"][1]["actions"][0]["url"] == "http://10.126.126.10:8787/session/session-1"
+    monkeypatch.setenv("HERMES_WEBUI_PUBLIC_URL", "http://public.example:8787")
+    assert len(notifications._feishu_completion_card("标题", "完成", None, "session-1")["elements"]) == 1
+
+
+def test_feishu_card_url_cannot_use_credential_or_ipv4_mapped_loopback(notifications, monkeypatch):
+    for origin in ("https://safe.example@evil.example", "http://[::ffff:127.0.0.1]:8787", "https://evil.example/path", "https://[broken", "https://good.example:bad"):
+        monkeypatch.setenv("HERMES_WEBUI_PUBLIC_URL", origin)
+        assert len(notifications._feishu_completion_card("标题", "完成", None, "session-1")["elements"]) == 1
+
+
+def test_feishu_card_rejection_falls_back_once_to_text(notifications, monkeypatch):
+    calls = []
+    monkeypatch.setattr(notifications, "_run_feishu_card_process", lambda card, home: calls.append("card") or {"card_rejected": True})
+    monkeypatch.setattr(notifications, "_send_via_hermes", lambda channel, text, home: calls.append((channel, text)) or {"success": True})
+    result = notifications._send_feishu_completion("Title", "Done", (0, 1), "session-1", None)
+    assert result["success"] is True
+    assert calls[0] == "card" and calls[1][0] == "feishu"
+    assert "运行中  子代理 0 · 后台进程 1" in calls[1][1]
+
+
+@pytest.mark.parametrize("code", [230001, 230011, 230013, 99991663, None])
+def test_feishu_non_card_specific_rejection_never_sends_again(notifications, monkeypatch, code):
+    monkeypatch.setattr(notifications, "_run_feishu_card_process", lambda card, home: {"rejected": True, "code": code})
+    monkeypatch.setattr(notifications, "_send_via_hermes", lambda *args: pytest.fail("non-card failure resent as text"))
+    with pytest.raises(notifications._DeliveryFailure):
+        notifications._send_feishu_completion("Title", "Done", None, "session-1", None)
+
+
+def test_feishu_card_uncertain_error_does_not_duplicate_fallback(notifications, monkeypatch):
+    monkeypatch.setattr(notifications, "_run_feishu_card_process", lambda card, home: {"error": "timeout"})
+    monkeypatch.setattr(notifications, "_send_via_hermes", lambda *args: pytest.fail("uncertain card retried as text"))
+    with pytest.raises(notifications._DeliveryFailure):
+        notifications._send_feishu_completion("Title", "Done", None, "session-1", None)
+
+
+def test_feishu_card_sender_subprocess_reads_only_feishu_environment(notifications, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-leak")
+    recorded = []
+
+    def run(command, **kwargs):
+        recorded.append((command, kwargs))
+        return SimpleNamespace(stdout=notifications._SENDER_MARKER + json.dumps({"success": True, "message_id": "om_test"}) + "\n")
+
+    monkeypatch.setattr(notifications.subprocess, "run", run)
+    result = notifications._run_feishu_card_process({"header": {"title": "safe"}}, None)
+    assert result == {"success": True, "message_id": "om_test"}
+    command, kwargs = recorded[0]
+    assert command[1] == "-I" and "OPENAI_API_KEY" not in kwargs["env"]
+    assert json.loads(kwargs["input"])["header"]["title"] == "safe"
+
+
+def test_feishu_card_sender_executes_isolated_adapter_contract(notifications, monkeypatch, tmp_path):
+    root = tmp_path / "agent"
+    for parts in [("tools",), ("gateway",), ("plugins",), ("plugins", "platforms"), ("plugins", "platforms", "feishu")]:
+        folder = root.joinpath(*parts)
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "__init__.py").write_text("", encoding="utf-8")
+    (root / "tools" / "send_message_tool.py").write_text(
+        "def _resolve_platform_config(name, config): return ('feishu', object(), None, None)\n"
+        "def _home_chat_id(config, platform, name): return ('oc_fake', None)\n", encoding="utf-8",
+    )
+    (root / "gateway" / "config.py").write_text(
+        "class Platform: FEISHU='feishu'\n"
+        "def load_gateway_config(): return object()\n", encoding="utf-8",
+    )
+    (root / "plugins" / "platforms" / "feishu" / "adapter.py").write_text(
+        "import json\n"
+        "def _sdk_domain(name): return name\n"
+        "def _load_lark_oapi(): return True\n"
+        "class FeishuAdapter:\n"
+        " def __init__(self, config): self._domain_name='feishu'\n"
+        " def _build_lark_client(self, domain): return object()\n"
+        " async def _send_raw_message(self, **kw):\n"
+        "  from types import SimpleNamespace\n"
+        "  assert kw['chat_id']=='oc_fake' and kw['msg_type']=='interactive'\n"
+        "  assert json.loads(kw['payload'])['header']['title']['content']=='Hermes · 回复完成'\n"
+        "  return SimpleNamespace(success=lambda: True, data=SimpleNamespace(message_id='om_fake'))\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(notifications, "_sender_environment", lambda channel, home: ({"PATH": os.environ["PATH"]}, root))
+    result = notifications._run_feishu_card_process(notifications._feishu_completion_card("标题", "完成", (2, 3), "sid"), None)
+    assert result == {"success": True, "message_id": "om_fake"}
+
+
+def test_feishu_card_send_to_same_profile_uses_only_one_channel_claim(notifications, monkeypatch):
+    sent = []
+    monkeypatch.setattr(notifications, "_run_feishu_card_process", lambda card, home: sent.append("card") or {"success": True, "message_id": "om_test"})
+    monkeypatch.setattr(notifications, "_send_via_hermes", lambda *args: pytest.fail("duplicate plain text"))
+    settings = {"completion_notifications_enabled": True, "completion_notification_channels": ["browser", "feishu"]}
+    first = notifications.send_completion(settings, session_id="one", stream_id="one", title="标题", text="完成")
+    second = notifications.send_completion(settings, session_id="one", stream_id="one", title="标题", text="完成")
+    assert first == {"sent": ["feishu"], "failed": []}
+    assert second == {"sent": [], "failed": []}
+    assert sent == ["card"]
 
 
 def test_completion_text_has_safe_fallbacks_and_hard_total_limit(notifications):

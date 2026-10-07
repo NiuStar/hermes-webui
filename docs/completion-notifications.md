@@ -27,6 +27,20 @@ sending, control characters are folded, and the complete message is capped at
 500 characters. Session IDs, full transcripts, credentials, access tokens, and
 platform target IDs are not sent.
 
+Feishu completion notices use a native Feishu card with a quiet blue header,
+bounded redacted conclusion, and a compact snapshot of running subagents and
+background processes. Only an explicit Feishu `230099` (card-content creation
+failure) falls back to a compact text notice; permissions, rate limits, a
+timeout or any other uncertain outcome never trigger a second send. Other
+channels keep their existing text format. If an operator sets
+`HERMES_WEBUI_PUBLIC_URL` to the actual WebUI origin (HTTPS, or HTTP on a private
+address), the card adds an **Open session** link. Without that explicit origin,
+the link is omitted; it is never inferred from request headers. The configured
+origin must be reachable from the recipient's device; invalid origins omit
+the button without suppressing the notification. The production compose file
+can be prepared with the origin while the running container remains unchanged
+until the operator explicitly recreates it.
+
 ## Delivery Contract
 
 The server dispatches after the session save and completion journal event. Each

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import ipaddress
 import importlib.util
 import logging
 import os
@@ -19,6 +20,7 @@ import threading
 import unicodedata
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import quote, urlsplit
 
 from api.config import STATE_DIR, _AGENT_DIR
 
@@ -348,6 +350,96 @@ def _completion_text(title: str, text: str, counts: tuple[int, int] | None = Non
     return prefix + _bounded(safe_conclusion, max(0, _MAX_PREVIEW_CHARS - len(prefix) - len(suffix))) + suffix
 
 
+def _feishu_completion_card(title: str, text: str, counts: tuple[int, int] | None, session_id: str) -> dict[str, Any]:
+    """Keep the card's preview subject to the same redaction and size bound as text."""
+    # Reuse the already bounded, redacted text; never put raw assistant output in a card.
+    lines = _completion_text(title, text, counts).splitlines()
+    safe_title = lines[1].removeprefix("会话：")
+    preview = lines[2].removeprefix("结论摘要：")
+    # Card markdown must not interpret model output as links, mentions or formatting.
+    def escape(value: str) -> str:
+        return re.sub(r"([\\`*_{}\[\]()#+.!|<>~-])", r"\\\1", value)
+
+    running = f"子代理 {counts[0] if counts is not None else '未知'} · 后台进程 {counts[1] if counts is not None else '未知'}"
+    body = f"**会话**  {escape(safe_title)}\n\n**结论摘要**\n{escape(preview)}\n\n**运行中**  {running}\n\n*数量为通知生成时的快照*"
+    card: dict[str, Any] = {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "blue", "title": {"tag": "plain_text", "content": "Hermes · 回复完成"}},
+        "elements": [{"tag": "markdown", "content": body}],
+    }
+    base = os.environ.get("HERMES_WEBUI_PUBLIC_URL", "").strip()
+    # An operator-controlled origin only. Malformed link configuration must not
+    # prevent the notification itself from being sent.
+    try:
+        parsed = urlsplit(base)
+        host_ip = ipaddress.ip_address(parsed.hostname or "")
+        parsed.port  # validates a malformed or out-of-range explicit port
+        local_host = host_ip.is_private and not getattr(host_ip, "ipv4_mapped", None)
+    except ValueError:
+        parsed = urlsplit("")
+        local_host = False
+    if (parsed.scheme == "https" or parsed.scheme == "http" and local_host) and parsed.netloc and not parsed.username and not parsed.password and not parsed.path.strip("/") and not parsed.query and not parsed.fragment and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", session_id):
+        link = f"{parsed.scheme}://{parsed.netloc}/session/{quote(session_id, safe='')}"
+        card["elements"].append({"tag": "action", "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "打开会话"}, "type": "default", "url": link}]})
+    return card
+
+
+def _feishu_completion_text(title: str, text: str, counts: tuple[int, int] | None) -> str:
+    """Compact non-card fallback with the same bounded, redacted data."""
+    lines = _completion_text(title, text, counts).splitlines()
+    return (f"Hermes · 回复完成\n会话  {lines[1].removeprefix('会话：')}\n\n"
+            f"结论摘要\n{lines[2].removeprefix('结论摘要：')}\n\n"
+            f"运行中  子代理 {counts[0] if counts is not None else '未知'} · 后台进程 {counts[1] if counts is not None else '未知'}\n"
+            "数量为通知生成时的快照")
+
+
+def _run_feishu_card_process(card: dict[str, Any], hermes_home: str | Path | None) -> dict[str, Any]:
+    """Use the official Hermes Feishu adapter and its configured home channel."""
+    env, agent_root = _sender_environment("feishu", hermes_home)
+    script = (
+        "import asyncio,json,sys\n"
+        "sys.path.insert(0,sys.argv[1])\n"
+        "from tools.send_message_tool import _resolve_platform_config,_home_chat_id\n"
+        "from gateway.config import load_gateway_config,Platform\n"
+        "from plugins.platforms.feishu.adapter import FeishuAdapter,_sdk_domain,_load_lark_oapi\n"
+        "async def send(card):\n"
+        " c=load_gateway_config(); p,pc,_,err=_resolve_platform_config('feishu',c)\n"
+        " if err: return {'error':'platform unavailable'}\n"
+        " chat,err=_home_chat_id(c,Platform.FEISHU,'feishu')\n"
+        " if err or not chat: return {'error':'home channel unavailable'}\n"
+        " if not _load_lark_oapi(): return {'error':'SDK unavailable'}\n"
+        " a=FeishuAdapter(pc); a._client=a._build_lark_client(_sdk_domain(a._domain_name))\n"
+        " r=await a._send_raw_message(chat_id=chat,msg_type='interactive',payload=json.dumps(card,ensure_ascii=False),reply_to=None,metadata=None)\n"
+        " if not r: return {'error':'no response'}\n"
+        " if r.success():\n"
+        "  mid=getattr(getattr(r,'data',None),'message_id',None)\n"
+        "  return {'success':True,'message_id':mid} if mid else {'error':'missing message id'}\n"
+        " code=getattr(r,'code',None)\n"
+        " return {'card_rejected':True} if code==230099 else {'error':'card send failed'}\n"
+        f"print({_SENDER_MARKER!r}+json.dumps(asyncio.run(send(json.loads(input())))))\n"
+    )
+    try:
+        completed = subprocess.run([sys.executable, "-I", "-c", script, str(agent_root.resolve())], input=json.dumps(card, ensure_ascii=False) + "\n", text=True, capture_output=True, timeout=45, env=env, cwd=agent_root, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return {"error": "card sender unavailable"}
+    for line in reversed(completed.stdout.splitlines()):
+        if line.startswith(_SENDER_MARKER):
+            try:
+                return json.loads(line[len(_SENDER_MARKER):])
+            except ValueError:
+                break
+    return {"error": "card sender returned no result"}
+
+
+def _send_feishu_completion(title: str, text: str, counts: tuple[int, int] | None, session_id: str, hermes_home: str | Path | None) -> dict[str, Any]:
+    result = _run_feishu_card_process(_feishu_completion_card(title, text, counts, session_id), hermes_home)
+    if result.get("success") is True and result.get("message_id"):
+        return result
+    if result.get("card_rejected") is True:
+        return _send_via_hermes("feishu", _feishu_completion_text(title, text, counts), hermes_home)
+    raise _DeliveryFailure("Feishu card outcome uncertain")
+
+
 class _DeliveryFailure(RuntimeError):
     def __init__(self, message: str, *, retry_after: float | None = None):
         super().__init__(message)
@@ -434,11 +526,15 @@ def send_completion(settings: dict[str, Any], *, session_id: str, stream_id: str
     if not normalized["completion_notifications_enabled"]:
         return {"sent": [], "skipped": "disabled"}
     key = f"{str(session_id).strip()}:{str(stream_id).strip()}"
-    message = _completion_text(title, text, _session_auxiliary_counts(session_id, hermes_home))
+    counts = _session_auxiliary_counts(session_id, hermes_home)
+    message = _completion_text(title, text, counts)
     result: dict[str, Any] = {"sent": [], "failed": []}
     for channel in _claimable_channels(key, normalized["completion_notification_channels"], hermes_home):
         try:
-            _send_via_hermes(channel, message, hermes_home)
+            if channel == "feishu":
+                _send_feishu_completion(title, text, counts, session_id, hermes_home)
+            else:
+                _send_via_hermes(channel, message, hermes_home)
             _mark_sent(key, channel, hermes_home)
             result["sent"].append(channel)
         except Exception as exc:  # delivery failure must not break the chat turn
