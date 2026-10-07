@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import importlib.util
 import logging
 import os
 import re
@@ -144,7 +145,13 @@ def _configuration_source(source: Mapping[str, str] | None = None) -> tuple[dict
     return env, _agent_root(env)
 
 
-def _platform_configured(channel: str, source: Mapping[str, str] | None = None) -> bool:
+def _sender_dependency_ready(channel: str) -> bool:
+    return channel != "feishu" or importlib.util.find_spec("lark_oapi") is not None
+
+
+def _platform_configured(channel: str, source: Mapping[str, str] | None = None, *, require_sender: bool = True) -> bool:
+    if require_sender and not _sender_dependency_ready(channel):
+        return False
     env, agent_root = _configuration_source(source)
     if not (agent_root / "tools" / "send_message_tool.py").is_file():
         return False
@@ -291,7 +298,30 @@ def _mark_sent(key: str, channel: str, hermes_home: str | Path | None = None) ->
         _set_claim_sent(key, channel, hermes_home)
 
 
-def _completion_text(title: str, text: str) -> str:
+def _session_auxiliary_counts(session_id: str, hermes_home: str | Path | None = None) -> tuple[int, int] | None:
+    """Count only this session's live child tasks using the sidebar's inventory."""
+    try:
+        from api import routes
+        from api.profiles import get_hermes_home_for_profile
+
+        session = routes.get_session(session_id, metadata_only=True)
+        profile = str(getattr(session, "profile", None) or "default")
+        expected_home = get_hermes_home_for_profile(profile).resolve()
+        requested_home = (Path(hermes_home).expanduser() if hermes_home is not None else _hermes_home()).resolve()
+        if expected_home != requested_home:
+            raise RuntimeError("Completion notification profile ownership mismatch")
+        entries = routes._active_auxiliary_task_inventory(profile, session_id)
+        relevant = [row for row in entries if row.get("parent_session_id") == session_id]
+        return (
+            sum(row["count"] for row in relevant if row.get("type") == "delegation"),
+            sum(row["count"] for row in relevant if row.get("type") == "process"),
+        )
+    except Exception:
+        logger.warning("Could not inspect active auxiliary tasks for completion notice", exc_info=False)
+        return None
+
+
+def _completion_text(title: str, text: str, counts: tuple[int, int] | None = None) -> str:
     """Build a bounded, redacted completion notice with useful context."""
     from api.helpers import _redact_fn_uncached
 
@@ -312,8 +342,10 @@ def _completion_text(title: str, text: str) -> str:
 
     safe_title = _bounded(_single_line(title, "未命名会话", input_limit=512), 80)
     safe_conclusion = _single_line(text, "已完成，请返回 WebUI 查看结果。", input_limit=2000)
-    prefix = f"Hermes 回复完成\n会话：{safe_title}\n输出结论："
-    return prefix + _bounded(safe_conclusion, max(0, _MAX_PREVIEW_CHARS - len(prefix)))
+    prefix = f"Hermes 回复完成\n会话：{safe_title}\n结论摘要："
+    suffix = (f"\n通知生成时当前会话正在进行中子代理数量：{counts[0] if counts is not None else '未知'}"
+              f"\n后台进程数量：{counts[1] if counts is not None else '未知'}")
+    return prefix + _bounded(safe_conclusion, max(0, _MAX_PREVIEW_CHARS - len(prefix) - len(suffix))) + suffix
 
 
 class _DeliveryFailure(RuntimeError):
@@ -402,7 +434,7 @@ def send_completion(settings: dict[str, Any], *, session_id: str, stream_id: str
     if not normalized["completion_notifications_enabled"]:
         return {"sent": [], "skipped": "disabled"}
     key = f"{str(session_id).strip()}:{str(stream_id).strip()}"
-    message = _completion_text(title, text)
+    message = _completion_text(title, text, _session_auxiliary_counts(session_id, hermes_home))
     result: dict[str, Any] = {"sent": [], "failed": []}
     for channel in _claimable_channels(key, normalized["completion_notification_channels"], hermes_home):
         try:

@@ -12707,7 +12707,7 @@ def _stream_runtime_diagnostics() -> dict:
     }
 
 
-def _active_auxiliary_task_inventory(profile: str) -> list[dict]:
+def _active_auxiliary_task_inventory(profile: str, session_id: str | None = None) -> list[dict]:
     """Profile-scoped detached subagents and terminal processes.
 
     Resolve ownership through the originating WebUI session, never the
@@ -12721,7 +12721,7 @@ def _active_auxiliary_task_inventory(profile: str) -> list[dict]:
                        if row.get("status") in delegation._LIVE_STATES]
         for row in records:
             sid = str(row.get("origin_ui_session_id") or "")
-            if not sid:
+            if not sid or (session_id is not None and sid != session_id):
                 # CLI/gateway delegations use other identifiers. A WebUI turn
                 # explicitly stamps origin_ui_session_id; never guess ownership.
                 continue
@@ -12758,6 +12758,8 @@ def _active_auxiliary_task_inventory(profile: str) -> list[dict]:
             sid = str(getattr(process, "session_key", "") or "")
             if not sid or not re.fullmatch(r"[0-9a-f]{12}", sid):
                 continue  # Other platforms' session keys are not WebUI IDs.
+            if session_id is not None and sid != session_id:
+                continue
             candidates.append({"type": "process", "id": process_id,
                                "parent_session_id": sid, "count": 1})
     except Exception:

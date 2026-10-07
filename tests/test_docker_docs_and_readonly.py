@@ -345,6 +345,72 @@ def test_docker_init_uses_editable_install():
         )
 
 
+def test_docker_init_recovers_optional_feishu_sender_dependency_on_fast_restart():
+    """An existing WebUI venv must not silently lack Feishu's send SDK."""
+    src = (REPO / "docker_init.bash").read_text(encoding="utf-8")
+    assert 'ensure_feishu_sender_dependency()' in src
+    assert 'uv pip install "lark-oapi==1.6.8"' in src
+    assert '/app/venv/bin/python3 -c "import lark_oapi"' in src
+    assert src.index('ensure_feishu_sender_dependency\n') > src.index('if [ -f /app/venv/.deps_installed ]; then')
+    helper = (REPO / 'scripts' / 'feishu_sender_required.py')
+    assert helper.is_file()
+    assert 'scripts/feishu_sender_required.py' in src
+    assert 'profiles' in helper.read_text(encoding='utf-8')
+
+
+def test_feishu_sender_dependency_probe_reads_default_and_named_profiles(tmp_path, monkeypatch):
+    from scripts.feishu_sender_required import main
+
+    home = tmp_path / 'hermes-home'
+    home.mkdir()
+    agent_root = tmp_path / 'agent'
+    (agent_root / 'tools').mkdir(parents=True)
+    (agent_root / 'tools' / 'send_message_tool.py').write_text('# fixture\n')
+    monkeypatch.setenv('HERMES_HOME', str(home))
+    monkeypatch.setenv('HERMES_WEBUI_AGENT_DIR', str(agent_root))
+    for name in ('FEISHU_APP_ID', 'FEISHU_APP_SECRET', 'FEISHU_HOME_CHANNEL'):
+        monkeypatch.delenv(name, raising=False)
+    assert main() == 1
+    monkeypatch.setenv('FEISHU_APP_ID', 'app')
+    monkeypatch.setenv('FEISHU_APP_SECRET', 'secret')
+    monkeypatch.setenv('FEISHU_HOME_CHANNEL', 'oc_example')
+    assert main() == 0
+    for name in ('FEISHU_APP_ID', 'FEISHU_APP_SECRET', 'FEISHU_HOME_CHANNEL'):
+        monkeypatch.delenv(name)
+    named = home / 'profiles' / 'review'
+    named.mkdir(parents=True)
+    (named / '.env').write_text('FEISHU_APP_ID=app\nFEISHU_APP_SECRET=secret\nFEISHU_HOME_CHANNEL=oc_example\n')
+    assert main() == 0
+
+def test_feishu_sender_probe_runs_as_isolated_startup_subprocess(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    home = tmp_path / 'hermes-home'
+    home.mkdir()
+    agent_root = tmp_path / 'agent'
+    (agent_root / 'tools').mkdir(parents=True)
+    (agent_root / 'tools' / 'send_message_tool.py').write_text('# fixture\n')
+    env = {
+        'PATH': os.environ.get('PATH', ''),
+        'HOME': str(tmp_path),
+        'HERMES_HOME': str(home),
+        'HERMES_WEBUI_AGENT_DIR': str(agent_root),
+    }
+    command = [sys.executable, str(REPO / 'scripts' / 'feishu_sender_required.py')]
+    absent = subprocess.run(command, env=env, capture_output=True, text=True, timeout=20)
+    assert absent.returncode == 1
+    assert not absent.stdout and not absent.stderr
+
+    profile = home / 'profiles' / 'review'
+    profile.mkdir(parents=True)
+    (profile / '.env').write_text('FEISHU_APP_ID=app\nFEISHU_APP_SECRET=secret\nFEISHU_HOME_CHANNEL=oc_example\n')
+    configured = subprocess.run(command, env=env, capture_output=True, text=True, timeout=20)
+    assert configured.returncode == 0
+    assert not configured.stdout and not configured.stderr
+
+
 def test_docker_init_stages_to_persistent_path():
     """The staged source must share the venv's container-layer lifecycle.
 

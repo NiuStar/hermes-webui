@@ -27,7 +27,9 @@ def notifications(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_AGENT_DIR", str(agent_root))
     monkeypatch.setenv("HERMES_WEBUI_AGENT_DIR", str(agent_root))
     module = importlib.import_module("api.completion_notifications")
-    return importlib.reload(module)
+    module = importlib.reload(module)
+    monkeypatch.setattr(module, "_sender_dependency_ready", lambda channel: True, raising=False)
+    return module
 
 
 def test_public_status_exposes_configuration_without_webhook_values(notifications):
@@ -38,6 +40,16 @@ def test_public_status_exposes_configuration_without_webhook_values(notification
     assert status["configured"] == {"browser": True, "weixin": True, "wecom": True, "feishu": True}
     serialized = repr(status)
     assert "secret" not in serialized
+
+
+def test_feishu_is_not_selectable_without_sender_sdk(notifications, monkeypatch):
+    monkeypatch.setattr(notifications, "_sender_dependency_ready", lambda channel: channel != "feishu")
+    assert notifications.public_status()["configured"]["feishu"] is False
+    with pytest.raises(ValueError, match="not configured"):
+        notifications.normalize_settings({
+            "completion_notifications_enabled": True,
+            "completion_notification_channels": ["feishu"],
+        })
 
 
 def test_normalize_settings_rejects_unknown_or_unconfigured_channels(notifications):
@@ -84,25 +96,89 @@ def test_send_completion_is_idempotent_and_uses_bounded_preview(notifications, m
     assert len(sent) == 1
     message = sent[0][1]
     assert len(message) <= 500
-    assert message.startswith("Hermes 回复完成\n会话：生产验收 会话 sk-abc...mnop\n输出结论：部署成功，所有检查通过。 API_KEY=***")
+    assert message.startswith("Hermes 回复完成\n会话：生产验收 会话 sk-abc...mnop\n结论摘要：部署成功，所有检查通过。 API_KEY=***")
     assert "session-1" not in message
     assert "super-secret-value" not in message
     assert "abcdefghijklmnop" not in message
     assert "\n会话\n" not in message
 
 
+def test_completion_counts_are_for_this_session_only(notifications, monkeypatch):
+    from api import routes
+    from types import SimpleNamespace
+
+    home = Path(os.environ["HERMES_HOME"])
+    monkeypatch.setattr(routes, "get_session", lambda sid, **kw: SimpleNamespace(profile="default"))
+    monkeypatch.setattr(routes, "_active_auxiliary_task_inventory", lambda profile, sid: [
+        {"type": "delegation", "parent_session_id": "session-1", "count": 2},
+        {"type": "process", "parent_session_id": "session-1", "count": 1},
+        {"type": "delegation", "parent_session_id": "another-session", "count": 9},
+    ])
+    monkeypatch.setattr("api.profiles.get_hermes_home_for_profile", lambda name: home)
+    sent = []
+    monkeypatch.setattr(notifications, "_send_via_hermes", lambda channel, text, profile_home: sent.append(text) or {"success": True})
+    result = notifications.send_completion(
+        {"completion_notifications_enabled": True, "completion_notification_channels": ["feishu"]},
+        session_id="session-1", stream_id="stream-1", title="主题", text="完成", hermes_home=home,
+    )
+    assert result["sent"] == ["feishu"]
+    assert "当前会话正在进行中子代理数量：2" in sent[0]
+    assert "后台进程数量：1" in sent[0]
+    assert "9" not in sent[0]
+
+
+def test_completion_inventory_failure_never_reports_false_zero(notifications, monkeypatch):
+    from api import routes
+
+    monkeypatch.setattr(routes, "get_session", lambda sid, **kw: (_ for _ in ()).throw(RuntimeError("inventory unavailable")))
+    sent = []
+    monkeypatch.setattr(notifications, "_send_via_hermes", lambda channel, text, home: sent.append(text) or {"success": True})
+    notifications.send_completion(
+        {"completion_notifications_enabled": True, "completion_notification_channels": ["feishu"]},
+        session_id="session-1", stream_id="stream-2", title="主题", text="完成",
+    )
+    assert "当前会话正在进行中子代理数量：未知" in sent[0]
+    assert "后台进程数量：未知" in sent[0]
+
+
+def test_completion_counts_reject_mismatched_profile_home(notifications, monkeypatch, tmp_path):
+    from api import routes
+    from types import SimpleNamespace
+
+    foreign = tmp_path / "other-profile"
+    foreign.mkdir()
+    monkeypatch.setattr(routes, "get_session", lambda sid, **kw: SimpleNamespace(profile="other"))
+    monkeypatch.setattr("api.profiles.get_hermes_home_for_profile", lambda name: foreign)
+    monkeypatch.setattr(routes, "_active_auxiliary_task_inventory", lambda profile, sid: pytest.fail("cross-profile inventory read"))
+    assert notifications._session_auxiliary_counts("session-1", Path(os.environ["HERMES_HOME"])) is None
+
+
+def test_completion_preview_reserves_space_for_counts(notifications):
+    message = notifications._completion_text("标题", "结论" * 5000, (3, 4))
+    assert len(message) <= 500
+    assert "当前会话正在进行中子代理数量：3" in message
+    assert "后台进程数量：4" in message
+
+
 def test_completion_text_has_safe_fallbacks_and_hard_total_limit(notifications):
     fallback = notifications._completion_text("\n\x00", "\t\n")
-    assert fallback == "Hermes 回复完成\n会话：未命名会话\n输出结论：已完成，请返回 WebUI 查看结果。"
+    assert fallback == (
+        "Hermes 回复完成\n会话：未命名会话\n结论摘要：已完成，请返回 WebUI 查看结果。"
+        "\n通知生成时当前会话正在进行中子代理数量：未知\n后台进程数量：未知"
+    )
 
     safe_unicode = notifications._completion_text("生产\u202e标题", "完成\u200b✅")
-    assert safe_unicode == "Hermes 回复完成\n会话：生产标题\n输出结论：完成✅"
+    assert safe_unicode == (
+        "Hermes 回复完成\n会话：生产标题\n结论摘要：完成✅"
+        "\n通知生成时当前会话正在进行中子代理数量：未知\n后台进程数量：未知"
+    )
 
     bounded = notifications._completion_text("标" * 500, "结论" * 5000)
     assert len(bounded) == 500
     assert bounded.splitlines()[1].startswith("会话：")
     assert bounded.splitlines()[1].endswith("…")
-    assert bounded.splitlines()[2].startswith("输出结论：")
+    assert bounded.splitlines()[2].startswith("结论摘要：")
+    assert bounded.splitlines()[-2:] == ["通知生成时当前会话正在进行中子代理数量：未知", "后台进程数量：未知"]
 
 
 def test_interrupted_completion_is_not_sent(notifications, monkeypatch):

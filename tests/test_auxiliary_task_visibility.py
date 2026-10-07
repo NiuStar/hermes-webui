@@ -105,3 +105,24 @@ def test_auxiliary_inventory_does_not_invent_prefix_without_title(monkeypatch):
     assert routes._active_auxiliary_task_inventory("default") == [
         {"type": "delegation", "id": "d1", "parent_session_id": "aaaaaaaaaaaa", "count": 1},
     ]
+
+
+def test_session_scoped_auxiliary_inventory_skips_unrelated_broken_batch_and_parent(monkeypatch):
+    from api import routes
+    from tools import async_delegation as delegation
+    from tools import process_registry as processes
+
+    parent = "aaaaaaaaaaaa"
+    monkeypatch.setattr(routes, "get_session", lambda sid, **kw: (
+        SimpleNamespace(profile="default", title="通知会话") if sid == parent else
+        (_ for _ in ()).throw(FileNotFoundError("unrelated parent"))))
+    monkeypatch.setattr(delegation, "_records", {
+        "good": {"status": "running", "delegation_id": "good", "origin_ui_session_id": parent},
+        "bad": {"status": "running", "delegation_id": "bad", "origin_ui_session_id": "bbbbbbbbbbbb",
+                "is_batch": True, "goals": []},
+    })
+    monkeypatch.setattr(processes, "process_registry", SimpleNamespace(list_sessions=lambda: []))
+    assert routes._active_auxiliary_task_inventory("default", parent) == [
+        {"type": "delegation", "id": "good", "parent_session_id": parent,
+         "count": 1, "parent_title_prefix": "通知会话"},
+    ]

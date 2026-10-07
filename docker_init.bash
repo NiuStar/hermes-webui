@@ -451,6 +451,21 @@ echo "";echo "== Activating hermes webui's virtual environment"
 source /app/venv/bin/activate || error_exit "Failed to activate hermeswebui virtual environment"
 test -x /app/venv/bin/python3
 
+ensure_feishu_sender_dependency() {
+  # Hermes [all] does not include Feishu's optional SDK. Check on fast restarts
+  # too: enabling notifications in an existing venv must not silently fail.
+  if ! /app/venv/bin/python3 /apptoo/scripts/feishu_sender_required.py; then
+    return 0
+  fi
+  if /app/venv/bin/python3 -c "import lark_oapi" >/dev/null 2>&1; then
+    return 0
+  fi
+  uv pip install "lark-oapi==1.6.8" --trusted-host pypi.org --trusted-host files.pythonhosted.org \
+    || error_exit "Failed to install Feishu sender dependency"
+  /app/venv/bin/python3 -c "import lark_oapi" \
+    || error_exit "Feishu sender dependency is still unavailable"
+}
+
 ensure_hindsight_client_docker_dependency() {
   # Keep this outside the .deps_installed fast-restart guard so existing
   # two-container Docker venvs self-heal after this dependency was added.
@@ -557,6 +572,7 @@ else
   fi
   touch /app/venv/.deps_installed
 fi
+ensure_feishu_sender_dependency
 
 ensure_hindsight_client_docker_dependency
 
