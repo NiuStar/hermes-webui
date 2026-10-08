@@ -438,7 +438,12 @@ def _run_feishu_card_process(card: dict[str, Any], hermes_home: str | Path | Non
         "  return {'success':True,'message_id':mid} if mid else {'error':'missing message id'}\n"
         " code=getattr(r,'code',None)\n"
         " return {'card_rejected':True} if code==230099 else {'error':'card send failed'}\n"
-        f"print({_SENDER_MARKER!r}+json.dumps(asyncio.run(send(json.loads(input())))))\n"
+        "try:\n"
+        " result=asyncio.run(send(json.loads(input())))\n"
+        "except Exception as exc:\n"
+        " kind=type(exc).__name__\n"
+        " result={'error':'card sender exception','error_type':kind if kind in ('RuntimeError','ValueError','TypeError','OSError','TimeoutError','ImportError','ModuleNotFoundError') else 'Other'}\n"
+        f"print({_SENDER_MARKER!r}+json.dumps(result))\n"
     )
     try:
         completed = subprocess.run([sys.executable, "-I", "-c", script, str(agent_root.resolve())], input=json.dumps(card, ensure_ascii=False) + "\n", text=True, capture_output=True, timeout=45, env=env, cwd=agent_root, check=False)
@@ -450,6 +455,8 @@ def _run_feishu_card_process(card: dict[str, Any], hermes_home: str | Path | Non
                 return json.loads(line[len(_SENDER_MARKER):])
             except ValueError:
                 break
+    if completed.returncode:
+        return {"error": "card sender process failed", "exit_code": completed.returncode}
     return {"error": "card sender returned no result"}
 
 
@@ -459,6 +466,8 @@ def _send_feishu_completion(title: str, text: str, counts: tuple[int, int] | Non
         return result
     if result.get("card_rejected") is True:
         return _send_via_hermes("feishu", _feishu_completion_text(title, text, counts), hermes_home)
+    # No raw SDK exception, response body, chat ID, or subprocess output in logs.
+    logger.warning("Feishu card delivery uncertain: %s %s", result.get("error", "unknown"), result.get("error_type") or result.get("exit_code") or "")
     raise _DeliveryFailure("Feishu card outcome uncertain")
 
 

@@ -164,6 +164,7 @@ def test_feishu_card_has_hierarchy_and_safe_session_link(notifications, monkeypa
     card = notifications._feishu_completion_card("A **title**", "结论\n第二行", (2, 3), "session-1")
     assert card["header"]["title"]["content"] == "Hermes · 回复完成"
     assert card["header"]["template"] == "blue"
+    assert "text_size" not in card["elements"][0]
     body = card["elements"][0]["content"]
     assert "A &#42;&#42;title&#42;&#42;" in body and "子代理 2 · 后台进程 3" in body
     assert "通知生成时" in body
@@ -307,6 +308,44 @@ def test_feishu_card_sender_executes_isolated_adapter_contract(notifications, mo
     monkeypatch.setattr(notifications, "_sender_environment", lambda channel, home: ({"PATH": os.environ["PATH"]}, root))
     result = notifications._run_feishu_card_process(notifications._feishu_completion_card("标题", "完成", (2, 3), "sid"), None)
     assert result == {"success": True, "message_id": "om_fake"}
+
+
+def test_feishu_card_sender_reports_exception_class_without_leaking_error(notifications, monkeypatch, tmp_path):
+    root = tmp_path / "agent"
+    for parts in [("tools",), ("gateway",), ("plugins",), ("plugins", "platforms"), ("plugins", "platforms", "feishu")]:
+        folder = root.joinpath(*parts)
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "__init__.py").write_text("", encoding="utf-8")
+    (root / "tools" / "send_message_tool.py").write_text(
+        "def _resolve_platform_config(name, config): return ('feishu', object(), None, None)\n"
+        "def _home_chat_id(config, platform, name): return ('oc_fake', None)\n", encoding="utf-8",
+    )
+    (root / "gateway" / "config.py").write_text(
+        "class Platform: FEISHU='feishu'\n"
+        "def load_gateway_config(): return object()\n", encoding="utf-8",
+    )
+    (root / "plugins" / "platforms" / "feishu" / "adapter.py").write_text(
+        "def _sdk_domain(name): return name\n"
+        "def _load_lark_oapi(): return True\n"
+        "class FeishuAdapter:\n"
+        " def __init__(self, config): self._domain_name='feishu'\n"
+        " def _build_lark_client(self, domain): return object()\n"
+        " async def _send_raw_message(self, **kw): raise RuntimeError('secret-on-wire')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(notifications, "_sender_environment", lambda channel, home: ({"PATH": os.environ["PATH"]}, root))
+    result = notifications._run_feishu_card_process(notifications._feishu_completion_card("标题", "完成", (0, 0), "sid"), None)
+    assert result == {"error": "card sender exception", "error_type": "RuntimeError"}
+    assert "secret-on-wire" not in repr(result)
+
+
+def test_feishu_card_sender_reports_nonzero_process_without_leaking_stderr(notifications, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(notifications.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=7, stdout="", stderr="secret-on-wire"))
+    result = notifications._run_feishu_card_process({"header": {"title": "safe"}}, None)
+    assert result == {"error": "card sender process failed", "exit_code": 7}
+    assert "secret-on-wire" not in repr(result)
 
 
 def test_feishu_card_send_to_same_profile_uses_only_one_channel_claim(notifications, monkeypatch):

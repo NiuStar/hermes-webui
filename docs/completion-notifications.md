@@ -38,6 +38,8 @@ and @ mentions) as literals.
 The compact text fallback uses Feishu's supported `<b>` style tags for those
 spans; Feishu plain-text messages do not render `**bold**` Markdown. Neither
 path conveys the full final response.
+The card intentionally uses Feishu's default Markdown text size: an unverified
+`text_size=large` experiment is not a production or client-rendering guarantee.
 
 If an operator sets
 `HERMES_WEBUI_PUBLIC_URL` to the actual WebUI origin (HTTPS, or HTTP on a private
@@ -65,8 +67,12 @@ There is no WebUI-layer retry, including after a timeout or provider cooldown,
 because the external service may have accepted the message before its response
 was lost. Retrying would violate the at-most-once guarantee.
 
-Delivery is successful only when Hermes Agent's official `send_message` result
-contains `success=true`. Transport success alone is not considered delivery.
+Text fallback is successful only when Hermes Agent's official `send_message`
+result contains `success=true`; card delivery additionally requires a Feishu
+message ID. Transport success alone is not considered delivery. An uncertain
+card subprocess result records only a bounded failure category or exit code,
+not the SDK exception text or stderr (which may contain credentials). Such a
+result is never silently retried as text.
 The sender runs in isolated Python mode with the validated Hermes Agent source
 inserted first on `sys.path`; the WebUI working directory cannot shadow the
 official `tools.send_message_tool` module.
