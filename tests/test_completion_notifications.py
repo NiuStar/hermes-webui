@@ -164,7 +164,7 @@ def test_feishu_card_has_hierarchy_and_safe_session_link(notifications, monkeypa
     card = notifications._feishu_completion_card("A **title**", "结论\n第二行", (2, 3), "session-1")
     assert card["header"]["title"]["content"] == "Hermes · 回复完成"
     assert card["header"]["template"] == "blue"
-    assert "text_size" not in card["elements"][0]
+    assert card["elements"][0]["text_size"] == "large"
     body = card["elements"][0]["content"]
     assert "A &#42;&#42;title&#42;&#42;" in body and "子代理 2 · 后台进程 3" in body
     assert "通知生成时" in body

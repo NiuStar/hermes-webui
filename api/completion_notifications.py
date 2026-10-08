@@ -387,7 +387,7 @@ def _feishu_completion_card(title: str, text: str, counts: tuple[int, int] | Non
     card: dict[str, Any] = {
         "config": {"wide_screen_mode": True},
         "header": {"template": "blue", "title": {"tag": "plain_text", "content": "Hermes · 回复完成"}},
-        "elements": [{"tag": "markdown", "content": body}],
+        "elements": [{"tag": "markdown", "text_size": "large", "content": body}],
     }
     base = os.environ.get("HERMES_WEBUI_PUBLIC_URL", "").strip()
     # An operator-controlled origin only. Malformed link configuration must not

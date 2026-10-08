@@ -38,8 +38,9 @@ and @ mentions) as literals.
 The compact text fallback uses Feishu's supported `<b>` style tags for those
 spans; Feishu plain-text messages do not render `**bold**` Markdown. Neither
 path conveys the full final response.
-The card intentionally uses Feishu's default Markdown text size: an unverified
-`text_size=large` experiment is not a production or client-rendering guarantee.
+The card requests Feishu's documented `large` Markdown text size (16px on
+desktop, versus the 14px default). Actual client rendering still requires
+visual acceptance; the field does not change the text fallback format.
 
 If an operator sets
 `HERMES_WEBUI_PUBLIC_URL` to the actual WebUI origin (HTTPS, or HTTP on a private
