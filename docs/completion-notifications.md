@@ -32,7 +32,14 @@ bounded redacted conclusion, and a compact snapshot of running subagents and
 background processes. Only an explicit Feishu `230099` (card-content creation
 failure) falls back to a compact text notice; permissions, rate limits, a
 timeout or any other uncertain outcome never trigger a second send. Other
-channels keep their existing text format. If an operator sets
+channels keep their existing text format. The card conclusion preserves bounded,
+redacted `**bold**` spans while encoding other Markdown syntax (including links
+and @ mentions) as literals.
+The compact text fallback uses Feishu's supported `<b>` style tags for those
+spans; Feishu plain-text messages do not render `**bold**` Markdown. Neither
+path conveys the full final response.
+
+If an operator sets
 `HERMES_WEBUI_PUBLIC_URL` to the actual WebUI origin (HTTPS, or HTTP on a private
 address), the card adds an **Open session** link. Without that explicit origin,
 the link is omitted; it is never inferred from request headers. The configured

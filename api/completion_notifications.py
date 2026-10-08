@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import html
 import ipaddress
 import importlib.util
 import logging
@@ -350,18 +351,39 @@ def _completion_text(title: str, text: str, counts: tuple[int, int] | None = Non
     return prefix + _bounded(safe_conclusion, max(0, _MAX_PREVIEW_CHARS - len(prefix) - len(suffix))) + suffix
 
 
+_BOLD_SPAN = re.compile(r"\*\*([^*]+?)\*\*")
+_FEISHU_SPECIAL = re.compile(r"[\\`*_{}\[\]()#+.!|<>~&-]")
+
+
+def _feishu_escape(value: str) -> str:
+    return _FEISHU_SPECIAL.sub(lambda match: f"&#{ord(match.group())};", value)
+
+
+def _feishu_safe_markup(value: str, *, card: bool) -> str:
+    """Render only bounded bold spans; neutralize links, mentions, and other syntax."""
+    def escape(raw: str) -> str:
+        if card:
+            return _feishu_escape(raw)
+        return html.escape(raw, quote=False).replace("[", "&#91;").replace("]", "&#93;").replace("(", "&#40;").replace(")", "&#41;")
+    pieces: list[str] = []
+    offset = 0
+    for match in _BOLD_SPAN.finditer(value):
+        pieces.append(escape(value[offset:match.start()]))
+        inner = escape(match.group(1))
+        pieces.append(f"**{inner}**" if card else f"<b>{inner}</b>")
+        offset = match.end()
+    pieces.append(escape(value[offset:]))
+    return "".join(pieces)
+
+
 def _feishu_completion_card(title: str, text: str, counts: tuple[int, int] | None, session_id: str) -> dict[str, Any]:
     """Keep the card's preview subject to the same redaction and size bound as text."""
     # Reuse the already bounded, redacted text; never put raw assistant output in a card.
     lines = _completion_text(title, text, counts).splitlines()
     safe_title = lines[1].removeprefix("会话：")
     preview = lines[2].removeprefix("结论摘要：")
-    # Card markdown must not interpret model output as links, mentions or formatting.
-    def escape(value: str) -> str:
-        return re.sub(r"([\\`*_{}\[\]()#+.!|<>~-])", r"\\\1", value)
-
     running = f"子代理 {counts[0] if counts is not None else '未知'} · 后台进程 {counts[1] if counts is not None else '未知'}"
-    body = f"**会话**  {escape(safe_title)}\n\n**结论摘要**\n{escape(preview)}\n\n**运行中**  {running}\n\n*数量为通知生成时的快照*"
+    body = f"**会话**  {_feishu_escape(safe_title)}\n\n**结论摘要**\n{_feishu_safe_markup(preview, card=True)}\n\n**运行中**  {running}\n\n*数量为通知生成时的快照*"
     card: dict[str, Any] = {
         "config": {"wide_screen_mode": True},
         "header": {"template": "blue", "title": {"tag": "plain_text", "content": "Hermes · 回复完成"}},
@@ -387,8 +409,8 @@ def _feishu_completion_card(title: str, text: str, counts: tuple[int, int] | Non
 def _feishu_completion_text(title: str, text: str, counts: tuple[int, int] | None) -> str:
     """Compact non-card fallback with the same bounded, redacted data."""
     lines = _completion_text(title, text, counts).splitlines()
-    return (f"Hermes · 回复完成\n会话  {lines[1].removeprefix('会话：')}\n\n"
-            f"结论摘要\n{lines[2].removeprefix('结论摘要：')}\n\n"
+    return (f"Hermes · 回复完成\n会话  {html.escape(lines[1].removeprefix('会话：'), quote=False)}\n\n"
+            f"结论摘要\n{_feishu_safe_markup(lines[2].removeprefix('结论摘要：'), card=False)}\n\n"
             f"运行中  子代理 {counts[0] if counts is not None else '未知'} · 后台进程 {counts[1] if counts is not None else '未知'}\n"
             "数量为通知生成时的快照")
 

@@ -97,8 +97,8 @@ def test_send_completion_is_idempotent_and_uses_bounded_preview(notifications, m
     card = sent[0][1]
     message = card["elements"][0]["content"]
     assert len(message) < 550
-    assert r"生产验收 会话 sk\-abc\.\.\.mnop" in message
-    assert "部署成功，所有检查通过。 API\\_KEY=\\*\\*\\*" in message
+    assert "生产验收 会话 sk&#45;abc&#46;&#46;&#46;mnop" in message
+    assert "部署成功，所有检查通过。 API&#95;KEY=&#42;&#42;&#42;" in message
     assert "session-1" not in repr(card)
     assert "super-secret-value" not in repr(card)
     assert "abcdefghijklmnop" not in repr(card)
@@ -165,9 +165,44 @@ def test_feishu_card_has_hierarchy_and_safe_session_link(notifications, monkeypa
     assert card["header"]["title"]["content"] == "Hermes · 回复完成"
     assert card["header"]["template"] == "blue"
     body = card["elements"][0]["content"]
-    assert r"A \*\*title\*\*" in body and "子代理 2 · 后台进程 3" in body
+    assert "A &#42;&#42;title&#42;&#42;" in body and "子代理 2 · 后台进程 3" in body
     assert "通知生成时" in body
     assert card["elements"][1]["actions"][0]["url"] == "https://10.126.126.10:8787/session/session-1"
+
+
+def test_feishu_card_renders_bold_in_redacted_conclusion_without_active_links(notifications):
+    summary = "这是一批**较早任务的延迟通知**；[查看](https://invalid.example) <at id=all></at> API_KEY=secret-value"
+    card = notifications._feishu_completion_card("标题", summary, (0, 0), "session-1")
+    body = card["elements"][0]["content"]
+    assert "**较早任务的延迟通知**" in body
+    assert "\\*\\*较早任务的延迟通知\\*\\*" not in body
+    assert "[查看](https://invalid.example)" not in body
+    assert "<at id=all>" not in body
+    assert "secret-value" not in repr(card)
+
+
+def test_feishu_rejected_card_fallback_formats_summary_bold(notifications, monkeypatch):
+    calls = []
+    monkeypatch.setattr(notifications, "_run_feishu_card_process", lambda card, home: {"card_rejected": True})
+    monkeypatch.setattr(notifications, "_send_via_hermes", lambda channel, text, home: calls.append((channel, text)) or {"success": True})
+    notifications._send_feishu_completion("标题", "这是**较早任务的延迟通知**，不要 <at id=all></at>", (0, 0), "session-1", None)
+    assert calls[0][0] == "feishu"
+    assert "<b>较早任务的延迟通知</b>" in calls[0][1]
+    assert "**较早任务的延迟通知**" not in calls[0][1]
+    assert "<at id=all>" not in calls[0][1]
+
+
+def test_feishu_markup_neutralizes_tags_and_links_but_keeps_only_bold(notifications):
+    rendered = notifications._feishu_safe_markup("**加粗** [点击](https://x.example) <at id=all></at> & <b>伪标签</b>", card=True)
+    assert "**加粗**" in rendered
+    assert "[点击](https://x.example)" not in rendered
+    assert "<at" not in rendered and "<b>" not in rendered
+    assert "&#38;" in rendered
+    fallback = notifications._feishu_safe_markup("**加粗** [点击](https://x.example) <at id=all></at> & <b>伪标签</b>", card=False)
+    assert "<b>加粗</b>" in fallback
+    assert "[点击](https://x.example)" not in fallback
+    assert "<at" not in fallback and "&lt;at" in fallback
+    assert "&amp;" in fallback
 
 
 def test_feishu_card_rejects_untrusted_link_and_redacts_content(notifications, monkeypatch):
