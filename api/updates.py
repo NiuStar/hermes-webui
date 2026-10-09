@@ -659,6 +659,23 @@ def _read_agent_source_version(agent_dir: Path) -> str | None:
     return None
 
 
+def _read_baked_agent_version(agent_dir: Path) -> str | None:
+    """Read the baked Agent's version only when its install stamp matches its revision."""
+    try:
+        revision = (agent_dir / '.hermes-agent-revision').read_text(encoding='utf-8').strip()
+        stamp = json.loads((agent_dir / 'install-stamp.json').read_text(encoding='utf-8'))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(stamp, dict) or not re.fullmatch(r'[0-9a-f]{40}', revision):
+        return None
+    version = stamp.get('baseVersion')
+    if (stamp.get('commit') != revision or stamp.get('source') != 'docker'
+            or not isinstance(version, str)
+            or not re.fullmatch(r'\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?', version)):
+        return None
+    return version
+
+
 def _gateway_health_base_url() -> str:
     """Return the configured/default Hermes Agent gateway base URL."""
     raw = (
@@ -740,6 +757,9 @@ def _detect_agent_version() -> str:
             source_version = _read_agent_source_version(agent_dir)
             if source_version:
                 return source_version
+            baked_version = _read_baked_agent_version(agent_dir)
+            if baked_version:
+                return baked_version
 
     gateway_version = _detect_agent_version_from_gateway_health()
     if gateway_version:
