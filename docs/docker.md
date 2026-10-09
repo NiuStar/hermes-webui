@@ -97,6 +97,12 @@ existing sidecar's tag-based WebUI update is **not** an Agent update. Neither
 WebUI nor Hermes Agent runs `hermes update` inside the image. Production
 switching or restart requires operator approval.
 
+The current `.github/workflows/release.yml` deliberately has no tag-push
+trigger and cannot publish a GitHub Release, GHCR image, or mutable `latest`.
+A version tag is a source marker only until a separately reviewed,
+artifact-tested promotion pipeline exists; do not interpret it as production
+install authorization. The Docker Hub candidate tag is not a versioned release.
+
 The repository contains a signed-manifest contract and an opt-in installer path:
 `api/agent_image_manifest.py` verifies detached Ed25519 signatures over exact
 JSON bytes and requires a repository, platform, immutable `sha256:` digest,
@@ -133,13 +139,14 @@ Agent tool loop against a local fixture; the signed digest replaced an isolated
 old container, and injected post-probe failure restored the original container
 ID and HTTP health. The QA-only key, receipt and loopback registry are **not**
 production publication or publisher authentication. The runtime probe does not
-prove an Agent tool call by itself. Persistent `/app` mounts are rejected before
-stopping the old container by the source-override guard; support for a
-transactionally reversible venv/source migration on persistent `/app` remains a
-separate release blocker for those deployments. The successful signed QA update
-keeps the stopped previous container for operator acceptance; it does not remove
-that rollback handle automatically. A failed update must wait for the restored
-old container to be healthy before reporting `rolled_back`.
+prove an Agent tool call by itself. Persistent `/app` mounts, including every
+nested bind, volume or tmpfs path such as `/app/venv`, are rejected by both
+read-only preflight and signed Apply before stopping the old container. Support
+for a transactionally reversible venv/source migration on persistent `/app`
+remains a separate release blocker for those deployments. The successful
+signed QA update keeps the stopped previous container for operator acceptance;
+it does not remove that rollback handle automatically. A failed update must
+wait for the restored old container to be healthy before reporting `rolled_back`.
 
 Before enabling installation: publish/verify a reproducible release receipt
 bound to the actual registry digest and platform on the build host; provision

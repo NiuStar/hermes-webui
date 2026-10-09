@@ -1,73 +1,19 @@
-name: Release & Docker
+# Fail closed: creating a version tag must not publish an untested image,
+# mutable latest, or a GitHub Release. A protected, artifact-tested promotion
+# workflow is required before those side effects can be restored.
+name: Release & Docker (publication disabled)
 
 on:
-  push:
-    tags:
-      - 'v*'
-      - 'exp-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  release:
+  publication-blocked:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write   # required: create GitHub Release
-      packages: write   # required: push to ghcr.io
-
     steps:
-      - uses: actions/checkout@v4
-
-      # Check whether this is a stable or experimental release
-      - name: Detect release channel
-        id: channel
+      - name: Reject publication until artifact attestation is implemented
         run: |
-          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            echo "is_stable=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "is_stable=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      # Create GitHub Release from tag with auto-generated notes
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          prerelease: ${{ steps.channel.outputs.is_stable == 'false' }}
-
-      # Set up multi-arch build (QEMU + Buildx)
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-
-      # Log in to GitHub Container Registry
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # Extract tags from the git ref (supports vX.Y and vX.Y.Z formats)
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=match,pattern=v(\d+\.\d+(?:\.\d+)?),group=1
-            type=match,pattern=exp-v(\d+\.\d+(?:\.\d+)?),group=1
-            type=raw,value=latest,enable=${{ steps.channel.outputs.is_stable == 'true' }}
-            type=raw,value=experimental,enable=${{ steps.channel.outputs.is_stable == 'false' }}
-
-      # Build and push multi-arch image (amd64 + arm64)
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            HERMES_VERSION=${{ github.ref_name }}
-            HERMES_WEBUI_REVISION=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          echo 'Release publication is disabled: a digest- and platform-bound CI receipt, independent signer, and operator approval are required.' >&2
+          exit 1

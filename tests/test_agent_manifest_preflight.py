@@ -91,7 +91,8 @@ def test_signed_agent_payload_cannot_start_sidecar_update(monkeypatch):
         assert worker is None
 
 
-def test_readonly_preflight_rejects_persistent_app_before_offering_update(tmp_path, monkeypatch):
+@pytest.mark.parametrize('mount_target', ['/app', '/app/venv', '/app/hermes-agent-src-alt'])
+def test_readonly_preflight_rejects_persistent_app_before_offering_update(tmp_path, monkeypatch, mount_target):
     manifest = _artifact(tmp_path)
     monkeypatch.setenv('HERMES_WEBUI_DOCKER_SELF_UPDATE', '1')
     monkeypatch.setenv('HERMES_WEBUI_AGENT_MANIFEST_PATH', str(tmp_path / 'manifest.json'))
@@ -106,8 +107,8 @@ def test_readonly_preflight_rejects_persistent_app_before_offering_update(tmp_pa
             assert name == 'hermes-webui'
             return {'State': {'Running': True},
                     'Config': {'Env': ['HERMES_WEBUI_AGENT_DIR=/opt/hermes']},
-                    'HostConfig': {'Binds': ['/state:/app:rw']},
-                    'Mounts': [{'Destination': '/app', 'Type': 'bind'}]}
+                    'HostConfig': {'Binds': ['/state:' + mount_target + ':rw']},
+                    'Mounts': [{'Destination': mount_target, 'Type': 'bind'}]}
         def pull(self, *_): raise AssertionError('read-only preflight pulled an image')
     monkeypatch.setattr(dsu, 'DockerEngine', Engine)
     result, worker = dsu._control_request({'action': 'agent_preflight', 'token': 'secret'},

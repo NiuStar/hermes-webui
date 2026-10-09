@@ -671,12 +671,14 @@ def _require_unmounted_baked_agent(container: dict[str, Any]) -> None:
     for mount in (host.get("Mounts") or []) + (container.get("Mounts") or []):
         destinations.append(str(mount.get("Target") or mount.get("Destination") or ""))
     for destination in destinations:
+        if not isinstance(destination, str) or not destination.startswith("/"):
+            raise DockerEngineError("Runtime mount destination is invalid")
         path = os.path.normpath(destination)
         if (path == _BAKED_AGENT_PATH or path.startswith(_BAKED_AGENT_PATH + "/")
                 or _BAKED_AGENT_PATH.startswith(path.rstrip("/") + "/")
-                or path in ({"/app", "/app/hermes-agent-src"} | _LEGACY_AGENT_DIRS)
-                or path.startswith("/app/hermes-agent-src/")):
-            raise DockerEngineError("Runtime mount obscures baked Hermes Agent")
+                or path == "/app" or path.startswith("/app/")
+                or path in _LEGACY_AGENT_DIRS):
+            raise DockerEngineError("Runtime mount obscures baked Hermes Agent or persistent app")
 
 
 def _require_unmanaged_agent_target(container: dict[str, Any]) -> None:

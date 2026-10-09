@@ -29,11 +29,23 @@ def test_docker_image_exposes_baked_agent_identity_and_default_path():
     assert 'org.opencontainers.image.hermes-agent.path="/opt/hermes"' in DOCKERFILE
 
 
-def test_release_image_binds_full_webui_commit_in_oci_label():
-    workflow = (ROOT / '.github/workflows/release.yml').read_text(encoding='utf-8')
+def test_image_accepts_full_webui_commit_in_oci_label():
     assert 'ARG HERMES_WEBUI_REVISION=unknown' in DOCKERFILE
     assert 'org.opencontainers.image.revision="${HERMES_WEBUI_REVISION}"' in DOCKERFILE
-    assert 'HERMES_WEBUI_REVISION=${{ github.sha }}' in workflow
+
+
+def test_version_tag_cannot_publish_unverified_release_or_latest():
+    import yaml
+    workflow = yaml.safe_load((ROOT / '.github/workflows/release.yml').read_text(encoding='utf-8'))
+    # YAML 1.1 treats `on` as a boolean; inspect the parsed trigger regardless.
+    trigger = workflow.get('on', workflow.get(True))
+    assert trigger == {'workflow_dispatch': None}
+    assert workflow['permissions'] == {'contents': 'read'}
+    assert not {'release', 'build', 'publish'} & set(workflow['jobs'])
+    assert 'action-gh-release' not in str(workflow)
+    assert 'build-push-action' not in str(workflow)
+    assert not any('type=raw,value=latest' in str(job) or 'ghcr.io/' in str(job)
+                   for job in workflow['jobs'].values())
 
 
 def test_system_python_sidecar_has_manifest_verifier_dependency():
