@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 LABEL maintainer="nesquena"
 LABEL description="Hermes Web UI — browser interface for Hermes Agent"
@@ -34,7 +34,8 @@ RUN apt-get update -y --fix-missing --no-install-recommends \
 # still override this path with a read-only bind mount, but the standalone image
 # no longer depends on a mutable host checkout for its Agent runtime.
 ARG HERMES_AGENT_REPOSITORY=https://github.com/NousResearch/hermes-agent.git
-ARG HERMES_AGENT_REVISION=24fd22b94df040d843eb280ff197a4bcd99a6fc3
+ARG HERMES_AGENT_REVISION=818c13be1dc4fd28987e1e881a9408224afd4535
+ARG HERMES_AGENT_VERSION=v0.21.6
 RUN test "$(printf '%s' "$HERMES_AGENT_REVISION" | wc -c)" -eq 40 \
     && case "$HERMES_AGENT_REVISION" in *[!0-9a-f]*) exit 1;; esac \
     && git clone --filter=blob:none --no-checkout "$HERMES_AGENT_REPOSITORY" /opt/hermes \
@@ -45,8 +46,8 @@ RUN test "$(printf '%s' "$HERMES_AGENT_REVISION" | wc -c)" -eq 40 \
     && rm -rf /opt/hermes/.git
 
 # ── SQLite upgrade ──────────────────────────────────────────────────────────
-# The python:3.12-slim base ships SQLite 3.46.1 (Debian Trixie), which is
-# vulnerable to the WAL-reset corruption bug discovered March 2026.
+# The base SQLite version is checked below; compile a fixed amalgamation to
+# avoid depending on a distro backport of the WAL-reset corruption fix.
 # https://sqlite.org/wal.html#walresetbug
 #
 # Debian has not backported the fix, so we compile from the amalgamation.
@@ -144,6 +145,10 @@ USER root
 # The init script will skip the download when uv is already on PATH.
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 
+# The updater sidecar uses /usr/local/bin/python (not /app/venv). It must have
+# the Ed25519 verifier before the first opt-in startup, without runtime pip.
+RUN /usr/local/bin/python -m pip install --no-cache-dir "cryptography>=42.0"
+
 COPY --chown=root:root . /apptoo
 
 # Bake the git version tag into the image so the settings badge works even
@@ -151,10 +156,13 @@ COPY --chown=root:root . /apptoo
 # CI passes: --build-arg HERMES_VERSION=$(git describe --tags --always)
 # Local builds that omit the arg get "unknown" as the fallback.
 ARG HERMES_VERSION=unknown
+ARG HERMES_WEBUI_REVISION=unknown
 RUN echo "__version__ = '${HERMES_VERSION}'" > /apptoo/api/_version.py
 LABEL org.opencontainers.image.version="${HERMES_VERSION}" \
+      org.opencontainers.image.revision="${HERMES_WEBUI_REVISION}" \
       org.opencontainers.image.hermes-agent.repository="${HERMES_AGENT_REPOSITORY}" \
       org.opencontainers.image.hermes-agent.revision="${HERMES_AGENT_REVISION}" \
+      org.opencontainers.image.hermes-agent.version="${HERMES_AGENT_VERSION}" \
       org.opencontainers.image.hermes-agent.path="/opt/hermes"
 
 # Default to binding all interfaces (required for container networking)

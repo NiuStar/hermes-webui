@@ -72,6 +72,9 @@ function showToast(message, duration, kind) {
 }
 function setTimeout(cb, ms) { cb(); return 1; }
 function clearTimeout() {}
+function _hideDockerUpdateProgress() {}
+function updateText(key, fallback) { return fallback; }
+function _isUpdateApplyNetworkError() { return false; }
 
 global.window = { _updateApplyInFlight: false, _updateData: updateData };
 global.sessionStorage = sessionStorage;
@@ -131,6 +134,40 @@ def test_update_apply_network_error_has_recovery_message_not_raw_failed_to_fetch
     assert 'Update failed: "+e.message' not in src
 
 
+def test_image_owned_agent_with_no_verified_image_never_triggers_git_apply():
+    result = _run_apply_updates_harness(
+        {'agent': {'behind': 7, 'image_managed': True, 'deployment_online_update': False},
+         'webui': {'behind': 0}}, [],
+    )
+    assert result['apiCalls'] == []
+    assert result['waitCalls'] == []
+
+
+def test_image_owned_agent_does_not_block_separate_webui_update():
+    result = _run_apply_updates_harness(
+        {'agent': {'behind': 7, 'image_managed': True, 'deployment_online_update': False},
+         'webui': {'behind': 1, 'deployment_online_update': True}},
+        [{'ok': False, 'message': 'dry run'}],
+    )
+    assert result['apiCalls'] == ['webui']
+
+
+def test_detect_only_agent_banner_does_not_offer_apply():
+    src = _ui_js()
+    body = src[src.index('function _showUpdateBanner(data)'):src.index('function _i18nUpdateText', src.index('function _showUpdateBanner(data)'))]
+    assert 'data.agent.behind>0&&(!data.agent.image_managed||data.agent.deployment_online_update)' in body
+
+
+def test_signed_image_managed_agent_can_apply_and_monitor():
+    result = _run_apply_updates_harness(
+        {'agent': {'behind': 1, 'image_managed': True, 'deployment_online_update': True},
+         'webui': {'behind': 0}},
+        [{'ok': True, 'operation_id': 'a' * 32}],
+    )
+    assert result['apiCalls'] == ['agent']
+    assert result['waitCalls'] == [] or result['waitCalls'][0]['apiCallsSnapshot'] == ['agent']
+
+
 def test_update_apply_structured_server_errors_still_use_json_message_path():
     """Server-reachable JSON errors must keep the existing targeted message path."""
     src = _ui_js()
@@ -156,7 +193,7 @@ def test_update_apply_successful_stash_conflict_displays_recovery_message():
     restart_wait = body.index("_waitForServerThenReload", message_join)
 
     assert messages_decl < stash_branch < message_push < persistent_display < message_join < restart_wait
-    assert "showToast(stashConflictMessage||'Update applied" in body
+    assert "showToast(stashConflictMessage||'Update started" in body
     assert "stashConflictMessages.length?10000" in body
 
 
@@ -173,7 +210,7 @@ def test_update_apply_multiple_stash_conflicts_are_aggregated_not_overwritten():
     assert "stashConflictMessages.push('Update applied ('+target+'): " in body
     assert "errEl.textContent=stashConflictMessages.join('\\n\\n')" in body
     assert "const stashConflictMessage=stashConflictMessages.join('\\n\\n');" in body
-    assert "showToast(stashConflictMessage||'Update applied" in body
+    assert "showToast(stashConflictMessage||'Update started" in body
 
 
 def test_update_apply_network_error_classifier_ignores_http_status_errors():

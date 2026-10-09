@@ -7,13 +7,18 @@ then performs pull, health-gated replacement, and rollback if needed.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import copy
+import hashlib
+import hmac
 import json
 import logging
 import os
 import re
 import secrets
 import socket
+import stat
 import sys
 import threading
 import time
@@ -32,6 +37,59 @@ CONTROL_TOKEN = "/run/hermes-webui-updater/token"
 
 class DockerEngineError(RuntimeError):
     pass
+
+
+def _read_trusted_manifest_file(path: str | os.PathLike[str], limit: int) -> bytes:
+    """Read a regular, non-symlink file once; never follow a swapped final link."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o022 or not 0 < info.st_size <= limit:
+            raise DockerEngineError("Insecure or invalid Agent manifest file")
+        data = os.read(fd, limit + 1)
+        if len(data) != info.st_size:
+            raise DockerEngineError("Agent manifest changed during read")
+        return data
+    finally:
+        os.close(fd)
+
+
+def preflight_agent_manifest(
+    manifest_path: str | os.PathLike[str], signature_path: str | os.PathLike[str], *,
+    repository: str, platform: str, agent_commit: str,
+) -> dict[str, str]:
+    """Validate publisher-bound data without pulling or replacing a container.
+
+    The public-key file must be provisioned independently of the manifest;
+    this function alone is not permission to deploy an Agent image.
+    """
+    if __package__:
+        from .agent_image_manifest import ManifestError, verify_manifest
+    else:  # Compose runs this file directly from /apptoo/api.
+        from agent_image_manifest import ManifestError, verify_manifest
+
+    key_path = os.getenv("HERMES_WEBUI_AGENT_MANIFEST_PUBKEY")
+    key_pin = os.getenv("HERMES_WEBUI_AGENT_MANIFEST_PUBKEY_SHA256", "")
+    if not key_path or not re.fullmatch(r"[0-9a-f]{64}", key_pin):
+        raise DockerEngineError("Trusted Agent manifest key is not configured")
+    try:
+        public_key = base64.b64decode(_read_trusted_manifest_file(key_path, 128).strip(), validate=True)
+        if not hmac.compare_digest(hashlib.sha256(public_key).hexdigest(), key_pin):
+            raise DockerEngineError("Trusted Agent manifest key fingerprint mismatch")
+        raw = _read_trusted_manifest_file(manifest_path, 16384)
+        signature = _read_trusted_manifest_file(signature_path, 128).decode("ascii").strip()
+        manifest = verify_manifest(raw, signature, public_key, repository=repository,
+                                   platform=platform, agent_commit=agent_commit)
+    except (OSError, UnicodeError, ValueError, binascii.Error, ManifestError) as exc:
+        raise DockerEngineError("Agent image manifest could not be authenticated") from exc
+    return {
+        "image": manifest["repository"] + "@" + manifest["digest"],
+        "webui_commit": manifest["webui_commit"],
+        "agent_commit": manifest["agent_commit"],
+        "webui_version": manifest["webui_version"],
+        "agent_version": manifest["agent_version"],
+        "platform": manifest["platform"],
+    }
 
 
 class UpdateProgress:
@@ -213,6 +271,19 @@ def _decode_chunked(data: bytes) -> bytes:
 def _container_name(info: dict[str, Any]) -> str:
     names = info.get("Name") or ""
     return names.lstrip("/") or os.environ.get("HERMES_WEBUI_CONTAINER_NAME", "hermes-webui")
+
+
+def _require_free_transaction_names(engine: DockerEngine, *names: str) -> None:
+    """Never take over a stopped backup or another update's temporary owner."""
+    for name in names:
+        try:
+            existing = engine.inspect(name)
+        except DockerEngineError as exc:
+            if re.search(r'(?:\b404\b|not found|no such container)', str(exc), re.I):
+                continue
+            raise
+        if existing:
+            raise DockerEngineError("Existing update transaction container blocks replacement")
 
 
 _BAKED_AGENT_REVISION_LABEL = "org.opencontainers.image.hermes-agent.revision"
@@ -451,10 +522,91 @@ def _verify_runtime_contract(
         )
 
 
+_AGENT_RUNTIME_PROBE = """
+import hashlib
+import importlib.util
+import pathlib
+import sys
+
+revision, baked_arg, staged_arg = sys.argv[1:]
+baked, staged = pathlib.Path(baked_arg), pathlib.Path(staged_arg)
+if not all((root / '.hermes-agent-revision').read_text().strip() == revision
+           for root in (baked, staged)):
+    raise SystemExit(2)
+
+def python_sources(root):
+    result = {}
+    for path in root.rglob('*.py'):
+        relative = path.relative_to(root)
+        if any(part == '__pycache__' or part.endswith('.egg-info')
+               or part in ('build', 'dist', '.git', '.playwright') for part in relative.parts):
+            continue
+        if not path.is_file() or path.is_symlink():
+            raise SystemExit(2)
+        result[str(relative)] = hashlib.sha256(path.read_bytes()).digest()
+    return result
+
+baked_sources = python_sources(baked)
+if not baked_sources or baked_sources != python_sources(staged):
+    raise SystemExit(2)
+spec = importlib.util.find_spec('hermes_cli')
+if spec is None or spec.origin is None:
+    raise SystemExit(2)
+origin = pathlib.Path(spec.origin).resolve(strict=True)
+if origin not in ((baked / 'hermes_cli' / '__init__.py').resolve(strict=True),
+                  (staged / 'hermes_cli' / '__init__.py').resolve(strict=True)):
+    raise SystemExit(2)
+import hermes_cli
+if pathlib.Path(hermes_cli.__file__).resolve(strict=True) != origin:
+    raise SystemExit(2)
+config_spec = importlib.util.find_spec('hermes_cli.config')
+if config_spec is None or config_spec.origin is None:
+    raise SystemExit(2)
+config_path = pathlib.Path(config_spec.origin).resolve(strict=True)
+if config_path != (origin.parent / 'config.py').resolve(strict=True):
+    raise SystemExit(2)
+"""
+
+def _verify_imported_agent(engine: DockerEngine, container: str, revision: str) -> None:
+    """Probe the replacement's actual venv and staged Agent before cleanup."""
+    path = urllib.parse.quote(container, safe="")
+    command = ["/app/venv/bin/python3", "-c", _AGENT_RUNTIME_PROBE,
+               revision, _BAKED_AGENT_PATH, "/app/hermes-agent-src"]
+    created = engine.request("POST", f"/containers/{path}/exec", {
+        "AttachStdout": False, "AttachStderr": False, "Tty": False,
+        "User": "hermeswebui", "WorkingDir": "/app", "Cmd": command,
+    })
+    exec_id = (created or {}).get("Id")
+    if not isinstance(exec_id, str) or not re.fullmatch(r"[0-9a-f]{64}", exec_id):
+        raise DockerEngineError("Could not start runtime Agent verification")
+    engine.request("POST", f"/exec/{exec_id}/start", {"Detach": True, "Tty": False})
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        state = engine.request("GET", f"/exec/{exec_id}/json")
+        if not isinstance(state, dict):
+            break
+        if state.get("Running") is False:
+            if type(state.get("ExitCode")) is int and state["ExitCode"] == 0:
+                return
+            break
+        time.sleep(0.25)
+    raise DockerEngineError("Replacement runtime Agent identity could not be verified")
+
+
 def _start_if_stopped(engine: DockerEngine, name: str) -> None:
     state = engine.inspect(name).get("State") or {}
     if not state.get("Running"):
         engine.start(name)
+
+
+def _wait_for_restored_health(engine: DockerEngine, name: str, timeout: int) -> None:
+    """Rollback is not complete until the original service is healthy again."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _healthy(engine, name):
+            return
+        time.sleep(2)
+    raise DockerEngineError("restored owner did not become healthy")
 
 
 def _verified_image_id(
@@ -476,6 +628,66 @@ def _verified_image_id(
     return image_id
 
 
+def _verified_agent_image_id(image_info: dict[str, Any], expected: dict[str, str]) -> str:
+    """Bind an inspected image to independently authenticated manifest fields."""
+    image = expected.get("image") or ""
+    if not re.fullmatch(r"[a-z0-9._:/-]+@sha256:[0-9a-f]{64}", image):
+        raise DockerEngineError("No authenticated Agent image digest")
+    digests = image_info.get("RepoDigests") or []
+    if image not in digests:
+        raise DockerEngineError("Pulled image digest does not match Agent manifest")
+    platform = str(image_info.get("Os") or "") + "/" + str(image_info.get("Architecture") or "")
+    if platform != expected.get("platform"):
+        raise DockerEngineError("Pulled image platform does not match Agent manifest")
+    labels = (image_info.get("Config") or {}).get("Labels") or {}
+    if any(labels.get(label) != expected.get(field) for label, field in (
+        ("org.opencontainers.image.version", "webui_version"),
+        ("org.opencontainers.image.revision", "webui_commit"),
+        (_BAKED_AGENT_REVISION_LABEL, "agent_commit"),
+    )) or labels.get(_BAKED_AGENT_PATH_LABEL) != _BAKED_AGENT_PATH:
+        raise DockerEngineError("Pulled image identities do not match Agent manifest")
+    image_id = image_info.get("Id")
+    if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+        raise DockerEngineError("Pulled Agent image has no valid immutable image ID")
+    return image_id
+
+
+def _require_unmounted_baked_agent(container: dict[str, Any]) -> None:
+    """A signed image cannot upgrade an overridden runtime Agent."""
+    env = list((container.get("Config") or {}).get("Env") or [])
+    agent_paths = [str(item).partition("=")[2] for item in env
+                   if str(item).startswith("HERMES_WEBUI_AGENT_DIR=")]
+    python_paths = [str(item).partition("=")[2] for item in env
+                    if str(item).startswith("PYTHONPATH=")]
+    if (len(agent_paths) > 1 or agent_paths and agent_paths[0] != _BAKED_AGENT_PATH
+            or len(python_paths) > 1 or python_paths and python_paths[0] != _BAKED_AGENT_PATH):
+        raise DockerEngineError("Runtime Agent source differs from baked image")
+    host = container.get("HostConfig") or {}
+    destinations = [_bind_destination(spec) for spec in (host.get("Binds") or [])]
+    tmpfs = host.get("Tmpfs") or {}
+    if not isinstance(tmpfs, dict):
+        raise DockerEngineError("Runtime tmpfs mount topology is invalid")
+    destinations.extend(tmpfs)
+    for mount in (host.get("Mounts") or []) + (container.get("Mounts") or []):
+        destinations.append(str(mount.get("Target") or mount.get("Destination") or ""))
+    for destination in destinations:
+        path = os.path.normpath(destination)
+        if (path == _BAKED_AGENT_PATH or path.startswith(_BAKED_AGENT_PATH + "/")
+                or _BAKED_AGENT_PATH.startswith(path.rstrip("/") + "/")
+                or path in ({"/app", "/app/hermes-agent-src"} | _LEGACY_AGENT_DIRS)
+                or path.startswith("/app/hermes-agent-src/")):
+            raise DockerEngineError("Runtime mount obscures baked Hermes Agent")
+
+
+def _require_unmanaged_agent_target(container: dict[str, Any]) -> None:
+    """The socket transaction cannot pin Compose's next recreation digest."""
+    labels = (container.get("Config") or {}).get("Labels") or {}
+    if not isinstance(labels, dict):
+        raise DockerEngineError("Agent target ownership is unknown")
+    if any(str(key).startswith("com.docker.compose.") for key in labels):
+        raise DockerEngineError("Compose-managed Agent update needs digest reconciliation")
+
+
 def replace_container(
     target: str,
     image: str,
@@ -483,6 +695,8 @@ def replace_container(
     *,
     timeout: int = 180,
     progress: Any = None,
+    expected_agent_image: dict[str, str] | None = None,
+    expected_old_id: str | None = None,
 ) -> dict[str, Any]:
     current_stage = "accepted"
 
@@ -494,57 +708,135 @@ def replace_container(
 
     engine = DockerEngine()
     old = engine.inspect(target)
+    if expected_old_id is not None and old.get("Id") != expected_old_id:
+        raise DockerEngineError("Agent update target owner changed after preflight")
     was_running = bool((old.get("State") or {}).get("Running"))
     if not was_running:
         raise DockerEngineError("target container is not running")
     name = _container_name(old)
     backup = f"{name}.hermes-update-old"
     temp = f"{name}.hermes-update-new"
+    if expected_agent_image is not None:
+        signed_old_id = old.get("Id")
+        if not isinstance(signed_old_id, str) or not re.fullmatch(r"[0-9a-f]{64}", signed_old_id):
+            raise DockerEngineError("Cannot establish current Agent container ownership")
+        _require_unmanaged_agent_target(old)
     report("pulling_image", 1)
     engine.pull(image)
     create_image = image
     report("verifying_image", 2)
     image_info = engine.inspect_image(image)
-    if version:
+    if expected_agent_image is not None:
+        if image != expected_agent_image.get("image"):
+            raise DockerEngineError("Requested image differs from authenticated Agent image")
+        create_image = _verified_agent_image_id(image_info, expected_agent_image)
+        _require_unmounted_baked_agent(old)
+    elif version:
         create_image = _verified_image_id(engine, image, version, inspected=image_info)
+        # A WebUI-only update must not silently change the running Agent.
+        # Resolve the old container's exact image ID, not its mutable tag.
+        old_image_id = old.get("Image")
+        if not isinstance(old_image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", old_image_id):
+            raise DockerEngineError("Cannot verify current Agent image identity")
+        old_image = engine.inspect_image(old_image_id)
+        if old_image.get("Id") != old_image_id:
+            raise DockerEngineError("Cannot verify current Agent image identity")
+        old_contract = _baked_agent_contract(old_image)
+        new_contract = _baked_agent_contract(image_info)
+        if old_contract is None or new_contract is None or old_contract != new_contract:
+            raise DockerEngineError("WebUI-only update would change an unverified Agent revision")
+        _require_unmounted_baked_agent(old)
     if _baked_agent_contract(image_info) is None:
         raise DockerEngineError("pulled image has no valid baked Hermes Agent identity")
     create_payload = _create_payload(old, create_image, image_info=image_info)
+    if expected_agent_image is not None:
+        _require_unmounted_baked_agent(create_payload)
+        _require_free_transaction_names(engine, backup, temp)
+        current = engine.inspect(target)
+        if current.get("Id") != signed_old_id or not (current.get("State") or {}).get("Running"):
+            raise DockerEngineError("Agent update target owner changed before stop")
     report("stopping_old_container", 3)
-    engine.rename(target, backup)
     try:
-        engine.stop(backup)
+        engine.rename(signed_old_id if expected_agent_image is not None else target, backup)
+    except Exception:
+        # Docker may have completed the rename before the socket reply failed.
+        # Restore only the exact old ID when the original name is absent.
+        old_id = old.get("Id")
+        try:
+            displaced = engine.inspect(backup)
+            if (not isinstance(old_id, str) or displaced.get("Id") != old_id):
+                raise DockerEngineError("rename ownership is ambiguous; manual recovery required")
+            try:
+                engine.inspect(name)
+            except DockerEngineError as check_error:
+                if not re.search(r'(?:\b404\b|not found|no such container)', str(check_error), re.I):
+                    raise
+            else:
+                raise DockerEngineError("original name was taken; manual recovery required")
+            engine.rename(old_id, name)
+            restored = engine.inspect(name)
+            if restored.get("Id") != old_id or not (restored.get("State") or {}).get("Running"):
+                raise DockerEngineError("rename recovery could not verify original owner")
+        except DockerEngineError:
+            raise
+        raise
+    created_id: str | None = None
+    try:
+        engine.stop(signed_old_id if expected_agent_image is not None else backup)
         report("starting_new_container", 4)
-        engine.create(temp, create_payload)
-        engine.rename(temp, name)
-        engine.start(name)
+        created = engine.create(temp, create_payload)
+        if expected_agent_image is not None:
+            created_id = (created or {}).get("Id")
+            if not isinstance(created_id, str) or not re.fullmatch(r"[0-9a-f]{64}", created_id):
+                raise DockerEngineError("Cannot establish new container ownership")
+        engine.rename(created_id if expected_agent_image is not None else temp, name)
+        engine.start(created_id if expected_agent_image is not None else name)
         report("waiting_for_health", 5)
         deadline = time.monotonic() + timeout
         became_healthy = False
         while time.monotonic() < deadline:
-            if _healthy(engine, name):
+            if _healthy(engine, created_id if expected_agent_image is not None else name):
                 became_healthy = True
                 break
             time.sleep(2)
         if not became_healthy:
             raise DockerEngineError("replacement container did not become healthy")
         report("verifying_runtime", 6)
-        _verify_runtime_contract(old, engine.inspect(name), expected_payload=create_payload)
+        _verify_runtime_contract(old, engine.inspect(created_id if expected_agent_image is not None else name), expected_payload=create_payload)
+        if expected_agent_image is not None:
+            _verify_imported_agent(engine, created_id, expected_agent_image["agent_commit"])
+            if engine.inspect(name).get("Id") != created_id:
+                raise DockerEngineError("Agent replacement name owner changed; manual recovery required")
     except Exception:
         failed_stage = current_stage
         report("rolling_back", 0, failed_stage=failed_stage)
         try:
-            engine.remove(name, force=True)
-        except Exception:
-            pass
-        try:
-            engine.remove(temp, force=True)
-        except Exception:
-            pass
-        try:
-            engine.rename(backup, name)
+            if expected_agent_image is not None:
+                if engine.inspect(backup).get("Id") != old.get("Id"):
+                    raise DockerEngineError("rollback owner changed; manual recovery required")
+                for possible in (name, temp):
+                    try:
+                        observed = engine.inspect(possible)
+                    except DockerEngineError as exc:
+                        if re.search(r'(?:\b404\b|not found|no such container)', str(exc), re.I):
+                            continue
+                        raise
+                    if not created_id or observed.get("Id") != created_id:
+                        raise DockerEngineError("rollback name owned by another container; manual recovery required")
+                    engine.remove(created_id, force=True)
+            else:
+                for possible in (name, temp):
+                    try:
+                        engine.remove(possible, force=True)
+                    except Exception:
+                        pass
+            engine.rename(signed_old_id if expected_agent_image is not None else backup, name)
             if was_running:
-                _start_if_stopped(engine, name)
+                restore_target = signed_old_id if expected_agent_image is not None else name
+                _start_if_stopped(engine, restore_target)
+                _wait_for_restored_health(engine, restore_target, timeout)
+            if expected_agent_image is not None and engine.inspect(name).get("Id") != old.get("Id"):
+                raise DockerEngineError("rollback restored another container; manual recovery required")
             report(
                 "rolled_back", 0, state="failed", rolled_back=True,
                 failed_stage=failed_stage,
@@ -557,6 +849,11 @@ def replace_container(
             raise DockerEngineError(f"update failed and rollback failed: {rollback_error}")
         raise
     report("cleaning_up", 7)
+    if expected_agent_image is not None:
+        # Keep the stopped exact previous owner until a separate application
+        # acceptance and Compose digest reconciliation are complete.
+        return {"ok": True, "container": name, "image": image,
+                "rollback_container": backup, "cleanup_pending": True}
     cleanup_pending = False
     try:
         engine.remove(backup, force=True)
@@ -579,6 +876,40 @@ def request_update(channel: str, version: str, sha: str, socket_path: str = CONT
         client.close()
     result = json.loads(response.decode("utf-8"))
     return result if isinstance(result, dict) else {"ok": False, "message": "Invalid updater response"}
+
+
+def request_agent_update(socket_path: str = CONTROL_SOCKET) -> dict[str, Any]:
+    """Request the sidecar's independently configured, signed Agent release."""
+    token_path = Path(os.getenv("HERMES_WEBUI_UPDATE_TOKEN_FILE", CONTROL_TOKEN))
+    token = token_path.read_text(encoding="utf-8").strip()
+    payload = json.dumps({"action": "update_agent", "token": token}).encode()
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(5)
+    try:
+        client.connect(socket_path)
+        client.sendall(payload + b"\n")
+        response = client.recv(8192)
+    finally:
+        client.close()
+    result = json.loads(response.decode("utf-8"))
+    return result if isinstance(result, dict) else {"ok": False, "message": "Invalid updater response"}
+
+
+def request_agent_preflight(socket_path: str = CONTROL_SOCKET) -> dict[str, Any]:
+    """Read the sidecar's authenticated availability, without Docker writes."""
+    token_path = Path(os.getenv("HERMES_WEBUI_UPDATE_TOKEN_FILE", CONTROL_TOKEN))
+    token = token_path.read_text(encoding="utf-8").strip()
+    payload = json.dumps({"action": "agent_preflight", "token": token}).encode()
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(5)
+    try:
+        client.connect(socket_path)
+        client.sendall(payload + b"\n")
+        response = client.recv(8192)
+    finally:
+        client.close()
+    result = json.loads(response.decode("utf-8"))
+    return result if isinstance(result, dict) else {"ok": False}
 
 
 def request_health(socket_path: str = CONTROL_SOCKET) -> dict[str, Any]:
@@ -651,6 +982,77 @@ def _control_request(
         if snapshot is None:
             return {"ok": False, "message": "Update operation not found"}, None
         return {"ok": True, "progress": snapshot}, None
+    if payload.get("action") in ("agent_preflight", "update_agent"):
+        manifest_path = os.getenv("HERMES_WEBUI_AGENT_MANIFEST_PATH", "")
+        signature_path = os.getenv("HERMES_WEBUI_AGENT_MANIFEST_SIGNATURE_PATH", "")
+        agent_commit = os.getenv("HERMES_WEBUI_AGENT_COMMIT", "")
+        repository = os.getenv("HERMES_WEBUI_DOCKER_IMAGE", "24802117/hermes-webui").strip()
+        if (not manifest_path or not signature_path
+                or not re.fullmatch(r"[0-9a-f]{40}", agent_commit)
+                or not re.fullmatch(r"(?:[a-z0-9][a-z0-9._-]*(?::[0-9]{1,5})?/)(?:[a-z0-9][a-z0-9._-]*/)*[a-z0-9][a-z0-9._-]*", repository)):
+            return {"ok": False, "message": "Signed Agent release is not configured"}, None
+        if payload.get("action") == "update_agent" and not busy.acquire(blocking=False):
+            return {"ok": False, "message": "Docker update already in progress"}, None
+        try:
+            expected = preflight_agent_manifest(
+                manifest_path, signature_path, repository=repository,
+                platform=f"linux/{os.uname().machine.replace('x86_64', 'amd64').replace('aarch64', 'arm64')}",
+                agent_commit=agent_commit,
+            )
+            target = os.getenv("HERMES_WEBUI_UPDATE_TARGET", "hermes-webui").strip()
+            if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", target):
+                raise DockerEngineError("Invalid Agent update target")
+            # The banner must not claim the release is installable on a
+            # mounted/stale runtime that the transaction will reject anyway.
+            live = DockerEngine().inspect(target)
+            if not (live.get("State") or {}).get("Running"):
+                raise DockerEngineError("Agent update target is not running")
+            _require_unmanaged_agent_target(live)
+            _require_unmounted_baked_agent(live)
+            old_image_id = live.get("Image")
+            if not isinstance(old_image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", old_image_id):
+                raise DockerEngineError("Cannot verify current Agent image identity")
+            old_image = DockerEngine().inspect_image(old_image_id)
+            if old_image.get("Id") != old_image_id:
+                raise DockerEngineError("Cannot verify current Agent image identity")
+            old_contract = _baked_agent_contract(old_image)
+            if old_contract is None or old_contract[1] == expected["agent_commit"]:
+                raise DockerEngineError("No verifiable newer Agent image for this target")
+            if payload.get("action") == "agent_preflight":
+                return {
+                    "ok": True, "target": "agent", "latest_sha": expected["agent_commit"],
+                    "latest_version": expected["agent_version"],
+                }, None
+            old_id = live.get("Id")
+            if not isinstance(old_id, str) or not re.fullmatch(r"[0-9a-f]{64}", old_id):
+                raise DockerEngineError("Cannot verify Agent update target owner")
+            operation_id, initial_progress = progress_store.start(expected["webui_version"])
+        except Exception:
+            if payload.get("action") == "update_agent":
+                busy.release()
+            return {"ok": False, "message": "Signed Agent release cannot be authenticated"}, None
+
+        def run_agent_update() -> None:
+            try:
+                result = replace_container(
+                    target, expected["image"], expected_agent_image=expected,
+                    expected_old_id=old_id,
+                    progress=lambda stage, step, **extra: progress_store.advance(
+                        operation_id, stage, step, **extra),
+                )
+                progress_store.complete(operation_id, cleanup_pending=bool(result.get("cleanup_pending")))
+            except Exception:
+                logger.exception("Signed Agent update operation %s failed", operation_id)
+                progress_store.fail(operation_id)
+            finally:
+                busy.release()
+
+        return {
+            "ok": True, "target": "agent", "restart_scheduled": True,
+            "latest_version": expected["agent_version"],
+            "latest_sha": expected["agent_commit"],
+            "operation_id": operation_id, "progress": initial_progress,
+        }, threading.Thread(target=run_agent_update, name="hermes-webui-agent-update", daemon=True)
     if payload.get("action") != "update" or not _release_is_valid(channel, version) or not sha or len(sha) > 128:
         return {"ok": False, "message": "Invalid update request"}, None
     if not busy.acquire(blocking=False):

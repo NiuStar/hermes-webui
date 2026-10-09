@@ -10094,6 +10094,10 @@ function _formatManualUpdateInstruction(info){
   if(!(info&&info.no_git&&info.manual_update&&info.behind>0&&!info.deployment_online_update)) return null;
   return t('settings_update_manual_docker','One-click Docker update is disabled for this deployment.');
 }
+function _formatAgentImageUpdateInstruction(info){
+  if(!(info&&info.image_managed&&info.behind>0&&!info.deployment_online_update)) return null;
+  return _i18nUpdateText('settings_agent_image_pending','Agent has a newer upstream release, but Docker Agent online installation is not enabled. Updating WebUI separately does not necessarily update Agent.');
+}
 function _formatUpdateCheckError(label,info){
   if(!info||!info.error) return null;
   const detail=String(info.error).replace(/^fetch failed:?\s*/i,'').trim();
@@ -10410,7 +10414,7 @@ function _showUpdateBanner(data){
     const webuiManual=!!(data&&data.webui&&data.webui.manual_update&&data.webui.behind>0);
     const webuiOnline=!!(data&&data.webui&&data.webui.deployment_online_update);
     const webuiUpdatable=!!(data&&data.webui&&data.webui.behind>0&&(!webuiManual||webuiOnline));
-    const agentUpdatable=!!(data&&data.agent&&data.agent.behind>0);
+    const agentUpdatable=!!(data&&data.agent&&data.agent.behind>0&&(!data.agent.image_managed||data.agent.deployment_online_update));
     const hasApplyTargets=webuiUpdatable||agentUpdatable;
     btnApply.disabled=!hasApplyTargets;
     btnApply.style.display=hasApplyTargets?'':'none';
@@ -10430,7 +10434,8 @@ function _showUpdateBanner(data){
   const msg=$('updateMsg');
   if(msg){
     const manualInstruction=_formatManualUpdateInstruction(data&&data.webui);
-    msg.textContent='\u2B06 '+parts.join(', ')+' available'+(manualInstruction?' · '+manualInstruction:'');
+    const agentInstruction=_formatAgentImageUpdateInstruction(data&&data.agent);
+    msg.textContent='\u2B06 '+parts.join(', ')+' available'+(manualInstruction?' · '+manualInstruction:'')+(agentInstruction?' · '+agentInstruction:'');
   }
   const banner=$('updateBanner');
   if(banner) banner.classList.add('visible');
@@ -10577,7 +10582,7 @@ async function applyUpdates(){
   const forceBtnReset=$('btnForceUpdate');
   if(forceBtnReset){forceBtnReset.style.display='none';forceBtnReset.dataset.target='';}
   const targets=[];
-  if(window._updateData?.agent?.behind>0) targets.push('agent');
+  if(window._updateData?.agent?.behind>0&&(!window._updateData.agent.image_managed||window._updateData.agent.deployment_online_update)) targets.push('agent');
   if(window._updateData?.webui?.behind>0&&(!window._updateData?.webui?.manual_update||window._updateData?.webui?.deployment_online_update)) targets.push('webui');
   if(!targets.length){
     const msg=updateText('update_no_target','No update target selected. Refresh update status and retry.');
@@ -10604,7 +10609,7 @@ async function applyUpdates(){
         resetApplyButton(0);
         return;
       }
-      if(target==='webui'&&window._updateData?.webui?.deployment_online_update){
+      if(window._updateData?.[target]?.deployment_online_update){
         if(res.operation_id){
           if(res.progress) _renderDockerUpdateProgress(res.progress);
           const completed=await _monitorDockerUpdateProgress(res.operation_id,baselineServerIdentity);

@@ -17977,9 +17977,11 @@ def handle_post(handler, parsed) -> bool:
         _apply_channel = body.get("channel") if isinstance(body, dict) else None
         if _apply_channel not in ("stable", "experimental"):
             _apply_channel = None
-        from api.updates import apply_docker_update, apply_update, deployment_info
+        from api.updates import apply_update, apply_docker_update, apply_docker_agent_update, deployment_info
         if deployment_info().get("type") == "docker" and target == "webui":
             return j(handler, apply_docker_update(_apply_channel))
+        if deployment_info().get("type") == "docker" and target == "agent":
+            return j(handler, apply_docker_agent_update())
 
         return j(handler, apply_update(target, _apply_channel))
 
@@ -17987,6 +17989,9 @@ def handle_post(handler, parsed) -> bool:
         target = body.get("target", "")
         if target not in ("webui", "agent"):
             return bad(handler, 'target must be "webui" or "agent"')
+        from api.updates import deployment_info
+        if target == "agent" and deployment_info().get("type") == "docker":
+            return j(handler, {"ok": False, "target": "agent", "message": "Docker Agent online installation is not enabled."})
         _force_channel = body.get("channel") if isinstance(body, dict) else None
         if _force_channel not in ("stable", "experimental"):
             _force_channel = None
@@ -18005,6 +18010,9 @@ def handle_post(handler, parsed) -> bool:
         target = body.get("target", "")
         if target not in ("webui", "agent"):
             return bad(handler, 'target must be "webui" or "agent"')
+        from api.updates import deployment_info
+        if target == "agent" and deployment_info().get("type") == "docker":
+            return j(handler, {"ok": False, "target": "agent", "message": "Docker Agent online installation is not enabled."})
         from api.updates import apply_clear_lock
 
         return j(handler, apply_clear_lock(target))

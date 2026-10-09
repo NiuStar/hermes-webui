@@ -61,22 +61,145 @@ build, recorded in `/opt/hermes/.hermes-agent-revision` and the
 its `.git` directory so it cannot drift at runtime. `HERMES_WEBUI_AGENT_DIR`
 defaults to `/opt/hermes`.
 
+### Checking and applying Agent updates from WebUI
+
+The Agent bundled in `/opt/hermes` is image-owned. In **Check for updates**,
+WebUI reads its `.hermes-agent-revision` stamp, resolves the official latest
+published Agent release tag to a commit (including annotated tags), and verifies
+the GitHub commit relationship. If that check fails, it reports **unknown**,
+not “up to date” or “update available.” Git-checkout Agent installations keep
+their existing Git update path. The **Ignore Agent updates** setting skips this
+check too.
+
+An upstream Agent release alone is **not** an installable Docker update. A
+WebUI release tag, Dockerfile pin or image's self-reported Agent label does not
+establish an installable artifact. Docker `target=agent` is allowed only when
+the separately configured updater sidecar can authenticate a signed image
+manifest for the current platform and Agent commit. Without this opt-in, the
+button remains disabled and direct apply fails closed. A source-mount/custom
+Agent override is not treated as the image's baked revision.
+The current signed-image transaction does not reconcile an external Compose
+file with the new digest. A Compose-owned target is therefore rejected by the
+sidecar before pull or stop (including the read-only availability preflight),
+even if the optional overlay below parses successfully. Do not enable its
+Agent install button for a Compose deployment until a separately accepted,
+reversible configuration-reconciliation path is implemented and tested.
+
+For online installation, first publish an independently verified
+WebUI+Agent image and signed manifest binding the full WebUI and Agent commits,
+compatibility tests, target platform and immutable registry digest. The
+updater sidecar must authenticate that manifest and pull by digest, check image
+identity *before* stopping the old container, then verify runtime, actual
+Agent source and health with rollback on failure. No production publisher key
+or release artifact is provisioned; the remaining publication and trust steps
+are required before production installation. The
+existing sidecar's tag-based WebUI update is **not** an Agent update. Neither
+WebUI nor Hermes Agent runs `hermes update` inside the image. Production
+switching or restart requires operator approval.
+
+The repository contains a signed-manifest contract and an opt-in installer path:
+`api/agent_image_manifest.py` verifies detached Ed25519 signatures over exact
+JSON bytes and requires a repository, platform, immutable `sha256:` digest,
+full WebUI/Agent commits, versions and a compatibility-receipt hash.
+`scripts/sign_agent_image_manifest.py` can sign an independently supplied
+release candidate with an external private key; the sidecar's
+`preflight_agent_manifest()` independently reads an operator-provisioned
+public key (`HERMES_WEBUI_AGENT_MANIFEST_PUBKEY`) and compares its raw-key
+SHA-256 to the separately configured
+`HERMES_WEBUI_AGENT_MANIFEST_PUBKEY_SHA256` before returning the verified
+`repository@sha256:…`. The sidecar's `update_agent` action accepts no browser-
+selected image, commit or key; it uses its own manifest paths and expected Agent
+commit. It pulls by digest, verifies the platform and image labels before stop,
+then checks the running venv and staged source after restart. These components
+**do not** publish an image or authenticate the producer of a `passed: true`
+compatibility receipt. No production trust key or signed release is provisioned.
+The sidecar's system Python now includes the signature verifier at image
+build time; that does not imply the trust key is configured. New images also
+carry a full `org.opencontainers.image.revision` WebUI commit label for
+signed-image comparison; older images lacking it cannot pass that gate.
+The prototype rejects runtime Agent overrides and mounted Agent source paths
+before any stop/rename, including Tmpfs mounts over `/opt`, `/opt/hermes`, or
+`/app/hermes-agent-src` and legacy sources. The update checker also treats an
+`/opt` parent mount as an unknown baked-Agent identity.
+
+The sidecar contains a signed-image runtime probe that, after health and before
+completion, checks the actual `/app/venv/bin/python3` import origin and
+`hermes_cli.config` resolution, the baked and staged revision stamps, and the
+Python source bytes in `/opt/hermes` versus `/app/hermes-agent-src`; probe failure
+enters the existing rollback path. It is called by the sidecar's signed-image
+action, not by the WebUI-only tag update. In isolated `.3` QA, a complete
+Python 3.14 image passed Docker health, dependency checks, CLI and a no-network
+Agent tool loop against a local fixture; the signed digest replaced an isolated
+old container, and injected post-probe failure restored the original container
+ID and HTTP health. The QA-only key, receipt and loopback registry are **not**
+production publication or publisher authentication. The runtime probe does not
+prove an Agent tool call by itself. Persistent `/app` mounts are rejected before
+stopping the old container by the source-override guard; support for a
+transactionally reversible venv/source migration on persistent `/app` remains a
+separate release blocker for those deployments. The successful signed QA update
+keeps the stopped previous container for operator acceptance; it does not remove
+that rollback handle automatically. A failed update must wait for the restored
+old container to be healthy before reporting `rolled_back`.
+
+Before enabling installation: publish/verify a reproducible release receipt
+bound to the actual registry digest and platform on the build host; provision
+and rotate a trusted public key independently of WebUI content; make the
+sidecar verify the signed target against the pulled image and actual runtime
+Agent, including mount/Compose source overrides; preserve rollback and verify
+health plus an Agent call. Test each supported deployment topology in an
+isolated stack. A signature over a hand-written `passed: true` receipt or a
+self-reported image label alone must never open the install button.
+The stock Compose file still uses floating tags and `pull_policy: always`;
+pin the accepted digest in Compose before treating a successful replacement
+as durable across future restarts/recreates.
+
+For an **isolated configuration rehearsal only**, the optional
+`docker-compose.agent-update.yml` overlay is a fail-closed configuration
+template, not a ready-to-run Agent installer. Supply the complete initial accepted
+`HERMES_WEBUI_ACCEPTED_IMAGE=repository@sha256:…` and the matching
+`HERMES_WEBUI_DOCKER_IMAGE` repository, plus a full expected Agent commit.
+The accepted image is the **current** Compose pin; the signed manifest holds
+the **next** candidate digest, so those two digests normally differ.
+Provision the detached manifest, signature, and publisher public key in an
+operator-controlled directory and bind them as read-only files. Obtain the
+publisher-key SHA-256 **independently of the manifest, image, and QA keys**.
+Run `python3 scripts/check_agent_update_setup.py --env-file <private-env-file>`
+on the target host, then resolve the exact ordered Compose stack with
+`docker compose -f docker-compose.yml -f docker-compose.agent-update.yml
+--profile self-update config --format json` before any start. The setup check
+verifies file safety, pinned key, signature, platform, repository and Agent
+commit; it does **not** authenticate who ran the compatibility tests or grant
+permission to start production containers. The overlay requires explicit
+values and cannot be enabled by the default Compose command alone. **Do not
+start this overlay for Agent installation:** Compose-managed containers are
+currently rejected, because the sidecar cannot safely change the effective
+Compose digest as part of its rollback transaction. Once such a transaction
+exists, `scripts/check_agent_compose_pin.py` must verify the same ordered
+Compose stack, accepted registry digest, running container ID, image ID and
+health after recreation. An isolated QA container without Compose labels
+cannot satisfy that durability gate. Do not reuse a QA-only registry or
+signing key as the production publisher.
+The existing WebUI-only tag update now requires the old container's immutable
+image ID to resolve to the same baked Agent commit as the candidate image and
+rejects Agent source overrides before stopping it. If a release would change
+the Agent (or either identity cannot be verified), it fails closed; use a
+separately verified combined-image release instead. This comparison is not
+a substitute for signed provenance of a new Agent release.
+
 Multi-container and development deployments can still override that default with
 an explicit `HERMES_WEBUI_AGENT_DIR` and a read-only source mount. An override is
 a separate runtime contract: inspect the mounted source identity because the
 image's Agent revision label then describes the baked fallback, not the mounted
 checkout actually used by WebUI.
 
-For online updates, images must declare both a valid 40-character
+For the existing WebUI-only online update, images must declare both a valid 40-character
 `org.opencontainers.image.hermes-agent.revision` and
 `org.opencontainers.image.hermes-agent.path=/opt/hermes`; missing or malformed
-identity fails before the old container is stopped. The updater migrates legacy
-Agent mounts targeting `~/.hermes/hermes-agent` or `/opt/hermes-agent` from both
-Docker `Binds` and `HostConfig.Mounts`, including combined propagation options.
-It changes `HERMES_WEBUI_AGENT_DIR` to `/opt/hermes` and replaces only known
-legacy Agent entries in `PYTHONPATH`, preserving every other component exactly.
-An explicitly configured custom Agent directory and an explicit mount over
-`/opt/hermes` are left unchanged. After health succeeds, the replacement's OCI
+identity fails before the old container is stopped. The WebUI-only updater now
+rejects legacy mounts, custom Agent directories, and mounts over `/opt/hermes`
+instead of silently migrating them. The generic payload constructor retains
+legacy migration behavior for other contexts, but it is not an authorization
+to change the Agent via the WebUI-only route. After health succeeds, the replacement's OCI
 label set, ordered environment, full protected HostConfig, and network contract
 are read back; any mismatch triggers rollback.
 

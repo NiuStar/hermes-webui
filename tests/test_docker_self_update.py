@@ -1,6 +1,90 @@
 import threading
+import pytest
 
 from api import docker_self_update as dsu
+
+
+def test_signed_agent_action_requires_sidecar_manifest_not_request_fields(monkeypatch):
+    monkeypatch.setenv('HERMES_WEBUI_DOCKER_SELF_UPDATE', '1')
+    monkeypatch.setenv('HERMES_WEBUI_AGENT_MANIFEST_PATH', '/qa/manifest.json')
+    monkeypatch.setenv('HERMES_WEBUI_AGENT_MANIFEST_SIGNATURE_PATH', '/qa/manifest.sig')
+    monkeypatch.setenv('HERMES_WEBUI_AGENT_COMMIT', 'c' * 40)
+    monkeypatch.setenv('HERMES_WEBUI_DOCKER_IMAGE', '24802117/hermes-webui')
+    calls = []
+    expected = {'image': '24802117/hermes-webui@sha256:' + 'a' * 64,
+                'webui_version': 'v2026.10.08-r2', 'agent_commit': 'c' * 40,
+                'agent_version': 'v0.21.6'}
+    def preflight(*args, **kwargs):
+        calls.append(('preflight', args, kwargs))
+        return expected
+    monkeypatch.setattr(dsu, 'preflight_agent_manifest', preflight)
+    class ReadOnlyEngine:
+        def inspect(self, target):
+            assert target == 'hermes-webui'
+            return {'Id': 'a' * 64, 'Image': 'sha256:' + 'f' * 64, 'State': {'Running': True},
+                    'Config': {'Env': ['HERMES_WEBUI_AGENT_DIR=/opt/hermes']},
+                    'HostConfig': {'Binds': []}, 'Mounts': []}
+        def inspect_image(self, image):
+            assert image == 'sha256:' + 'f' * 64
+            return {'Id': image, 'Config': {'Labels': {
+                'org.opencontainers.image.hermes-agent.revision': 'b' * 40,
+                'org.opencontainers.image.hermes-agent.path': '/opt/hermes'}}}
+        def pull(self, *_): pytest.fail('no image pull during request validation')
+    monkeypatch.setattr(dsu, 'DockerEngine', ReadOnlyEngine)
+    monkeypatch.setattr(dsu, 'replace_container', lambda *args, **kwargs: calls.append(('replace', args, kwargs)) or {'ok': True})
+    request = {'action': 'update_agent', 'token': 'known',
+               'image': 'attacker/image@sha256:' + 'b' * 64,
+               'agent_commit': 'd' * 40, 'target': 'other-container'}
+    reply, worker = dsu._control_request(request, busy=threading.Lock(), expected_token='known',
+                                         progress=dsu.UpdateProgress())
+    assert reply['ok'] is True and worker is not None
+    worker.start(); worker.join(timeout=2)
+    assert [name for name, *_ in calls] == ['preflight', 'replace']
+    assert calls[0][1] == ('/qa/manifest.json', '/qa/manifest.sig')
+    assert calls[1][1] == ('hermes-webui', expected['image'])
+    assert calls[1][2]['expected_agent_image'] is expected
+    assert calls[1][2]['expected_old_id'] == 'a' * 64
+
+
+def test_signed_agent_action_fails_closed_without_manifest(monkeypatch):
+    monkeypatch.setenv('HERMES_WEBUI_DOCKER_SELF_UPDATE', '1')
+    monkeypatch.delenv('HERMES_WEBUI_AGENT_MANIFEST_PATH', raising=False)
+    reply, worker = dsu._control_request({'action': 'update_agent', 'token': 'known'},
+                                         busy=threading.Lock(), expected_token='known')
+    assert reply['ok'] is False and worker is None
+
+
+def test_signed_agent_preflight_is_read_only_and_uses_sidecar_config(monkeypatch):
+    monkeypatch.setenv('HERMES_WEBUI_DOCKER_SELF_UPDATE', '1')
+    monkeypatch.setenv('HERMES_WEBUI_AGENT_MANIFEST_PATH', '/qa/manifest.json')
+    monkeypatch.setenv('HERMES_WEBUI_AGENT_MANIFEST_SIGNATURE_PATH', '/qa/manifest.sig')
+    monkeypatch.setenv('HERMES_WEBUI_AGENT_COMMIT', 'c' * 40)
+    calls = []
+    expected = {'image': '24802117/hermes-webui@sha256:' + 'a' * 64,
+                'agent_commit': 'c' * 40, 'agent_version': 'v0.21.6',
+                'webui_version': 'v2026.10.08-r2'}
+    monkeypatch.setattr(dsu, 'preflight_agent_manifest',
+                        lambda *args, **kwargs: calls.append((args, kwargs)) or expected)
+    class ReadOnlyEngine:
+        def inspect(self, target):
+            assert target == 'hermes-webui'
+            return {'Image': 'sha256:' + 'f' * 64, 'State': {'Running': True},
+                    'Config': {'Env': ['HERMES_WEBUI_AGENT_DIR=/opt/hermes']},
+                    'HostConfig': {'Binds': []}, 'Mounts': []}
+        def inspect_image(self, image):
+            assert image == 'sha256:' + 'f' * 64
+            return {'Id': image, 'Config': {'Labels': {
+                'org.opencontainers.image.hermes-agent.revision': 'b' * 40,
+                'org.opencontainers.image.hermes-agent.path': '/opt/hermes'}}}
+        def pull(self, *_): pytest.fail('no image pull on preflight')
+    monkeypatch.setattr(dsu, 'DockerEngine', ReadOnlyEngine)
+    monkeypatch.setattr(dsu, 'replace_container', lambda *_a, **_kw: pytest.fail('no Docker writes on preflight'))
+    reply, worker = dsu._control_request({'action': 'agent_preflight', 'token': 'known',
+                                          'agent_commit': 'd' * 40},
+                                         busy=threading.Lock(), expected_token='known')
+    assert reply == {'ok': True, 'target': 'agent', 'latest_sha': 'c' * 40,
+                     'latest_version': 'v0.21.6'}
+    assert worker is None and len(calls) == 1
 
 
 def _old_info():
@@ -542,6 +626,8 @@ def test_pull_failure_reports_old_container_untouched_without_details(monkeypatc
 
 def test_replace_container_reports_real_stage_order(monkeypatch):
     old = _old_info()
+    old['Image'] = 'sha256:' + '0' * 64
+    old['Config']['Env'] = ['HERMES_WEBUI_AGENT_DIR=/opt/hermes', 'PYTHONPATH=/opt/hermes']
 
     class Engine:
         def __init__(self):
@@ -554,10 +640,11 @@ def test_replace_container_reports_real_stage_order(monkeypatch):
                 return result
             if target == 'hermes-webui':
                 return old
-            return {'State': {'Running': False}}
+            raise dsu.DockerEngineError('not found')
         def pull(self, _image): pass
         def inspect_image(self, _image):
-            return {'Id': 'sha256:new', 'Config': {'Labels': {
+            assert _image in {old['Image'], 'repo/webui:latest'}
+            return {'Id': old['Image'] if _image == old['Image'] else 'sha256:new', 'Config': {'Labels': {
                 'org.opencontainers.image.version': 'v1.2.3',
                 'org.opencontainers.image.hermes-agent.revision': 'b' * 40,
                 'org.opencontainers.image.hermes-agent.path': '/opt/hermes',
@@ -591,14 +678,54 @@ def test_replace_container_reports_real_stage_order(monkeypatch):
     ]
 
 
+@pytest.mark.parametrize('old_revision,new_revision,override', [
+    ('a' * 40, 'b' * 40, False),
+    (None, 'b' * 40, False),
+    ('b' * 40, 'b' * 40, True),
+])
+def test_webui_only_update_refuses_unverifiable_or_changed_agent_before_stop(
+        monkeypatch, old_revision, new_revision, override):
+    old = _old_info()
+    old['Config']['Image'] = 'repo/webui:old'
+    old['Image'] = 'sha256:' + '0' * 64
+    if override:
+        old['HostConfig']['Binds'].append('/host/agent:/opt/hermes/hermes_cli:ro')
+
+    class Engine:
+        def __init__(self): self.calls = []
+        def inspect(self, _name): return old
+        def pull(self, image): self.calls.append(('pull', image))
+        def inspect_image(self, image):
+            revision = old_revision if image == old['Image'] else new_revision
+            labels = {'org.opencontainers.image.hermes-agent.path': '/opt/hermes'}
+            if revision:
+                labels['org.opencontainers.image.hermes-agent.revision'] = revision
+            return {'Id': image if image == old['Image'] else 'sha256:' + 'a' * 64,
+                    'Config': {'Labels': {'org.opencontainers.image.version': 'v1.2.3', **labels}}}
+        def rename(self, *_args): self.calls.append(('rename',))
+        def stop(self, *_args): self.calls.append(('stop',))
+
+    engine = Engine()
+    monkeypatch.setattr(dsu, 'DockerEngine', lambda: engine)
+    with pytest.raises(dsu.DockerEngineError):
+        dsu.replace_container('hermes-webui', 'repo/webui:v1.2.3', 'v1.2.3')
+    assert engine.calls == [('pull', 'repo/webui:v1.2.3')]
+
+
 def test_replace_container_rejects_missing_baked_agent_contract_before_stop(monkeypatch):
     old = _old_info()
+    old['Image'] = 'sha256:' + '0' * 64
 
     class Engine:
         def __init__(self): self.calls = []
         def inspect(self, _target): return old
         def pull(self, image): self.calls.append(('pull', image))
         def inspect_image(self, _image):
+            if _image == old['Image']:
+                return {'Id': old['Image'], 'Config': {'Labels': {
+                    'org.opencontainers.image.hermes-agent.revision': 'b' * 40,
+                    'org.opencontainers.image.hermes-agent.path': '/opt/hermes',
+                }}}
             return {'Id': 'sha256:new', 'Config': {'Labels': {
                 'org.opencontainers.image.version': 'v1.2.3',
             }}}
@@ -610,11 +737,82 @@ def test_replace_container_rejects_missing_baked_agent_contract_before_stop(monk
     try:
         dsu.replace_container('hermes-webui', 'repo/webui:v1.2.3', 'v1.2.3')
     except dsu.DockerEngineError as exc:
-        assert 'baked Hermes Agent identity' in str(exc)
+        assert 'unverified Agent revision' in str(exc)
     else:
         raise AssertionError('missing baked Agent contract must fail closed')
     assert engine.calls == [('pull', 'repo/webui:v1.2.3')]
 
+
+def test_webui_only_update_rejects_missing_old_image_id_before_stop(monkeypatch):
+    old = _old_info()
+    class Engine:
+        def __init__(self): self.calls = []
+        def inspect(self, _name): return old
+        def pull(self, image): self.calls.append(('pull', image))
+        def inspect_image(self, _image):
+            return {'Id': 'sha256:' + 'a' * 64, 'Config': {'Labels': {
+                'org.opencontainers.image.version': 'v1.2.3',
+                'org.opencontainers.image.hermes-agent.revision': 'b' * 40,
+                'org.opencontainers.image.hermes-agent.path': '/opt/hermes',
+            }}}
+        def rename(self, *_args): self.calls.append(('rename',))
+        def stop(self, *_args): self.calls.append(('stop',))
+    engine = Engine()
+    monkeypatch.setattr(dsu, 'DockerEngine', lambda: engine)
+    with pytest.raises(dsu.DockerEngineError, match='current Agent image identity'):
+        dsu.replace_container('hermes-webui', 'repo/webui:v1.2.3', 'v1.2.3')
+    assert engine.calls == [('pull', 'repo/webui:v1.2.3')]
+
+
+def test_webui_only_update_refuses_tmpfs_agent_override_before_stop(monkeypatch):
+    old = _old_info()
+    old['Image'] = 'sha256:' + '0' * 64
+    old['HostConfig']['Tmpfs'] = {'/opt/hermes': 'rw'}
+
+    class Engine:
+        def __init__(self): self.calls = []
+        def inspect(self, _name): return old
+        def pull(self, image): self.calls.append(('pull', image))
+        def inspect_image(self, image):
+            return {'Id': image if image == old['Image'] else 'sha256:' + 'a' * 64,
+                    'Config': {'Labels': {
+                        'org.opencontainers.image.version': 'v1.2.3',
+                        'org.opencontainers.image.hermes-agent.revision': 'b' * 40,
+                        'org.opencontainers.image.hermes-agent.path': '/opt/hermes',
+                    }}}
+        def rename(self, *_args): self.calls.append(('rename',))
+        def stop(self, *_args): self.calls.append(('stop',))
+
+    engine = Engine()
+    monkeypatch.setattr(dsu, 'DockerEngine', lambda: engine)
+    with pytest.raises(dsu.DockerEngineError, match='obscures baked Hermes Agent'):
+        dsu.replace_container('hermes-webui', 'repo/webui:v1.2.3', 'v1.2.3')
+    assert engine.calls == [('pull', 'repo/webui:v1.2.3')]
+
+
+def test_webui_only_update_rejects_old_image_inspect_identity_mismatch(monkeypatch):
+    old = _old_info()
+    old['Image'] = 'sha256:' + '0' * 64
+
+    class Engine:
+        def __init__(self): self.calls = []
+        def inspect(self, _name): return old
+        def pull(self, image): self.calls.append(('pull', image))
+        def inspect_image(self, image):
+            return {'Id': 'sha256:' + 'a' * 64,
+                    'Config': {'Labels': {
+                        'org.opencontainers.image.version': 'v1.2.3',
+                        'org.opencontainers.image.hermes-agent.revision': 'b' * 40,
+                        'org.opencontainers.image.hermes-agent.path': '/opt/hermes',
+                    }}}
+        def rename(self, *_args): self.calls.append(('rename',))
+        def stop(self, *_args): self.calls.append(('stop',))
+
+    engine = Engine()
+    monkeypatch.setattr(dsu, 'DockerEngine', lambda: engine)
+    with pytest.raises(dsu.DockerEngineError, match='current Agent image identity'):
+        dsu.replace_container('hermes-webui', 'repo/webui:v1.2.3', 'v1.2.3')
+    assert engine.calls == [('pull', 'repo/webui:v1.2.3')]
 
 
 def test_replace_container_rolls_back_when_new_container_unhealthy(monkeypatch):
@@ -622,8 +820,11 @@ def test_replace_container_rolls_back_when_new_container_unhealthy(monkeypatch):
         def __init__(self): self.calls = []
         def inspect(self, target):
             if target == 'hermes-webui': return _old_info()
-            if target == 'hermes-webui.hermes-update-old': return {'State': {'Running': False}}
-            return {'State': {'Running': False, 'Health': {'Status': 'unhealthy'}}}
+            if target == 'hermes-webui.hermes-update-old':
+                if ('rename', 'hermes-webui', target) not in self.calls:
+                    raise dsu.DockerEngineError('not found')
+                return {'State': {'Running': False}}
+            raise dsu.DockerEngineError('not found')
         def pull(self, image): self.calls.append(('pull', image))
         def inspect_image(self, _image): return {'Config': {'Labels': {
             'org.opencontainers.image.hermes-agent.revision': 'b' * 40,
@@ -646,6 +847,98 @@ def test_replace_container_rolls_back_when_new_container_unhealthy(monkeypatch):
         raise AssertionError('unhealthy replacement must fail')
     assert ('rename', 'hermes-webui.hermes-update-old', 'hermes-webui') in engine.calls
     assert ('start', 'hermes-webui') in engine.calls
+
+
+def test_rollback_must_not_claim_success_until_original_is_healthy(monkeypatch):
+    calls = []
+    def verify(engine, name, timeout):
+        calls.append((name, timeout))
+        raise dsu.DockerEngineError('restored owner is not healthy')
+    monkeypatch.setattr(dsu, '_wait_for_restored_health', verify, raising=False)
+    # Reuse the existing failure fixture's actual replacement/rollback path.
+    test_replace_container_rolls_back_when_new_container_unhealthy(monkeypatch)
+    assert calls == [('hermes-webui', 1)]
+
+
+def test_signed_agent_success_retains_old_container_for_operator_rollback(monkeypatch):
+    old = _old_info()
+    old['Name'] = '/candidate'
+    old['Id'] = 'a' * 64
+    old['State'] = {'Running': True, 'Health': {'Status': 'healthy'}}
+    old['Config']['Env'] = ['HERMES_WEBUI_AGENT_DIR=/opt/hermes']
+    class Engine:
+        def __init__(self): self.calls = []; self.new = False
+        def inspect(self, target):
+            if target in ('candidate', 'b' * 64) and self.new:
+                return {**old, 'Id': 'b' * 64, 'Image': 'sha256:' + 'a' * 64,
+                        'State': {'Running': True, 'Health': {'Status': 'healthy'}}}
+            if target == 'candidate':
+                return old
+            raise dsu.DockerEngineError('not found')
+        def pull(self, image): self.calls.append(('pull', image))
+        def inspect_image(self, image):
+            return {'Id': 'sha256:' + 'a' * 64, 'Config': {'Labels': {
+                'org.opencontainers.image.hermes-agent.path': '/opt/hermes',
+                'org.opencontainers.image.hermes-agent.revision': 'c' * 40}}}
+        def rename(self, a, b): self.calls.append(('rename', a, b))
+        def stop(self, target): self.calls.append(('stop', target))
+        def create(self, target, payload):
+            self.calls.append(('create', target)); return {'Id': 'b' * 64}
+        def start(self, target): self.calls.append(('start', target)); self.new = True
+        def remove(self, target, force=False): self.calls.append(('remove', target, force))
+    engine = Engine()
+    monkeypatch.setattr(dsu, 'DockerEngine', lambda: engine)
+    monkeypatch.setattr(dsu, '_verified_agent_image_id', lambda *_: 'sha256:' + 'a' * 64)
+    monkeypatch.setattr(dsu, '_verify_runtime_contract', lambda *a, **kw: None)
+    monkeypatch.setattr(dsu, '_verify_imported_agent', lambda *a: None)
+    result = dsu.replace_container('candidate', 'repo/webui@sha256:' + 'a' * 64,
+                                   expected_agent_image={'image': 'repo/webui@sha256:' + 'a' * 64,
+                                                         'agent_commit': 'c' * 40})
+    assert result['rollback_container'] == 'candidate.hermes-update-old'
+    assert ('rename', old['Id'], 'candidate.hermes-update-old') in engine.calls
+    assert ('stop', old['Id']) in engine.calls
+    assert ('rename', 'b' * 64, 'candidate') in engine.calls
+    assert ('start', 'b' * 64) in engine.calls
+    assert ('rename', old['Id'], 'candidate') not in engine.calls
+    assert ('remove', 'candidate.hermes-update-old', True) not in engine.calls
+
+
+def test_signed_success_refuses_foreign_name_after_candidate_health(monkeypatch):
+    old = _old_info()
+    old.update(Name='/candidate', Id='a' * 64)
+    old['Config']['Env'] = ['HERMES_WEBUI_AGENT_DIR=/opt/hermes']
+    class Engine:
+        def __init__(self): self.created = False; self.calls = []
+        def inspect(self, name):
+            if name in ('candidate.hermes-update-old', 'candidate.hermes-update-new') and not self.created:
+                raise dsu.DockerEngineError('Docker API 404: not found')
+            if name == 'candidate' and self.created:
+                return {**old, 'Id': 'd' * 64, 'State': {'Running': True}}
+            if name == 'candidate.hermes-update-old':
+                return {**old, 'State': {'Running': False}}
+            if name == 'b' * 64:
+                return {**old, 'Id': name, 'State': {'Running': True, 'Health': {'Status': 'healthy'}}}
+            return old
+        def pull(self, _): pass
+        def inspect_image(self, _):
+            return {'Id': 'sha256:' + 'f' * 64, 'Config': {'Labels': {
+                'org.opencontainers.image.hermes-agent.path': '/opt/hermes',
+                'org.opencontainers.image.hermes-agent.revision': 'c' * 40}}}
+        def rename(self, src, dst): self.calls.append(('rename', src, dst))
+        def stop(self, src): self.calls.append(('stop', src))
+        def create(self, *_): self.created = True; return {'Id': 'b' * 64}
+        def start(self, src): self.calls.append(('start', src))
+        def remove(self, *_, **__): pytest.fail('foreign name must not be removed')
+    engine = Engine()
+    monkeypatch.setattr(dsu, 'DockerEngine', lambda: engine)
+    monkeypatch.setattr(dsu, '_verified_agent_image_id', lambda *_: 'sha256:' + 'f' * 64)
+    monkeypatch.setattr(dsu, '_verify_runtime_contract', lambda *_a, **_k: None)
+    monkeypatch.setattr(dsu, '_verify_imported_agent', lambda *_: None)
+    with pytest.raises(dsu.DockerEngineError, match='rollback failed'):
+        dsu.replace_container('candidate', 'repo/webui@sha256:' + 'a' * 64,
+                              expected_agent_image={'image': 'repo/webui@sha256:' + 'a' * 64,
+                                                    'agent_commit': 'c' * 40}, timeout=1)
+    assert ('stop', old['Id']) in engine.calls
 
 
 def test_replace_container_rejects_stopped_target(monkeypatch):

@@ -1,12 +1,10 @@
 """
 Hermes Web UI -- Self-update checker.
 
-Checks if the webui and hermes-agent git repos are behind their latest
-release tags. Results are cached server-side (30-min TTL) so git fetch runs
-at most twice per hour regardless of client count.
-
-Skips repos that are not git checkouts (e.g. Docker baked images where
-.git does not exist).
+Checks if the webui and hermes-agent repos are behind their latest
+release tags. For Docker's image-owned Agent without .git, checks its baked
+revision against the official published Agent release. Results are cached
+server-side (30-min TTL). Other non-Git installations remain uncheckable.
 """
 import hashlib
 import json
@@ -26,7 +24,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from api.agent_health import get_active_profile_gateway_running_pid
-from api.docker_self_update import CONTROL_SOCKET, request_status, request_update
+from api.docker_self_update import CONTROL_SOCKET, request_agent_preflight, request_agent_update, request_status, request_update
 from api.gateway_restart import restart_active_profile_gateway
 from api.profiles import get_active_profile_name
 from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
@@ -120,6 +118,46 @@ def apply_docker_update(channel=None) -> dict:
         return _apply_docker_update_inner(channel)
     finally:
         _apply_lock.release()
+
+
+def apply_docker_agent_update() -> dict:
+    """Ask the sidecar to install only its independently signed Agent image."""
+    blocker_snapshot = _restart_blocker_snapshot()
+    if blocker_snapshot.get('restart_blocked'):
+        return _restart_blocked_response('agent', blocker_snapshot)
+    if deployment_info().get('online_update') is not True:
+        return {'ok': False, 'target': 'agent', 'message': 'Docker updater sidecar is unavailable for this deployment.'}
+    if not _apply_lock.acquire(blocking=False):
+        return {'ok': False, 'target': 'agent', 'message': 'Update already in progress'}
+    try:
+        version, commit = _published_agent_release()
+        candidate = _check_baked_agent_release(_AGENT_DIR)
+        if (candidate.get('latest_sha') != commit or candidate.get('latest_version') != version
+                or not isinstance(candidate.get('behind'), int) or candidate['behind'] <= 0):
+            return {'ok': False, 'target': 'agent', 'message': 'No verified newer Agent release is available.'}
+        if not docker_agent_release_ready(commit=commit, version=version):
+            return {'ok': False, 'target': 'agent', 'message': 'Signed Agent release does not match the verified official release.'}
+        return request_agent_update()
+    except Exception:
+        logger.exception('Signed Docker Agent update worker launch failed')
+        return {'ok': False, 'target': 'agent', 'message': 'Signed Agent release is not available for online installation.'}
+    finally:
+        _apply_lock.release()
+
+
+def docker_agent_release_ready(*, commit: str | None = None, version: str | None = None) -> bool:
+    """Offer only the sidecar release matching the independently verified latest."""
+    if deployment_info().get('online_update') is not True:
+        return False
+    try:
+        release = request_agent_preflight()
+        return (release.get('ok') is True
+                and isinstance(commit, str) and re.fullmatch(r'[0-9a-f]{40}', commit) is not None
+                and isinstance(version, str) and bool(version)
+                and release.get('latest_sha') == commit
+                and release.get('latest_version') == version)
+    except Exception:
+        return False
 
 
 def _apply_docker_update_inner(channel=None) -> dict:
@@ -1016,6 +1054,116 @@ def _github_release_tags(url=None, *, timeout=3.0, channel=DEFAULT_UPDATE_CHANNE
     return sorted(tags, key=lambda item: _release_tag_sort_key(item['name']), reverse=True)
 
 
+_AGENT_UPSTREAM = 'https://api.github.com/repos/NousResearch/hermes-agent'
+
+
+def _agent_upstream_json(path: str) -> dict:
+    request = urllib.request.Request(
+        _AGENT_UPSTREAM + path,
+        headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'hermes-webui'},
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        data = json.load(response)
+    if not isinstance(data, dict):
+        raise ValueError('Invalid Agent release response')
+    return data
+
+
+def _published_agent_release() -> tuple[str, str]:
+    """Resolve the published Agent tag to its commit, including annotated tags."""
+    release = _agent_upstream_json('/releases/latest')
+    version = str(release.get('tag_name') or '')
+    if release.get('draft') or release.get('prerelease') or not _RELEASE_TAG_RE.fullmatch(version):
+        raise ValueError('Invalid Agent release')
+    ref = _agent_upstream_json('/git/ref/tags/' + version)
+    obj = ref.get('object') or {}
+    for _ in range(4):
+        sha = str(obj.get('sha') or '')
+        if not re.fullmatch(r'[0-9a-f]{40}', sha):
+            break
+        if obj.get('type') == 'commit':
+            return version, sha
+        if obj.get('type') != 'tag':
+            break
+        obj = _agent_upstream_json('/git/tags/' + sha).get('object') or {}
+    raise ValueError('Agent release tag has no valid commit')
+
+
+def _agent_commit_comparison(current: str, latest: str) -> tuple[str, int]:
+    """Never infer an upgrade from unequal SHAs alone (a fork can diverge)."""
+    comparison = _agent_upstream_json('/compare/' + current + '...' + latest)
+    status = comparison.get('status')
+    ahead = comparison.get('ahead_by')
+    if status == 'ahead' and type(ahead) is int and ahead > 0:
+        return 'ahead', ahead
+    if status == 'identical' and ahead == 0:
+        return 'identical', 0
+    return 'unknown', 0
+
+
+def _baked_agent_path_overridden(path) -> bool:
+    """A stamp on a bind-mounted Agent cannot prove the current image identity."""
+    if path is None:
+        return True
+    if os.path.abspath(os.fspath(path)) != '/opt/hermes':
+        return True
+    # A bind mount replacing the image-owned Agent code and stamp must not
+    # be mistaken for the baked image. Fail closed if mountinfo is unavailable.
+    try:
+        mounts = Path('/proc/self/mountinfo').read_text(encoding='utf-8').splitlines()
+    except OSError:
+        return True
+    for line in mounts:
+        fields = line.partition(' - ')[0].split()
+        if len(fields) < 5:
+            return True
+        mount_point = fields[4]
+        if (mount_point == '/opt/hermes' or mount_point.startswith('/opt/hermes/')
+                or mount_point == '/opt'):
+            return True
+    return False
+
+
+def _check_baked_agent_release(path) -> dict:
+    """Check Docker's immutable Agent snapshot; a newer source is not an installable image."""
+    base = {
+        'name': 'agent', 'no_git': True, 'image_managed': True,
+        'behind': None, 'deployment_online_update': False,
+        'repo_url': 'https://github.com/NousResearch/hermes-agent',
+    }
+    if _baked_agent_path_overridden(path):
+        return {**base, 'error': 'Agent directory is not the image-owned /opt/hermes snapshot.'}
+    try:
+        current = (Path(path) / '.hermes-agent-revision').read_text(encoding='ascii').strip()
+    except (OSError, TypeError, ValueError, UnicodeError):
+        current = ''
+    if not re.fullmatch(r'[0-9a-f]{40}', current):
+        return {**base, 'error': 'Baked Agent revision is unavailable or invalid.'}
+    base['current_sha'] = current
+    try:
+        version, latest = _published_agent_release()
+        base.update(latest_sha=latest, latest_version=version, release_based=True,
+                    current_version=current[:12], branch=version)
+        if current == latest:
+            return {**base, 'behind': 0}
+        relation, ahead = _agent_commit_comparison(current, latest)
+    except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError,
+            UnicodeDecodeError, ValueError, KeyError):
+        return {**base, 'error': 'Could not verify the published Agent release or commit history.'}
+    if relation != 'ahead':
+        return {**base, 'error': 'Published Agent release is not a verified descendant of the baked revision.'}
+    if ahead > 0 and docker_agent_release_ready(commit=latest, version=version):
+        base['deployment_online_update'] = True
+    update = {
+        **base, 'behind': ahead, 'manual_update': True,
+        'compare_url': base['repo_url'] + '/compare/' + current + '...' + latest,
+        'update_instruction': ('A separately authenticated Agent image is ready for Docker online installation.'
+                               if base['deployment_online_update'] else
+                               'Docker Agent online installation is unavailable. A separate WebUI update does not guarantee an Agent update.'),
+    }
+    return update
+
+
 def _check_webui_published_release_update(channel=DEFAULT_UPDATE_CHANNEL):
     """Return a manual-update payload when the baked WebUI version trails GitHub tags."""
     current_version = str(WEBUI_VERSION or '').strip()
@@ -1371,12 +1519,16 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     the Settings panel reads this flag to offer ``apply_force_update`` (issue
     #4085).
 
-    When ``.git`` is absent (Docker images, pip installs), returns a minimal dict
-    with ``no_git: True`` and ``behind: None`` so the frontend can distinguish
-    "can't check" from "up to date" (issue #4356).
+    When ``.git`` is absent, the image-owned Docker Agent is checked against
+    its published release; other non-Git installs return ``behind: None``
+    rather than claiming to be up to date (issue #4356).
     """
     channel = _normalize_channel(channel)
     if path is None or not (path / '.git').exists():
+        if name == 'agent' and path is not None and deployment_info()['type'] == 'docker' and (
+            os.path.abspath(os.fspath(path)) == '/opt/hermes' or (Path(path) / '.hermes-agent-revision').is_file()
+        ):
+            return _check_baked_agent_release(path)
         if name == 'webui':
             release_info = _check_webui_published_release_update(channel)
             if release_info is not None:

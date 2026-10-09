@@ -1279,6 +1279,7 @@ const LOCALES = {
     settings_desc_sync_insights: 'Mirrors WebUI token usage to state.db so hermes /insights includes browser session data. Off by default.',
     settings_desc_check_updates: 'Show a banner when newer versions of the WebUI or Agent are available. Runs a background git fetch periodically.',
     settings_desc_ignore_agent_updates: 'Keep WebUI update checks on, but hide Agent update notices and skip Agent update fetches.',
+    settings_agent_image_pending: 'Agent has a newer upstream release, but Docker Agent online installation is not enabled. Updating WebUI separately does not necessarily update Agent.',
     settings_desc_whats_new_summary: "Changes the What's New action from opening the raw diff first to generating a short, human-readable summary. The regular diff comparison stays available after the summary.",
     settings_desc_bot_name: 'Used for the default profile only. Other profiles use their own profile names.',
     settings_desc_password: 'Enter a new password to set or change it. Leave blank to keep current setting.',
