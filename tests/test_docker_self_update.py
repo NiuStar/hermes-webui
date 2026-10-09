@@ -13,7 +13,7 @@ def test_signed_agent_action_requires_sidecar_manifest_not_request_fields(monkey
     calls = []
     expected = {'image': '24802117/hermes-webui@sha256:' + 'a' * 64,
                 'webui_version': 'v2026.10.08-r2', 'agent_commit': 'c' * 40,
-                'agent_version': 'v0.21.6'}
+                'agent_version': 'v0.21.6', 'webui_commit': 'd' * 40}
     def preflight(*args, **kwargs):
         calls.append(('preflight', args, kwargs))
         return expected
@@ -27,6 +27,8 @@ def test_signed_agent_action_requires_sidecar_manifest_not_request_fields(monkey
         def inspect_image(self, image):
             assert image == 'sha256:' + 'f' * 64
             return {'Id': image, 'Config': {'Labels': {
+                'org.opencontainers.image.version': 'v2026.10.08-r2',
+                'org.opencontainers.image.revision': 'd' * 40,
                 'org.opencontainers.image.hermes-agent.revision': 'b' * 40,
                 'org.opencontainers.image.hermes-agent.path': '/opt/hermes'}}}
         def pull(self, *_): pytest.fail('no image pull during request validation')
@@ -62,7 +64,7 @@ def test_signed_agent_preflight_is_read_only_and_uses_sidecar_config(monkeypatch
     calls = []
     expected = {'image': '24802117/hermes-webui@sha256:' + 'a' * 64,
                 'agent_commit': 'c' * 40, 'agent_version': 'v0.21.6',
-                'webui_version': 'v2026.10.08-r2'}
+                'webui_version': 'v2026.10.08-r2', 'webui_commit': 'd' * 40}
     monkeypatch.setattr(dsu, 'preflight_agent_manifest',
                         lambda *args, **kwargs: calls.append((args, kwargs)) or expected)
     class ReadOnlyEngine:
@@ -74,6 +76,8 @@ def test_signed_agent_preflight_is_read_only_and_uses_sidecar_config(monkeypatch
         def inspect_image(self, image):
             assert image == 'sha256:' + 'f' * 64
             return {'Id': image, 'Config': {'Labels': {
+                'org.opencontainers.image.version': 'v2026.10.08-r2',
+                'org.opencontainers.image.revision': 'd' * 40,
                 'org.opencontainers.image.hermes-agent.revision': 'b' * 40,
                 'org.opencontainers.image.hermes-agent.path': '/opt/hermes'}}}
         def pull(self, *_): pytest.fail('no image pull on preflight')
@@ -864,6 +868,7 @@ def test_signed_agent_success_retains_old_container_for_operator_rollback(monkey
     old = _old_info()
     old['Name'] = '/candidate'
     old['Id'] = 'a' * 64
+    old['Image'] = 'sha256:' + 'e' * 64
     old['State'] = {'Running': True, 'Health': {'Status': 'healthy'}}
     old['Config']['Env'] = ['HERMES_WEBUI_AGENT_DIR=/opt/hermes']
     class Engine:
@@ -877,6 +882,10 @@ def test_signed_agent_success_retains_old_container_for_operator_rollback(monkey
             raise dsu.DockerEngineError('not found')
         def pull(self, image): self.calls.append(('pull', image))
         def inspect_image(self, image):
+            if image == old['Image']:
+                return {'Id': image, 'Config': {'Labels': {
+                    'org.opencontainers.image.version': 'v1.2.3',
+                    'org.opencontainers.image.revision': 'd' * 40}}}
             return {'Id': 'sha256:' + 'a' * 64, 'Config': {'Labels': {
                 'org.opencontainers.image.hermes-agent.path': '/opt/hermes',
                 'org.opencontainers.image.hermes-agent.revision': 'c' * 40}}}
@@ -893,7 +902,9 @@ def test_signed_agent_success_retains_old_container_for_operator_rollback(monkey
     monkeypatch.setattr(dsu, '_verify_imported_agent', lambda *a: None)
     result = dsu.replace_container('candidate', 'repo/webui@sha256:' + 'a' * 64,
                                    expected_agent_image={'image': 'repo/webui@sha256:' + 'a' * 64,
-                                                         'agent_commit': 'c' * 40})
+                                                         'agent_commit': 'c' * 40,
+                                                         'agent_version': 'v0.21.6',
+                                                         'webui_version': 'v1.2.3', 'webui_commit': 'd' * 40})
     assert result['rollback_container'] == 'candidate.hermes-update-old'
     assert ('rename', old['Id'], 'candidate.hermes-update-old') in engine.calls
     assert ('stop', old['Id']) in engine.calls
@@ -905,7 +916,7 @@ def test_signed_agent_success_retains_old_container_for_operator_rollback(monkey
 
 def test_signed_success_refuses_foreign_name_after_candidate_health(monkeypatch):
     old = _old_info()
-    old.update(Name='/candidate', Id='a' * 64)
+    old.update(Name='/candidate', Id='a' * 64, Image='sha256:' + 'e' * 64)
     old['Config']['Env'] = ['HERMES_WEBUI_AGENT_DIR=/opt/hermes']
     class Engine:
         def __init__(self): self.created = False; self.calls = []
@@ -920,7 +931,11 @@ def test_signed_success_refuses_foreign_name_after_candidate_health(monkeypatch)
                 return {**old, 'Id': name, 'State': {'Running': True, 'Health': {'Status': 'healthy'}}}
             return old
         def pull(self, _): pass
-        def inspect_image(self, _):
+        def inspect_image(self, image):
+            if image == old['Image']:
+                return {'Id': image, 'Config': {'Labels': {
+                    'org.opencontainers.image.version': 'v1.2.3',
+                    'org.opencontainers.image.revision': 'd' * 40}}}
             return {'Id': 'sha256:' + 'f' * 64, 'Config': {'Labels': {
                 'org.opencontainers.image.hermes-agent.path': '/opt/hermes',
                 'org.opencontainers.image.hermes-agent.revision': 'c' * 40}}}
@@ -937,7 +952,10 @@ def test_signed_success_refuses_foreign_name_after_candidate_health(monkeypatch)
     with pytest.raises(dsu.DockerEngineError, match='rollback failed'):
         dsu.replace_container('candidate', 'repo/webui@sha256:' + 'a' * 64,
                               expected_agent_image={'image': 'repo/webui@sha256:' + 'a' * 64,
-                                                    'agent_commit': 'c' * 40}, timeout=1)
+                                                    'agent_commit': 'c' * 40,
+                                                    'agent_version': 'v0.21.6',
+                                                    'webui_version': 'v1.2.3',
+                                                    'webui_commit': 'd' * 40}, timeout=1)
     assert ('stop', old['Id']) in engine.calls
 
 

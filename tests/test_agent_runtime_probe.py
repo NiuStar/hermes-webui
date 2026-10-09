@@ -23,10 +23,14 @@ def _run_probe(tmp_path, *, mutate=None):
         (root / 'hermes_cli' / '__init__.py').write_text('VALUE = 1\n')
         (root / 'hermes_cli' / 'config.py').write_text('VALUE = 9\n')
         (root / 'hermes_cli' / 'runtime.py').write_text('VALUE = 2\n')
+        (root / 'hermes_cli' / 'version_info.py').write_text(
+            "def get_code_identity(refresh=False): return {'sha': '" + 'a' * 40 + "', 'version': '0.21.6'}\n"
+        )
+        (root / 'run_agent.py').write_text('')
     if mutate:
         mutate(baked, staged)
     cmd = [sys.executable, '-c', dsu._AGENT_RUNTIME_PROBE,
-           'a' * 40, str(baked), str(staged)]
+           'a' * 40, 'v0.21.6', str(baked), str(staged)]
     return subprocess.run(cmd, capture_output=True, text=True, timeout=15,
                           cwd=tmp_path, env={**os.environ, 'PYTHONPATH': str(staged)})
 
@@ -62,11 +66,12 @@ def test_probe_engine_requires_exit_zero_and_uses_exact_revision():
     for code in (0, 1, None, False):
         engine = Engine(code)
         if type(code) is int and code == 0:
-            dsu._verify_imported_agent(engine, 'candidate', 'a' * 40)
+            dsu._verify_imported_agent(engine, 'candidate', 'a' * 40, 'v0.21.6')
         else:
             with pytest.raises(dsu.DockerEngineError, match='runtime Agent'):
-                dsu._verify_imported_agent(engine, 'candidate', 'a' * 40)
-        assert engine.commands[0]['Cmd'][-3] == 'a' * 40
+                dsu._verify_imported_agent(engine, 'candidate', 'a' * 40, 'v0.21.6')
+        assert engine.commands[0]['Cmd'][-4] == 'a' * 40
+        assert engine.commands[0]['Cmd'][-3] == 'v0.21.6'
 
 
 def test_probe_rejects_import_outside_baked_or_staged_source(tmp_path):
@@ -81,7 +86,7 @@ def test_probe_rejects_import_outside_baked_or_staged_source(tmp_path):
     (external / 'hermes_cli' / '__init__.py').write_text('VALUE = 1\n')
     result = subprocess.run(
         [sys.executable, '-c', dsu._AGENT_RUNTIME_PROBE,
-         'a' * 40, str(baked), str(staged)],
+         'a' * 40, 'v0.21.6', str(baked), str(staged)],
         capture_output=True, text=True, cwd=tmp_path,
         env={**os.environ, 'PYTHONPATH': str(external)}, timeout=15,
     )
@@ -96,16 +101,24 @@ def test_signed_replacement_probe_failure_rolls_back(monkeypatch):
                  'org.opencontainers.image.version': 'v1.2.3',
                  'org.opencontainers.image.revision': 'b' * 40,
                  'org.opencontainers.image.hermes-agent.revision': 'a' * 40,
+                 'org.opencontainers.image.hermes-agent.version': 'v0.21.6',
                  'org.opencontainers.image.hermes-agent.path': '/opt/hermes',
              }}}
-    old = {'Name': '/candidate', 'Id': 'a' * 64, 'State': {'Running': True},
+    old = {'Name': '/candidate', 'Id': 'a' * 64, 'Image': 'sha256:' + 'e' * 64,
+           'State': {'Running': True},
            'HostConfig': {'Binds': [], 'Mounts': []},
            'Config': {'Env': ['HERMES_WEBUI_AGENT_DIR=/opt/hermes', 'PYTHONPATH=/opt/hermes']},
            'Mounts': []}
     class Engine:
         def __init__(self): self.calls = []; self.started = False; self.restored = False; self.created = False
         def pull(self, _): self.calls.append('pull')
-        def inspect_image(self, _): return image
+        def inspect_image(self, ref):
+            if ref == old['Image']:
+                return {'Id': ref, 'Config': {'Labels': {
+                    'org.opencontainers.image.version': 'v1.2.3',
+                    'org.opencontainers.image.revision': 'b' * 40,
+                }}}
+            return image
         def inspect(self, name):
             if name == 'b' * 64 and self.created:
                 return {**old, 'Id': 'b' * 64, 'State': {
@@ -142,7 +155,8 @@ def test_signed_replacement_probe_failure_rolls_back(monkeypatch):
     monkeypatch.setattr(dsu, '_verify_imported_agent', lambda *_a: (_ for _ in ()).throw(dsu.DockerEngineError('runtime Agent invalid')))
     expected = {'image': 'repo/webui@sha256:' + 'd' * 64,
                 'platform': 'linux/amd64', 'webui_commit': 'b' * 40,
-                'agent_commit': 'a' * 40, 'webui_version': 'v1.2.3'}
+                'agent_commit': 'a' * 40, 'agent_version': 'v0.21.6',
+                'webui_version': 'v1.2.3'}
     with pytest.raises(dsu.DockerEngineError, match='runtime Agent invalid'):
         dsu.replace_container('candidate', expected['image'], expected_agent_image=expected)
     assert ('rename', old['Id'], 'candidate') in engine.calls

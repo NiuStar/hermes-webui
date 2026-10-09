@@ -13,6 +13,7 @@ def _image():
             'org.opencontainers.image.version': 'v2026.10.08-r2',
             'org.opencontainers.image.revision': 'b' * 40,
             'org.opencontainers.image.hermes-agent.revision': 'c' * 40,
+            'org.opencontainers.image.hermes-agent.version': 'v0.21.6',
             'org.opencontainers.image.hermes-agent.path': '/opt/hermes',
         }},
     }
@@ -59,7 +60,8 @@ def test_signed_replacement_refuses_changed_preflight_owner_before_pull(monkeypa
 
 
 def test_signed_replacement_refuses_takeover_during_pull_before_stop(monkeypatch):
-    old = {'Name': '/hermes-webui', 'Id': 'a' * 64, 'State': {'Running': True},
+    old = {'Name': '/hermes-webui', 'Id': 'a' * 64, 'Image': 'sha256:' + 'e' * 64,
+           'State': {'Running': True},
            'Config': {'Labels': {}, 'Env': ['HERMES_WEBUI_AGENT_DIR=/opt/hermes']},
            'HostConfig': {'Binds': []}, 'Mounts': []}
 
@@ -70,7 +72,10 @@ def test_signed_replacement_refuses_takeover_during_pull_before_stop(monkeypatch
                 return {**old, 'Id': ('b' * 64 if self.changed else old['Id'])}
             raise dsu.DockerEngineError('Docker API 404')
         def pull(self, *_): self.changed = True
-        def inspect_image(self, *_): return _image()
+        def inspect_image(self, ref):
+            if ref == old['Image']:
+                return {**_image(), 'Id': ref}
+            return _image()
         def rename(self, *_): pytest.fail('foreign owner must not be renamed')
         def stop(self, *_): pytest.fail('foreign owner must not be stopped')
 
@@ -82,7 +87,8 @@ def test_signed_replacement_refuses_takeover_during_pull_before_stop(monkeypatch
 
 def test_signed_takeover_stops_by_immutable_old_id_not_backup_name(monkeypatch):
     old_id = 'a' * 64
-    old = {'Name': '/hermes-webui', 'Id': old_id, 'State': {'Running': True},
+    old = {'Name': '/hermes-webui', 'Id': old_id, 'Image': 'sha256:' + 'e' * 64,
+           'State': {'Running': True},
            'Config': {'Labels': {}, 'Env': ['HERMES_WEBUI_AGENT_DIR=/opt/hermes']},
            'HostConfig': {'Binds': []}, 'Mounts': []}
     class Engine:
@@ -94,7 +100,10 @@ def test_signed_takeover_stops_by_immutable_old_id_not_backup_name(monkeypatch):
                 return {**old, 'Id': 'b' * 64}  # foreign owner took backup name
             return old
         def pull(self, _): pass
-        def inspect_image(self, _): return _image()
+        def inspect_image(self, ref):
+            if ref == old['Image']:
+                return {**_image(), 'Id': ref}
+            return _image()
         def rename(self, src, dst):
             self.renamed = True
         def stop(self, identifier):
@@ -113,8 +122,20 @@ def test_pulled_image_matches_verified_manifest():
     assert dsu._verified_agent_image_id(_image(), _signed()) == 'sha256:' + 'f' * 64
 
 
+def test_agent_only_target_must_match_current_webui_release():
+    old = _image()
+    dsu._require_same_webui_identity(old, _signed())
+    for field, value in (('org.opencontainers.image.version', 'v2026.10.09-qa'),
+                         ('org.opencontainers.image.revision', 'd' * 40)):
+        changed = _image()
+        changed['Config']['Labels'][field] = value
+        with pytest.raises(dsu.DockerEngineError, match='WebUI release identity'):
+            dsu._require_same_webui_identity(changed, _signed())
+
+
 def test_signed_update_rejects_persistent_app_mount_before_stop(monkeypatch):
-    old = {'Name': '/hermes-webui', 'Id': 'a' * 64, 'State': {'Running': True},
+    old = {'Name': '/hermes-webui', 'Id': 'a' * 64, 'Image': 'sha256:' + 'e' * 64,
+           'State': {'Running': True},
            'Config': {'Env': ['HERMES_WEBUI_AGENT_DIR=/opt/hermes']},
            'HostConfig': {'Binds': ['/state/app:/app:rw']}, 'Mounts': []}
     class Engine:
@@ -124,7 +145,10 @@ def test_signed_update_rejects_persistent_app_mount_before_stop(monkeypatch):
                 raise dsu.DockerEngineError('not found')
             return old
         def pull(self, image): self.calls.append(('pull', image))
-        def inspect_image(self, _image_name): return _image()
+        def inspect_image(self, ref):
+            if ref == old['Image']:
+                return {**_image(), 'Id': ref}
+            return _image()
         def rename(self, *_args): self.calls.append(('rename',))
         def stop(self, *_args): self.calls.append(('stop',))
     engine = Engine()
@@ -224,6 +248,7 @@ def test_rollback_never_removes_foreign_name_owner(monkeypatch):
     lambda image: image.update(Architecture='arm64'),
     lambda image: image['Config']['Labels'].update({'org.opencontainers.image.revision': 'd' * 40}),
     lambda image: image['Config']['Labels'].update({'org.opencontainers.image.hermes-agent.revision': 'd' * 40}),
+    lambda image: image['Config']['Labels'].update({'org.opencontainers.image.hermes-agent.version': 'v0.21.5'}),
     lambda image: image.update(Id='sha256:garbage'),
 ])
 def test_mismatch_rejected(mutate):

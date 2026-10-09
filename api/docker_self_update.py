@@ -528,7 +528,7 @@ import importlib.util
 import pathlib
 import sys
 
-revision, baked_arg, staged_arg = sys.argv[1:]
+revision, version, baked_arg, staged_arg = sys.argv[1:]
 baked, staged = pathlib.Path(baked_arg), pathlib.Path(staged_arg)
 if not all((root / '.hermes-agent-revision').read_text().strip() == revision
            for root in (baked, staged)):
@@ -565,13 +565,20 @@ if config_spec is None or config_spec.origin is None:
 config_path = pathlib.Path(config_spec.origin).resolve(strict=True)
 if config_path != (origin.parent / 'config.py').resolve(strict=True):
     raise SystemExit(2)
+from hermes_cli.version_info import get_code_identity
+identity = get_code_identity(refresh=True)
+if identity.get('sha') != revision or identity.get('version') != version.removeprefix('v'):
+    raise SystemExit(2)
+import run_agent
+if pathlib.Path(run_agent.__file__).resolve(strict=True) != (staged / 'run_agent.py').resolve(strict=True):
+    raise SystemExit(2)
 """
 
-def _verify_imported_agent(engine: DockerEngine, container: str, revision: str) -> None:
+def _verify_imported_agent(engine: DockerEngine, container: str, revision: str, version: str) -> None:
     """Probe the replacement's actual venv and staged Agent before cleanup."""
     path = urllib.parse.quote(container, safe="")
     command = ["/app/venv/bin/python3", "-c", _AGENT_RUNTIME_PROBE,
-               revision, _BAKED_AGENT_PATH, "/app/hermes-agent-src"]
+               revision, version, _BAKED_AGENT_PATH, "/app/hermes-agent-src"]
     created = engine.request("POST", f"/containers/{path}/exec", {
         "AttachStdout": False, "AttachStderr": False, "Tty": False,
         "User": "hermeswebui", "WorkingDir": "/app", "Cmd": command,
@@ -628,6 +635,14 @@ def _verified_image_id(
     return image_id
 
 
+def _require_same_webui_identity(old_image: dict[str, Any], expected: dict[str, str]) -> None:
+    """An Agent-only transaction must retain the running WebUI release."""
+    labels = (old_image.get("Config") or {}).get("Labels") or {}
+    if (labels.get("org.opencontainers.image.version") != expected.get("webui_version")
+            or labels.get("org.opencontainers.image.revision") != expected.get("webui_commit")):
+        raise DockerEngineError("Agent-only image would change WebUI release identity")
+
+
 def _verified_agent_image_id(image_info: dict[str, Any], expected: dict[str, str]) -> str:
     """Bind an inspected image to independently authenticated manifest fields."""
     image = expected.get("image") or ""
@@ -646,6 +661,8 @@ def _verified_agent_image_id(image_info: dict[str, Any], expected: dict[str, str
         (_BAKED_AGENT_REVISION_LABEL, "agent_commit"),
     )) or labels.get(_BAKED_AGENT_PATH_LABEL) != _BAKED_AGENT_PATH:
         raise DockerEngineError("Pulled image identities do not match Agent manifest")
+    if labels.get("org.opencontainers.image.hermes-agent.version") != expected.get("agent_version"):
+        raise DockerEngineError("Pulled Agent version does not match authenticated manifest")
     image_id = image_info.get("Id")
     if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
         raise DockerEngineError("Pulled Agent image has no valid immutable image ID")
@@ -732,6 +749,10 @@ def replace_container(
         if image != expected_agent_image.get("image"):
             raise DockerEngineError("Requested image differs from authenticated Agent image")
         create_image = _verified_agent_image_id(image_info, expected_agent_image)
+        old_image_id = old.get("Image")
+        if not isinstance(old_image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", old_image_id):
+            raise DockerEngineError("Cannot verify current WebUI image identity")
+        _require_same_webui_identity(engine.inspect_image(old_image_id), expected_agent_image)
         _require_unmounted_baked_agent(old)
     elif version:
         create_image = _verified_image_id(engine, image, version, inspected=image_info)
@@ -806,7 +827,8 @@ def replace_container(
         report("verifying_runtime", 6)
         _verify_runtime_contract(old, engine.inspect(created_id if expected_agent_image is not None else name), expected_payload=create_payload)
         if expected_agent_image is not None:
-            _verify_imported_agent(engine, created_id, expected_agent_image["agent_commit"])
+            _verify_imported_agent(engine, created_id, expected_agent_image["agent_commit"],
+                                   expected_agent_image["agent_version"])
             if engine.inspect(name).get("Id") != created_id:
                 raise DockerEngineError("Agent replacement name owner changed; manual recovery required")
     except Exception:
@@ -1020,6 +1042,7 @@ def _control_request(
             old_contract = _baked_agent_contract(old_image)
             if old_contract is None or old_contract[1] == expected["agent_commit"]:
                 raise DockerEngineError("No verifiable newer Agent image for this target")
+            _require_same_webui_identity(old_image, expected)
             if payload.get("action") == "agent_preflight":
                 return {
                     "ok": True, "target": "agent", "latest_sha": expected["agent_commit"],
