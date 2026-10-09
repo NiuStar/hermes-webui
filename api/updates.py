@@ -1035,51 +1035,82 @@ def _github_release_tags(url=None, *, timeout=3.0, channel=DEFAULT_UPDATE_CHANNE
     return sorted(tags, key=lambda item: _release_tag_sort_key(item['name']), reverse=True)
 
 
-_AGENT_UPSTREAM = 'https://api.github.com/repos/NousResearch/hermes-agent'
+_AGENT_REPO = 'https://github.com/NousResearch/hermes-agent'
+_agent_ancestry_cache: dict[tuple[str, str], tuple[int, float]] = {}
 
 
-def _agent_upstream_json(path: str) -> dict:
-    request = urllib.request.Request(
-        _AGENT_UPSTREAM + path,
-        headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'hermes-webui'},
-    )
-    with urllib.request.urlopen(request, timeout=5) as response:
-        data = json.load(response)
-    if not isinstance(data, dict):
-        raise ValueError('Invalid Agent release response')
-    return data
+def _agent_release_html() -> tuple[str, str]:
+    """Read the human-facing published Release, not the GitHub API."""
+    request = urllib.request.Request(_AGENT_REPO + '/releases/latest',
+                                     headers={'User-Agent': 'hermes-webui'})
+    with urllib.request.urlopen(request, timeout=12) as response:
+        match = re.fullmatch(re.escape(_AGENT_REPO) + r'/releases/tag/(v[0-9][0-9A-Za-z.+-]*)',
+                             response.geturl())
+        if not match or not _RELEASE_TAG_RE.fullmatch(match.group(1)):
+            raise ValueError('Latest Agent Release did not resolve to a published tag')
+        html = response.read(2_000_001)
+        if len(html) > 2_000_000:
+            raise ValueError('Agent Release page is too large')
+        return match.group(1), html.decode('utf-8')
 
 
 def _published_agent_release() -> tuple[str, str]:
-    """Resolve the published Agent tag to its commit, including annotated tags."""
-    release = _agent_upstream_json('/releases/latest')
-    version = str(release.get('tag_name') or '')
-    if release.get('draft') or release.get('prerelease') or not _RELEASE_TAG_RE.fullmatch(version):
-        raise ValueError('Invalid Agent release')
-    ref = _agent_upstream_json('/git/ref/tags/' + version)
-    obj = ref.get('object') or {}
-    for _ in range(4):
-        sha = str(obj.get('sha') or '')
-        if not re.fullmatch(r'[0-9a-f]{40}', sha):
-            break
-        if obj.get('type') == 'commit':
-            return version, sha
-        if obj.get('type') != 'tag':
-            break
-        obj = _agent_upstream_json('/git/tags/' + sha).get('object') or {}
-    raise ValueError('Agent release tag has no valid commit')
+    """Discover the published Release and its linked commit on GitHub's page."""
+    version, html = _agent_release_html()
+    tag_link = re.search(r'href="/NousResearch/hermes-agent/releases/tag/' +
+                         re.escape(version) + r'"', html)
+    if not tag_link:
+        raise ValueError('Agent Release page does not contain its tag')
+    # Release notes can be long; the header's own commit link follows the
+    # version heading. Reject pages with no unique linked commit.
+    header = html[tag_link.end():tag_link.end() + 20000]
+    commits = re.findall(r'href="/NousResearch/hermes-agent/commit/([0-9a-f]{40})"', header)
+    if len(commits) != 1:
+        raise ValueError('Agent Release header has no unambiguous commit')
+    return version, commits[0]
 
 
 def _agent_commit_comparison(current: str, latest: str) -> tuple[str, int]:
-    """Never infer an upgrade from unequal SHAs alone (a fork can diverge)."""
-    comparison = _agent_upstream_json('/compare/' + current + '...' + latest)
-    status = comparison.get('status')
-    ahead = comparison.get('ahead_by')
-    if status == 'ahead' and type(ahead) is int and ahead > 0:
-        return 'ahead', ahead
-    if status == 'identical' and ahead == 0:
+    """Prove direction with a bounded, disposable, blobless Git history."""
+    if current == latest:
         return 'identical', 0
-    return 'unknown', 0
+    if not all(re.fullmatch(r'[0-9a-f]{40}', sha) for sha in (current, latest)):
+        return 'unknown', 0
+    cached = _agent_ancestry_cache.get((current, latest))
+    if cached and time.monotonic() - cached[1] < CACHE_TTL:
+        return 'ahead', cached[0]
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix='hermes-agent-release-') as directory:
+        env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0',
+               'GIT_HTTP_LOW_SPEED_LIMIT': '1', 'GIT_HTTP_LOW_SPEED_TIME': '60'}
+        def git(*args, timeout=15):
+            return subprocess.run(['git', '-C', directory, *args], capture_output=True,
+                                  text=True, timeout=timeout, check=True, env=env).stdout.strip()
+        git('init', '-q')
+        git('-c', 'protocol.version=1', '-c', 'http.version=HTTP/1.1',
+            'fetch', '--quiet', '--no-tags', '--filter=blob:none',
+            '--shallow-since=2026-09-01', _AGENT_REPO, 'refs/tags/' + _agent_comparison_version(latest),
+            timeout=180)
+        if git('rev-parse', 'FETCH_HEAD^{}') != latest:
+            return 'unknown', 0
+        if git('cat-file', '-t', current) != 'commit':
+            return 'unknown', 0
+        relation = subprocess.run(['git', '-C', directory, 'merge-base', '--is-ancestor', current, latest],
+                                  capture_output=True, timeout=15, env=env)
+        if relation.returncode != 0:
+            return 'unknown', 0
+        # A shallow graph proves ancestry here, but cannot count every commit
+        # across merges. Return a positive update signal, not a false count.
+        _agent_ancestry_cache[(current, latest)] = (1, time.monotonic())
+        return 'ahead', 1
+
+
+def _agent_comparison_version(latest: str) -> str:
+    """Bind comparison to the independently checked published Release."""
+    version, sha = _published_agent_release()
+    if sha != latest:
+        raise ValueError('Published Agent Release changed during comparison')
+    return version
 
 
 def _baked_agent_path_overridden(path) -> bool:
@@ -1128,7 +1159,7 @@ def _check_baked_agent_release(path) -> dict:
         if current == latest:
             return {**base, 'behind': 0}
         relation, ahead = _agent_commit_comparison(current, latest)
-    except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError,
+    except (OSError, TimeoutError, subprocess.SubprocessError, urllib.error.URLError, json.JSONDecodeError,
             UnicodeDecodeError, ValueError, KeyError):
         return {**base, 'error': 'Could not verify the published Agent release or commit history.'}
     if relation != 'ahead':

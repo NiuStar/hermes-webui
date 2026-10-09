@@ -190,22 +190,17 @@ def test_baked_identity_rejects_override_and_mount():
         assert _REAL_BAKED_AGENT_PATH_OVERRIDDEN('/opt/hermes') is True
 
 
-def test_annotated_release_tag_resolves_to_commit(monkeypatch):
-    tag, commit = 'b' * 40, 'a' * 40
-    responses = {
-        '/releases/latest': {'tag_name': 'v0.21.6', 'draft': False, 'prerelease': False},
-        '/git/ref/tags/v0.21.6': {'object': {'type': 'tag', 'sha': tag}},
-        '/git/tags/' + tag: {'object': {'type': 'commit', 'sha': commit}},
-    }
-    monkeypatch.setattr(updates, '_agent_upstream_json', responses.__getitem__)
+def test_release_page_commit_is_read_from_header(monkeypatch):
+    commit = 'a' * 40
+    monkeypatch.setattr(updates, '_agent_release_html',
+                        lambda: ('v0.21.6', '<a href="/NousResearch/hermes-agent/releases/tag/v0.21.6">'
+                                 '</a><a href="/NousResearch/hermes-agent/commit/' + commit + '">commit</a>'))
     assert updates._published_agent_release() == ('v0.21.6', commit)
 
 
-def test_diverged_and_malformed_compare_are_unknown(monkeypatch):
-    monkeypatch.setattr(updates, '_agent_upstream_json', lambda path: {'status': 'diverged', 'ahead_by': 4})
-    assert updates._agent_commit_comparison('a' * 40, 'b' * 40) == ('unknown', 0)
-    monkeypatch.setattr(updates, '_agent_upstream_json', lambda path: {'status': 'ahead', 'ahead_by': '4'})
-    assert updates._agent_commit_comparison('a' * 40, 'b' * 40) == ('unknown', 0)
+def test_diverged_and_malformed_compare_are_unknown():
+    assert updates._agent_commit_comparison('not-a-sha', 'b' * 40) == ('unknown', 0)
+    assert updates._agent_commit_comparison('a' * 40, 'a' * 40) == ('identical', 0)
 
 
 @pytest.mark.parametrize('path', ['/api/updates/apply', '/api/updates/force', '/api/updates/clear_lock'])
