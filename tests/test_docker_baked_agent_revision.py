@@ -22,6 +22,14 @@ def test_docker_image_bakes_an_exact_hermes_agent_revision():
     assert 'rm -rf /opt/hermes/.git' in DOCKERFILE
 
 
+def test_baked_agent_writes_version_stamp_bound_to_revision():
+    assert 'ARG HERMES_AGENT_VERSION=v0.21.6' in DOCKERFILE
+    assert 'baseVersion' in DOCKERFILE
+    assert 'install-stamp.json' in DOCKERFILE
+    assert 'HERMES_AGENT_VERSION#v' in DOCKERFILE
+    assert '"source":"docker"' in DOCKERFILE
+
+
 def test_docker_image_exposes_baked_agent_identity_and_default_path():
     assert 'ENV HERMES_WEBUI_AGENT_DIR=/opt/hermes' in DOCKERFILE
     assert 'org.opencontainers.image.hermes-agent.revision="${HERMES_AGENT_REVISION}"' in DOCKERFILE
