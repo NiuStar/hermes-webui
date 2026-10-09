@@ -103,6 +103,15 @@ A version tag is a source marker only until a separately reviewed,
 artifact-tested promotion pipeline exists; do not interpret it as production
 install authorization. The Docker Hub candidate tag is not a versioned release.
 
+On a Docker WebUI, a source-only `v*` Git tag is **not** a published Release or
+an installable image. The update checker uses published GitHub Releases (not
+`releases.atom`, which includes bare tags) and refuses to infer update order
+from an unknown QA/commit image version. If GitHub release verification fails,
+`behind` remains unknown and Apply is blocked; the sidecar must not be asked
+to pull based on an unverified tag. The existing source-only
+`v2026.10.09-r1` tag has no corresponding official GitHub Release or Docker
+Hub version image.
+
 The repository contains a signed-manifest contract and an opt-in installer path:
 `api/agent_image_manifest.py` verifies detached Ed25519 signatures over exact
 JSON bytes and requires a repository, platform, immutable `sha256:` digest,

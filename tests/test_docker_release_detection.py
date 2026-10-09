@@ -21,7 +21,9 @@ def test_baked_unknown_version_still_reports_latest_release(tmp_path, monkeypatc
     info = updates._check_repo(tmp_path, 'webui')
     assert info['current_version'] == '867c2bdc'
     assert info['latest_version'] == 'v2026.09.11-r8e'
-    assert info['behind'] == 1
+    assert info['behind'] is None
+    assert info['deployment_online_update'] is False
+    assert 'error' in info
     assert info['compare_url'] is None
 
 

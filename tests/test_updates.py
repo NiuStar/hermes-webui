@@ -211,29 +211,84 @@ def test_check_repo_redacts_credentialed_fetch_failure(tmp_path):
     assert 'Authentication failed' in info['error']
 
 
-def test_release_tags_read_published_versions_from_atom_without_rest_api(tmp_path, monkeypatch):
-    atom = b'''<?xml version="1.0"?>
-    <feed xmlns="http://www.w3.org/2005/Atom">
-      <entry><title>v2026.09.19-r7</title></entry>
-      <entry><title>v2026.09.19-r6</title></entry>
-      <entry><title>exp-v2026.09.20-r1</title></entry>
-    </feed>'''
+def test_release_tags_use_published_api_not_tag_only_atom(tmp_path, monkeypatch):
+    published = json.dumps([{'tag_name': 'v2026.09.19-r6', 'draft': False, 'prerelease': False}]).encode()
     calls = []
 
     class Response:
         def __enter__(self): return self
         def __exit__(self, *args): return False
-        def read(self): return atom
+        def read(self): return published
 
     def fake_urlopen(request, timeout=0):
         calls.append(request.full_url)
+        if request.full_url.endswith('/releases.atom'):
+            raise AssertionError('tag-only Atom entries are not published releases')
         return Response()
 
     monkeypatch.setattr(updates.urllib.request, 'urlopen', fake_urlopen)
-    assert [x['name'] for x in updates._github_release_tags(channel='stable')] == [
-        'v2026.09.19-r7', 'v2026.09.19-r6'
-    ]
-    assert calls == ['https://github.com/NiuStar/hermes-webui/releases.atom']
+    assert [x['name'] for x in updates._github_release_tags(channel='stable')] == ['v2026.09.19-r6']
+    assert calls == ['https://api.github.com/repos/NiuStar/hermes-webui/releases?per_page=100']
+
+
+def test_release_api_failure_does_not_fall_back_to_tag_only_atom(tmp_path, monkeypatch):
+    monkeypatch.setattr(updates, 'WEBUI_VERSION', 'v2026.10.08-r1')
+    def fake_urlopen(request, timeout=0):
+        if request.full_url.endswith('/releases.atom'):
+            raise AssertionError('tag-only Atom entries are not published releases')
+        raise updates.urllib.error.HTTPError(request.full_url, 403, 'rate limited', None, None)
+    monkeypatch.setattr(updates.urllib.request, 'urlopen', fake_urlopen)
+    info = updates._check_repo(tmp_path, 'webui')
+    assert info['behind'] is None
+    assert info['no_git'] is True
+    assert 'error' in info
+    assert 'latest_version' not in info
+
+
+def test_no_published_release_never_offers_install(tmp_path, monkeypatch):
+    monkeypatch.setattr(updates, 'WEBUI_VERSION', 'v2026.10.09-agent-qa-g')
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self): return b'[]'
+    monkeypatch.setattr(updates.urllib.request, 'urlopen', lambda *args, **kwargs: Response())
+    info = updates._check_repo(tmp_path, 'webui')
+    assert info['behind'] is None
+    assert info['deployment_online_update'] is False
+    assert 'error' in info
+
+
+def test_unpublished_qa_version_cannot_downgrade_to_older_release(tmp_path, monkeypatch):
+    monkeypatch.setattr(updates, 'WEBUI_VERSION', 'v2026.10.09-agent-qa-g')
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self): return json.dumps([
+            {'tag_name': 'v2026.10.08-r1', 'draft': False, 'prerelease': False},
+        ]).encode()
+    monkeypatch.setattr(updates.urllib.request, 'urlopen', lambda *args, **kwargs: Response())
+    info = updates._check_repo(tmp_path, 'webui')
+    assert info['behind'] is None
+    assert info['no_git'] is True
+    assert info['deployment_online_update'] is False
+    assert info['latest_version'] == 'v2026.10.08-r1'
+    assert info['compare_url'] is None
+    assert 'error' in info
+
+
+def test_source_only_tag_never_appears_as_installable_release(tmp_path, monkeypatch):
+    monkeypatch.setattr(updates, 'WEBUI_VERSION', 'v2026.10.08-r1')
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self): return json.dumps([
+            {'tag_name': 'v2026.10.08-r1', 'draft': False, 'prerelease': False},
+        ]).encode()
+    monkeypatch.setattr(updates.urllib.request, 'urlopen', lambda *args, **kwargs: Response())
+    info = updates._check_repo(tmp_path, 'webui')
+    assert info['behind'] == 0
+    assert info['latest_version'] == 'v2026.10.08-r1'
+    assert info['deployment_online_update'] is updates.deployment_info()['online_update']
 
 
 def test_check_repo_reports_manual_update_for_baked_webui_version(tmp_path, monkeypatch):
@@ -296,7 +351,9 @@ def test_check_repo_webui_no_git_falls_back_to_old_payload_on_tags_failure(tmp_p
     assert info['name'] == 'webui'
     assert info['behind'] is None
     assert info['no_git'] is True
-    assert info['deployment_online_update'] is updates.deployment_info()['online_update']
+    assert info['deployment_online_update'] is False
+    assert 'error' in info
+    assert info['stale_check'] is True
 
 
 def test_check_repo_no_git_agent_stays_cant_check(tmp_path):

@@ -41,13 +41,31 @@ def test_docker_update_rejects_without_sidecar(monkeypatch):
     assert 'sidecar' in result['message']
 
 
+def test_docker_update_refuses_unknown_or_non_newer_release_before_sidecar(monkeypatch):
+    monkeypatch.setenv('HERMES_WEBUI_DEPLOYMENT_TYPE', 'docker')
+    monkeypatch.setenv('HERMES_WEBUI_DOCKER_SELF_UPDATE', '1')
+    monkeypatch.setattr(Path, 'exists', lambda self: str(self) == updates.CONTROL_SOCKET)
+    monkeypatch.setattr(updates.os, 'access', lambda *args: True)
+    calls = []
+    monkeypatch.setattr(updates, 'request_update', lambda *args: calls.append(args))
+    for info in (
+        {'latest_version': 'v2026.10.09-r1', 'latest_sha': 'v2026.10.09-r1', 'behind': None, 'release_based': True},
+        {'latest_version': 'v2026.10.08-r1', 'latest_sha': 'v2026.10.08-r1', 'behind': 0, 'release_based': True},
+        {'latest_version': 'v2026.10.09-r1', 'latest_sha': 'v2026.10.09-r1', 'behind': 1, 'release_based': False},
+    ):
+        monkeypatch.setattr(updates, 'check_for_updates', lambda **kwargs: {'webui': info})
+        result = updates.apply_docker_update('stable')
+        assert result['ok'] is False
+    assert calls == []
+
+
 def test_docker_update_requests_sidecar_with_verified_release(monkeypatch):
     monkeypatch.setenv('HERMES_WEBUI_DEPLOYMENT_TYPE', 'docker')
     monkeypatch.setenv('HERMES_WEBUI_DOCKER_SELF_UPDATE', '1')
     monkeypatch.setattr(Path, 'exists', lambda self: str(self) == updates.CONTROL_SOCKET)
     monkeypatch.setattr(updates.os, 'access', lambda *args: True)
     monkeypatch.setattr(updates, 'check_for_updates', lambda **kwargs: {
-        'webui': {'latest_version': 'v0.53.0', 'latest_sha': 'abc123'},
+        'webui': {'latest_version': 'v0.53.0', 'latest_sha': 'abc123', 'behind': 1, 'release_based': True},
     })
     seen = []
     monkeypatch.setattr(updates, 'request_update', lambda *args: seen.append(args) or {

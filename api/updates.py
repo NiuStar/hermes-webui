@@ -1,10 +1,11 @@
 """
 Hermes Web UI -- Self-update checker.
 
-Checks if the webui and hermes-agent repos are behind their latest
-release tags. For Docker's image-owned Agent without .git, checks its baked
-revision against the official published Agent release. Results are cached
-server-side (30-min TTL). Other non-Git installations remain uncheckable.
+Checks if the webui and hermes-agent repos are behind their latest published
+release (not an unaccompanied source tag). For Docker's image-owned Agent
+without .git, checks its baked revision against the official published Agent
+release. Results are cached server-side (30-min TTL). Other non-Git
+installations remain uncheckable.
 """
 import hashlib
 import json
@@ -18,7 +19,6 @@ import threading
 import time
 import urllib.error
 import urllib.request
-import xml.etree.ElementTree as ET
 from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import urlparse
@@ -173,8 +173,9 @@ def _apply_docker_update_inner(channel=None) -> dict:
         if channel == 'stable'
         else bool(re.fullmatch(r'exp-v[0-9][0-9A-Za-z.+-]*', latest_version))
     )
-    if not valid_release:
-        return {'ok': False, 'message': 'Latest WebUI release could not be verified.', 'deployment': deployment_info()}
+    if (not valid_release or info.get('release_based') is not True
+            or type(info.get('behind')) is not int or info['behind'] <= 0):
+        return {'ok': False, 'message': 'No verified newer WebUI release is available.', 'deployment': deployment_info()}
     try:
         return request_update(channel, latest_version, latest_sha)
     except Exception:
@@ -969,52 +970,12 @@ def _release_api_url() -> str:
     return f'https://api.github.com/repos/{repository}/releases?per_page=100'
 
 
-def _release_page_url() -> str:
-    repository = os.getenv('HERMES_WEBUI_RELEASE_REPOSITORY', 'NiuStar/hermes-webui').strip()
-    if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository):
-        repository = 'NiuStar/hermes-webui'
-    return f'https://github.com/{repository}/releases.atom'
-
-
-def _github_release_tags_from_atom(*, timeout=3.0, channel=DEFAULT_UPDATE_CHANNEL):
-    """Read published releases from GitHub's public Atom feed, not REST API."""
-    request = urllib.request.Request(
-        _release_page_url(),
-        headers={'Accept': 'application/atom+xml', 'User-Agent': 'hermes-webui'},
-    )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        payload = response.read()
-    root = ET.fromstring(payload)
-    namespace = {'atom': 'http://www.w3.org/2005/Atom'}
-    tags = []
-    for entry in root.findall('atom:entry', namespace):
-        title = entry.findtext('atom:title', default='', namespaces=namespace).strip()
-        if not title:
-            continue
-        valid = bool(_RELEASE_TAG_RE.fullmatch(title)) if channel == 'stable' else bool(
-            re.fullmatch(r'exp-v[0-9][0-9A-Za-z.+-]*', title)
-        )
-        if not valid:
-            continue
-        tags.append({'name': title, 'sha': title})
-    return sorted(tags, key=lambda item: _release_tag_sort_key(item['name']), reverse=True)
-
-
 def _github_release_tags(url=None, *, timeout=3.0, channel=DEFAULT_UPDATE_CHANNEL):
-    """Return published GitHub Release tags newest-first.
+    """Return only published GitHub Releases; source tags are not releases.
 
-    The public Atom feed is the primary source because it avoids the anonymous
-    GitHub REST API rate limit. ``url`` remains a REST-compatible test hook and
-    explicit override for callers that require the structured API.
+    The Atom feed also includes bare Git tags with no Release or image. It must
+    never authorize an online update. On REST failure callers fail closed.
     """
-    if url is None:
-        try:
-            return _github_release_tags_from_atom(timeout=timeout, channel=channel)
-        except ET.ParseError:
-            # Keep compatibility with explicit/mock REST responses and tolerate
-            # an intermediary that returns an unexpected body. Normal GitHub
-            # release checks use Atom and do not consume REST rate limit.
-            url = _release_api_url()
     headers = {
         'Accept': 'application/vnd.github+json',
         'User-Agent': 'hermes-webui',
@@ -1165,27 +1126,36 @@ def _check_baked_agent_release(path) -> dict:
 
 
 def _check_webui_published_release_update(channel=DEFAULT_UPDATE_CHANNEL):
-    """Return a manual-update payload when the baked WebUI version trails GitHub tags."""
+    """Return release status only when the installed version is in the release list.
+
+    An unknown QA/commit image cannot be ordered against a release by tag text.
+    """
     current_version = str(WEBUI_VERSION or '').strip()
 
     try:
         tags = _github_release_tags(channel=channel)
     except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
-        return None
+        return {
+            'name': 'webui', 'behind': None, 'stale_check': True,
+            'error': 'Could not verify published WebUI releases; online update is unavailable.',
+        }
     if not tags:
-        return None
+        return {
+            'name': 'webui', 'behind': None,
+            'error': 'No published WebUI release is available for this channel.',
+        }
 
     tag_names = [item['name'] for item in tags]
     latest = tags[0]
     latest_version = latest['name']
     behind = _release_gap(tag_names, current_version, latest_version)
     if current_version not in tag_names:
-        behind = 0 if current_version == latest_version else 1
+        behind = 0 if current_version == latest_version else None
     current = next((item for item in tags if item['name'] == current_version), None) or {}
-    current_ref = current.get('sha') or (current_version if _RELEASE_TAG_RE.fullmatch(current_version) else None)
+    current_ref = current.get('sha') or (current_version if current_version == latest_version else None)
     latest_ref = latest.get('sha') or latest_version
     repo_url = _release_api_url().split('/releases?', 1)[0].replace('api.github.com/repos/', 'github.com/')
-    return {
+    update = {
         'name': 'webui',
         'behind': behind,
         'current_sha': current_ref,
@@ -1198,6 +1168,10 @@ def _check_webui_published_release_update(channel=DEFAULT_UPDATE_CHANNEL):
         'compare_url': _build_compare_url(repo_url, current_ref, latest_ref) if current_ref else None,
         'manual_update': True,
     }
+    if behind is None:
+        update['error'] = 'Current WebUI version is not a published release; update direction cannot be verified.'
+        update['deployment_online_update'] = False
+    return update
 
 
 def _head_is_past_latest_tag(path, current_tag, channel=DEFAULT_UPDATE_CHANNEL):
@@ -1534,7 +1508,11 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
             if release_info is not None:
                 release_info = dict(release_info)
                 release_info['no_git'] = True
-                release_info['deployment_online_update'] = deployment_info()['online_update']
+                release_info['deployment_online_update'] = (
+                    deployment_info()['online_update']
+                    if release_info.get('behind') is not None and not release_info.get('error')
+                    else False
+                )
                 return release_info
         return {
             'name': name,
