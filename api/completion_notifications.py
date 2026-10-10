@@ -149,7 +149,20 @@ def _configuration_source(source: Mapping[str, str] | None = None) -> tuple[dict
 
 
 def _sender_dependency_ready(channel: str) -> bool:
-    return channel != "feishu" or importlib.util.find_spec("lark_oapi") is not None
+    if channel != "feishu":
+        return True
+    # The WebUI process may switch sys.path into a managed Agent environment;
+    # delivery instead uses this interpreter in isolated mode. Probe that exact
+    # import boundary, not the server thread's current sys.path.
+    try:
+        result = subprocess.run(
+            [sys.executable, "-I", "-c",
+             "import importlib.util,sys;sys.exit(0 if importlib.util.find_spec('lark_oapi') else 1)"],
+            capture_output=True, timeout=5, check=False, env={},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
 
 
 def _platform_configured(channel: str, source: Mapping[str, str] | None = None, *, require_sender: bool = True) -> bool:

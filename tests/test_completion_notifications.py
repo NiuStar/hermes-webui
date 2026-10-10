@@ -52,6 +52,42 @@ def test_feishu_is_not_selectable_without_sender_sdk(notifications, monkeypatch)
         })
 
 
+def test_feishu_sdk_check_uses_sender_interpreter_not_webui_import_path(monkeypatch):
+    """Agent environment activation can hide /app/venv from the WebUI process."""
+    notifications = importlib.import_module("api.completion_notifications")
+    monkeypatch.setattr(notifications.importlib.util, "find_spec", lambda name: None)
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(notifications.subprocess, "run", run)
+    assert notifications._sender_dependency_ready("feishu") is True
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    assert argv[:3] == [sys.executable, "-I", "-c"]
+    assert "lark_oapi" in argv[3]
+    assert "find_spec" in argv[3]  # capability check must not import the whole SDK per settings read
+    assert kwargs["timeout"] <= 5
+    assert kwargs.get("shell") is not True
+
+
+def test_feishu_sdk_check_refuses_missing_sender_dependency(monkeypatch):
+    notifications = importlib.import_module("api.completion_notifications")
+    monkeypatch.setattr(notifications.subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(a, 1))
+    assert notifications._sender_dependency_ready("feishu") is False
+    assert notifications._sender_dependency_ready("weixin") is True
+
+
+def test_feishu_sdk_check_refuses_unavailable_sender_interpreter(monkeypatch):
+    notifications = importlib.import_module("api.completion_notifications")
+    def unavailable(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], 5)
+    monkeypatch.setattr(notifications.subprocess, "run", unavailable)
+    assert notifications._sender_dependency_ready("feishu") is False
+
+
 def test_normalize_settings_rejects_unknown_or_unconfigured_channels(notifications):
     with pytest.raises(ValueError, match="Unsupported completion notification channel"):
         notifications.normalize_settings({
