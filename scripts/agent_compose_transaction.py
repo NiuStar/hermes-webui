@@ -124,9 +124,9 @@ def _replace_service_image(raw: bytes, service: str, old: str, new: str) -> byte
     return ''.join(lines).encode('utf-8')
 
 
-def prepare_pin(path: Path, service: str, old: str, new: str,
-                before: dict, render: Callable[[Path], dict]) -> PinPlan:
-    if not _SERVICE.fullmatch(service) or not _IMAGE.fullmatch(old) or not _IMAGE.fullmatch(new) or old == new:
+def _prepare_pin(path: Path, service: str, old: str, new: str,
+                 before: dict, render: Callable[[Path], dict]) -> PinPlan:
+    if not _SERVICE.fullmatch(service) or not _IMAGE.fullmatch(new) or old == new:
         raise PinError('Invalid image-only transaction')
     path = Path(path)
     raw, info = _read(path)
@@ -145,6 +145,28 @@ def prepare_pin(path: Path, service: str, old: str, new: str,
         raise PinError('Compose candidate changes other effective configuration')
     return PinPlan(path, raw, updated, hashlib.sha256(raw).hexdigest(), expected, before,
                    stat.S_IMODE(info.st_mode), info.st_uid, info.st_gid)
+
+
+def prepare_pin(path: Path, service: str, old: str, new: str,
+                before: dict, render: Callable[[Path], dict]) -> PinPlan:
+    if not _IMAGE.fullmatch(old):
+        raise PinError('Old image is not an immutable digest')
+    return _prepare_pin(path, service, old, new, before, render)
+
+
+def prepare_baseline_pin(path: Path, service: str, old_tag: str, digest: str,
+                         before: dict, render: Callable[[Path], dict], *,
+                         live: dict, image: dict) -> PinPlan:
+    """One-time tag-to-digest pin, only if the tag resolves to the live image."""
+    if (not re.fullmatch(r'[a-z0-9._:/-]+:v[0-9][0-9A-Za-z_.-]*', old_tag)
+            or not _IMAGE.fullmatch(digest)
+            or old_tag.rsplit(':', 1)[0] != digest.split('@', 1)[0]
+            or image.get('RepoDigests') is None or digest not in image['RepoDigests']
+            or not re.fullmatch(r'sha256:[0-9a-f]{64}', str(image.get('Id') or ''))
+            or live.get('Image') != image['Id']
+            or not (live.get('State') or {}).get('Running')):
+        raise PinError('Old tag is not verified against the running image')
+    return _prepare_pin(path, service, old_tag, digest, before, render)
 
 
 def apply_pin(plan: PinPlan, render: Callable[[Path], dict]) -> None:

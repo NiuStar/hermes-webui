@@ -162,3 +162,35 @@ def test_competing_transaction_cannot_take_the_same_compose_pin(tmp_path):
                 pytest.fail('competing updater entered')
     with tx.pin_lock(p):
         assert p.exists()
+
+
+def test_old_tag_to_observed_digest_requires_exact_live_image(tmp_path):
+    p = fixture(tmp_path)
+    tag = '24802117/hermes-webui:v2026.10.10-r1'
+    p.write_text(p.read_text().replace(OLD, tag, 1))
+    before = resolved(p)
+    image = {'Id': 'sha256:' + 'a' * 64,
+             'RepoDigests': [OLD]}
+    live = {'Image': image['Id'], 'State': {'Running': True}}
+    plan = tx.prepare_baseline_pin(p, 'hermes-webui', tag, OLD,
+                                   before, resolved, live=live, image=image)
+    assert p.read_text().splitlines()[2].strip() == 'image: ' + tag
+    tx.apply_pin(plan, resolved)
+    assert resolved(p)['services']['hermes-webui']['image'] == OLD
+
+
+def test_old_tag_pin_refuses_mismatched_or_unverified_image(tmp_path):
+    p = fixture(tmp_path)
+    tag = '24802117/hermes-webui:v2026.10.10-r1'
+    p.write_text(p.read_text().replace(OLD, tag, 1))
+    before = resolved(p)
+    live = {'Image': 'sha256:' + 'a' * 64, 'State': {'Running': True}}
+    image = {'Id': 'sha256:' + 'b' * 64, 'RepoDigests': [OLD]}
+    with pytest.raises(tx.PinError):
+        tx.prepare_baseline_pin(p, 'hermes-webui', tag, OLD,
+                                before, resolved, live=live, image=image)
+    image['Id'] = live['Image']
+    image['RepoDigests'] = []
+    with pytest.raises(tx.PinError):
+        tx.prepare_baseline_pin(p, 'hermes-webui', tag, OLD,
+                                before, resolved, live=live, image=image)
