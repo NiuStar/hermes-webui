@@ -44,7 +44,7 @@ RUN test "$(printf '%s' "$HERMES_AGENT_REVISION" | wc -c)" -eq 40 \
     && test "$(git rev-parse HEAD)" = "$HERMES_AGENT_REVISION" \
     && printf '%s\n' "$HERMES_AGENT_REVISION" > /opt/hermes/.hermes-agent-revision \
     && rm -rf /opt/hermes/.git \
-    && printf '{"baseVersion":"%s","commit":"%s","source":"docker"}\n' \
+    && printf '{"baseVersion":"%s","commit":"%s","source":"docker","distribution":"docker","updateMechanism":"external"}\n' \
         "${HERMES_AGENT_VERSION#v}" "$HERMES_AGENT_REVISION" > /opt/hermes/install-stamp.json
 
 # ── SQLite upgrade ──────────────────────────────────────────────────────────

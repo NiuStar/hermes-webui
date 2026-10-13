@@ -28,6 +28,8 @@ def test_baked_agent_writes_version_stamp_bound_to_revision():
     assert 'install-stamp.json' in DOCKERFILE
     assert 'HERMES_AGENT_VERSION#v' in DOCKERFILE
     assert '"source":"docker"' in DOCKERFILE
+    assert '"updateMechanism":"external"' in DOCKERFILE
+    assert '"distribution":"docker"' in DOCKERFILE
 
 
 def test_docker_image_exposes_baked_agent_identity_and_default_path():
