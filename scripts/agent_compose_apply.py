@@ -29,6 +29,8 @@ def apply_compose_agent_image(path: Path, files: list[Path], service: str,
     must first authenticate the new image's signed manifest and reject active
     runs; this candidate does not provide those prerequisites.
     """
+    if not files or Path(path) != Path(files[-1]):
+        raise PinError('Only the last ordered Compose file may be pinned')
     if not re.fullmatch(r'[0-9a-f]{64}', expected_old_id):
         raise PinError('Invalid old owner ID')
     if not re.fullmatch(r'sha256:[0-9a-f]{64}', expected_new_image_id):

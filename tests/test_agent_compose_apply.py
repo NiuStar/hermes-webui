@@ -178,3 +178,14 @@ def test_existing_old_image_must_not_be_pulled_or_retargeted(tmp_path):
             repository='24802117/hermes-webui',expected_old_id=OID,
             expected_new_image_id=h.images[NEW],runtime=h)
     assert h.events==[] and p.read_text().find(NEW)<0
+
+
+def test_transaction_refuses_wrong_final_compose_file_before_writes(tmp_path):
+    p=_fixture(tmp_path);other=tmp_path/'override.yaml';other.write_text('services: {}\n')
+    h=Harness(p); initial=p.read_bytes()
+    h.files=[p,other]
+    with pytest.raises(pin.PinError,match='last'):
+        apply.apply_compose_agent_image(p,[p,other],'webui',OLD,NEW,
+            repository='24802117/hermes-webui',expected_old_id=OID,
+            expected_new_image_id=h.images[NEW],runtime=h)
+    assert p.read_bytes()==initial and not h.events
