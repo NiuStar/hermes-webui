@@ -171,7 +171,7 @@ def prepare_baseline_pin(path: Path, service: str, old_tag: str, digest: str,
 
 def validate_compose_owner(owner: dict, image: dict, files: list[Path],
                            effective: dict, *, service: str, repository: str,
-                           config_hash: str | None = None) -> str:
+                           config_hash: str) -> str:
     """Bind effective Compose's old image to its exact live owner and file stack."""
     labels = (owner.get('Config') or {}).get('Labels') or {}
     observed = (labels.get('com.docker.compose.project.config_files') or '').split(',')
@@ -182,7 +182,8 @@ def validate_compose_owner(owner: dict, image: dict, files: list[Path],
             or labels.get('com.docker.compose.service') != service
             or labels.get('com.docker.compose.project') != effective.get('name', labels.get('com.docker.compose.project'))
             or not re.fullmatch(r'[0-9a-f]{64}', str(labels.get('com.docker.compose.config-hash') or ''))
-            or config_hash is not None and labels.get('com.docker.compose.config-hash') != config_hash
+            or not re.fullmatch(r'[0-9a-f]{64}', str(config_hash or ''))
+            or labels.get('com.docker.compose.config-hash') != config_hash
             or not (owner.get('State') or {}).get('Running')
             or not re.fullmatch(r'[0-9a-f]{64}', str(owner.get('Id') or ''))
             or not re.fullmatch(r'sha256:[0-9a-f]{64}', str(image.get('Id') or ''))

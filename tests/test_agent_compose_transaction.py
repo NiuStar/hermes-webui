@@ -207,12 +207,12 @@ def test_compose_context_requires_matching_owner_files_and_exact_old_digest(tmp_
              'State': {'Running': True}}
     image = {'Id': owner['Image'], 'RepoDigests': [OLD]}
     result = tx.validate_compose_owner(owner, image, [p], resolved(p),
-                                       service='hermes-webui', repository='24802117/hermes-webui')
+                                       service='hermes-webui', repository='24802117/hermes-webui', config_hash='d' * 64)
     assert result == OLD
     owner['Config']['Labels']['com.docker.compose.project.config_files'] = str(tmp_path / 'other.yaml')
     with pytest.raises(tx.PinError):
         tx.validate_compose_owner(owner, image, [p], resolved(p),
-                                  service='hermes-webui', repository='24802117/hermes-webui')
+                                  service='hermes-webui', repository='24802117/hermes-webui', config_hash='d' * 64)
 
 
 def test_compose_context_rejects_wrong_running_image_even_if_compose_pinned(tmp_path):
@@ -227,7 +227,7 @@ def test_compose_context_rejects_wrong_running_image_even_if_compose_pinned(tmp_
     image = {'Id': 'sha256:' + 'b' * 64, 'RepoDigests': [OLD]}
     with pytest.raises(tx.PinError):
         tx.validate_compose_owner(owner, image, [p], resolved(p),
-                                  service='hermes-webui', repository='24802117/hermes-webui')
+                                  service='hermes-webui', repository='24802117/hermes-webui', config_hash='d' * 64)
 
 
 def test_compose_context_rejects_nonimmutable_image_id(tmp_path):
@@ -242,7 +242,7 @@ def test_compose_context_rejects_nonimmutable_image_id(tmp_path):
     image = {'Id': owner['Image'], 'RepoDigests': [OLD]}
     with pytest.raises(tx.PinError):
         tx.validate_compose_owner(owner, image, [p], resolved(p),
-                                  service='hermes-webui', repository='24802117/hermes-webui')
+                                  service='hermes-webui', repository='24802117/hermes-webui', config_hash='d' * 64)
 
 
 def test_compose_context_rejects_missing_config_hash(tmp_path):
@@ -256,7 +256,7 @@ def test_compose_context_rejects_missing_config_hash(tmp_path):
     image = {'Id': owner['Image'], 'RepoDigests': [OLD]}
     with pytest.raises(tx.PinError):
         tx.validate_compose_owner(owner, image, [p], resolved(p),
-                                  service='hermes-webui', repository='24802117/hermes-webui')
+                                  service='hermes-webui', repository='24802117/hermes-webui', config_hash='d' * 64)
 
 
 def test_compose_context_compares_config_hash_from_compose_cli(tmp_path):
