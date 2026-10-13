@@ -194,3 +194,49 @@ def test_old_tag_pin_refuses_mismatched_or_unverified_image(tmp_path):
     with pytest.raises(tx.PinError):
         tx.prepare_baseline_pin(p, 'hermes-webui', tag, OLD,
                                 before, resolved, live=live, image=image)
+
+
+def test_compose_context_requires_matching_owner_files_and_exact_old_digest(tmp_path):
+    p = fixture(tmp_path)
+    owner = {'Id': 'f' * 64, 'Image': 'sha256:' + 'a' * 64,
+             'Config': {'Labels': {'com.docker.compose.project': 'pin-qa',
+                 'com.docker.compose.service': 'hermes-webui',
+                 'com.docker.compose.project.working_dir': str(tmp_path),
+                 'com.docker.compose.project.config_files': str(p)}},
+             'State': {'Running': True}}
+    image = {'Id': owner['Image'], 'RepoDigests': [OLD]}
+    result = tx.validate_compose_owner(owner, image, [p], resolved(p),
+                                       service='hermes-webui', repository='24802117/hermes-webui')
+    assert result == OLD
+    owner['Config']['Labels']['com.docker.compose.project.config_files'] = str(tmp_path / 'other.yaml')
+    with pytest.raises(tx.PinError):
+        tx.validate_compose_owner(owner, image, [p], resolved(p),
+                                  service='hermes-webui', repository='24802117/hermes-webui')
+
+
+def test_compose_context_rejects_wrong_running_image_even_if_compose_pinned(tmp_path):
+    p = fixture(tmp_path)
+    owner = {'Id': 'f' * 64, 'Image': 'sha256:' + 'a' * 64,
+             'Config': {'Labels': {'com.docker.compose.project': 'pin-qa',
+                 'com.docker.compose.service': 'hermes-webui',
+                 'com.docker.compose.project.working_dir': str(tmp_path),
+                 'com.docker.compose.project.config_files': str(p)}},
+             'State': {'Running': True}}
+    image = {'Id': 'sha256:' + 'b' * 64, 'RepoDigests': [OLD]}
+    with pytest.raises(tx.PinError):
+        tx.validate_compose_owner(owner, image, [p], resolved(p),
+                                  service='hermes-webui', repository='24802117/hermes-webui')
+
+
+def test_compose_context_rejects_nonimmutable_image_id(tmp_path):
+    p = fixture(tmp_path)
+    owner = {'Id': 'f' * 64, 'Image': 'not-immutable',
+             'Config': {'Labels': {'com.docker.compose.project': 'pin-qa',
+                 'com.docker.compose.service': 'hermes-webui',
+                 'com.docker.compose.project.working_dir': str(tmp_path),
+                 'com.docker.compose.project.config_files': str(p)}},
+             'State': {'Running': True}}
+    image = {'Id': owner['Image'], 'RepoDigests': [OLD]}
+    with pytest.raises(tx.PinError):
+        tx.validate_compose_owner(owner, image, [p], resolved(p),
+                                  service='hermes-webui', repository='24802117/hermes-webui')

@@ -169,6 +169,30 @@ def prepare_baseline_pin(path: Path, service: str, old_tag: str, digest: str,
     return _prepare_pin(path, service, old_tag, digest, before, render)
 
 
+def validate_compose_owner(owner: dict, image: dict, files: list[Path],
+                           effective: dict, *, service: str, repository: str) -> str:
+    """Bind effective Compose's old image to its exact live owner and file stack."""
+    labels = (owner.get('Config') or {}).get('Labels') or {}
+    observed = (labels.get('com.docker.compose.project.config_files') or '').split(',')
+    workdir = labels.get('com.docker.compose.project.working_dir')
+    if (not files or any(not Path(p).is_absolute() for p in files)
+            or observed != [str(p) for p in files]
+            or not workdir or not Path(workdir).is_absolute()
+            or labels.get('com.docker.compose.service') != service
+            or labels.get('com.docker.compose.project') != effective.get('name', labels.get('com.docker.compose.project'))
+            or not (owner.get('State') or {}).get('Running')
+            or not re.fullmatch(r'[0-9a-f]{64}', str(owner.get('Id') or ''))
+            or not re.fullmatch(r'sha256:[0-9a-f]{64}', str(image.get('Id') or ''))
+            or owner.get('Image') != image.get('Id')):
+        raise PinError('Compose owner or ordered files do not match the live image')
+    ref = ((effective.get('services') or {}).get(service) or {}).get('image')
+    if (not isinstance(ref, str) or not _IMAGE.fullmatch(ref)
+            or ref.split('@', 1)[0] != repository
+            or ref not in (image.get('RepoDigests') or [])):
+        raise PinError('Effective Compose is not pinned to the running image digest')
+    return ref
+
+
 def apply_pin(plan: PinPlan, render: Callable[[Path], dict]) -> None:
     original, info = _read(plan.path)
     if (original != plan.previous or stat.S_IMODE(info.st_mode) != plan.mode
