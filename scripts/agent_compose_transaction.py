@@ -6,7 +6,9 @@ module does not run Compose or grant updater access to host configuration.
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager
 from dataclasses import dataclass
+import fcntl
 import hashlib
 import os
 from pathlib import Path
@@ -21,6 +23,31 @@ _SERVICE = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9_.-]*\Z')
 
 class PinError(ValueError):
     pass
+
+
+@contextmanager
+def pin_lock(path: Path):
+    """Hold an advisory lock across baseline, image pin and rollback.
+
+    The operator supplies a protected parent directory. This lock cannot
+    arbitrate against unrelated tools that ignore it; source/stack CAS still
+    rejects their changed files.
+    """
+    path = Path(path)
+    lock_path = path.with_name(path.name + '.agent-pin.lock')
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077
+                or info.st_uid != os.geteuid()):
+            raise PinError('Compose pin lock is not protected')
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise PinError('Compose pin is locked by another updater') from exc
+        yield
+    finally:
+        os.close(fd)
 
 
 @dataclass(frozen=True)

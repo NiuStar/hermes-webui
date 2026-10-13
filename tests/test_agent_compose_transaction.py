@@ -152,3 +152,13 @@ def test_ordered_override_winning_image_refuses_base_edit(tmp_path):
     with pytest.raises(tx.PinError, match='other'):
         tx.prepare_pin(p, 'hermes-webui', OLD, NEW, render(p), render)
     assert p.read_text().startswith('services:')
+
+
+def test_competing_transaction_cannot_take_the_same_compose_pin(tmp_path):
+    p = fixture(tmp_path)
+    with tx.pin_lock(p):
+        with pytest.raises(tx.PinError, match='locked'):
+            with tx.pin_lock(p):
+                pytest.fail('competing updater entered')
+    with tx.pin_lock(p):
+        assert p.exists()
