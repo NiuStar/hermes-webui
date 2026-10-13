@@ -34,6 +34,7 @@ def _settings(tmp_path):
     signature = artifact / 'manifest.json.sig'
     signature.write_text(base64.b64encode(key.sign(manifest.read_bytes())).decode())
     return {
+        'HERMES_WEBUI_AGENT_RELEASE_DIR': str(artifact),
         'HERMES_WEBUI_ACCEPTED_IMAGE': '24802117/hermes-webui@sha256:' + 'a' * 64,
         'HERMES_WEBUI_DOCKER_IMAGE': '24802117/hermes-webui',
         'HERMES_WEBUI_AGENT_COMMIT': 'b' * 40,
@@ -53,6 +54,30 @@ def test_valid_immutable_contract_has_no_side_effects(tmp_path):
     assert verify_setup(env)['image'] == env['HERMES_WEBUI_ACCEPTED_IMAGE']
     assert sorted(p.name for p in (tmp_path / 'release').iterdir()) == [
         'manifest.json', 'manifest.json.sig', 'publisher.pub']
+
+
+def test_signed_manifest_supplies_next_commit_without_per_release_env(tmp_path):
+    env = _settings(tmp_path)
+    expected = env.pop('HERMES_WEBUI_AGENT_COMMIT')
+    assert verify_setup(env)['agent_commit'] == expected
+
+
+def test_release_directory_must_contain_exact_provisioned_files(tmp_path):
+    env = _settings(tmp_path)
+    env['HERMES_WEBUI_AGENT_RELEASE_DIR'] = str(tmp_path / 'release')
+    assert verify_setup(env)['agent_commit'] == 'b' * 40
+    env['HERMES_WEBUI_AGENT_MANIFEST_FILE'] = str(tmp_path / 'elsewhere.json')
+    with pytest.raises(SetupError):
+        verify_setup(env)
+
+
+def test_release_directory_refuses_group_writable_parent(tmp_path):
+    env = _settings(tmp_path)
+    directory = tmp_path / 'release'
+    env['HERMES_WEBUI_AGENT_RELEASE_DIR'] = str(directory)
+    directory.chmod(0o770)
+    with pytest.raises(SetupError):
+        verify_setup(env)
 
 
 @pytest.mark.parametrize('mutation', [

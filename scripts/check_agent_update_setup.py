@@ -24,8 +24,9 @@ class SetupError(ValueError):
 
 
 _FIELDS = (
-    'HERMES_WEBUI_ACCEPTED_IMAGE', 'HERMES_WEBUI_DOCKER_IMAGE',
-    'HERMES_WEBUI_AGENT_COMMIT', 'HERMES_WEBUI_AGENT_MANIFEST_FILE',
+    'HERMES_WEBUI_AGENT_RELEASE_DIR', 'HERMES_WEBUI_ACCEPTED_IMAGE',
+    'HERMES_WEBUI_DOCKER_IMAGE',
+    'HERMES_WEBUI_AGENT_MANIFEST_FILE',
     'HERMES_WEBUI_AGENT_MANIFEST_SIGNATURE_FILE',
     'HERMES_WEBUI_AGENT_PUBLISHER_PUBKEY_FILE',
     'HERMES_WEBUI_AGENT_MANIFEST_PUBKEY_SHA256',
@@ -54,13 +55,32 @@ def _read_regular(path: str, limit: int) -> bytes:
 def verify_setup(env: dict[str, str]) -> dict[str, str]:
     if any(not env.get(key) for key in _FIELDS):
         raise SetupError('Agent updater opt-in requires all release settings')
+    release_dir = env['HERMES_WEBUI_AGENT_RELEASE_DIR']
+    directory = Path(release_dir)
+    if not directory.is_absolute() or directory.is_symlink():
+        raise SetupError('Invalid Agent release directory')
+    try:
+        info = directory.stat()
+    except OSError as exc:
+        raise SetupError('Agent release directory unavailable') from exc
+    if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o022:
+        raise SetupError('Agent release directory is writable by others')
+    expected_names = {
+        'HERMES_WEBUI_AGENT_MANIFEST_FILE': 'manifest.json',
+        'HERMES_WEBUI_AGENT_MANIFEST_SIGNATURE_FILE': 'manifest.json.sig',
+        'HERMES_WEBUI_AGENT_PUBLISHER_PUBKEY_FILE': 'publisher.pub',
+    }
+    for key, name in expected_names.items():
+        if Path(env[key]) != directory / name:
+            raise SetupError('Release files must be in the protected directory')
     repository = env['HERMES_WEBUI_DOCKER_IMAGE']
     if not re.fullmatch(r'(?:[a-z0-9][a-z0-9._-]*(?::[0-9]{1,5})?/)?(?:[a-z0-9][a-z0-9._-]*/)*[a-z0-9][a-z0-9._-]*', repository):
         raise SetupError('Invalid Docker repository')
     image = env['HERMES_WEBUI_ACCEPTED_IMAGE']
     if not re.fullmatch(re.escape(repository) + r'@sha256:[0-9a-f]{64}', image):
         raise SetupError('Accepted image must be the exact repository and immutable digest')
-    if not re.fullmatch(r'[0-9a-f]{40}', env['HERMES_WEBUI_AGENT_COMMIT']):
+    if ('HERMES_WEBUI_AGENT_COMMIT' in env
+            and not re.fullmatch(r'[0-9a-f]{40}', env['HERMES_WEBUI_AGENT_COMMIT'])):
         raise SetupError('Agent commit must be complete')
     fingerprint = env['HERMES_WEBUI_AGENT_MANIFEST_PUBKEY_SHA256']
     if not re.fullmatch(r'[0-9a-f]{64}', fingerprint):
@@ -77,12 +97,12 @@ def verify_setup(env: dict[str, str]) -> dict[str, str]:
     if machine not in ('x86_64', 'aarch64'):
         raise SetupError('Unsupported Agent update platform')
     try:
-        verify_manifest(raw, signature, public_key, repository=repository,
-                        platform='linux/amd64' if machine == 'x86_64' else 'linux/arm64',
-                        agent_commit=env['HERMES_WEBUI_AGENT_COMMIT'])
+        manifest = verify_manifest(raw, signature, public_key, repository=repository,
+                                   platform='linux/amd64' if machine == 'x86_64' else 'linux/arm64',
+                                   agent_commit=env.get('HERMES_WEBUI_AGENT_COMMIT'))
     except ManifestError as exc:
         raise SetupError('Agent image manifest failed signature or target verification') from exc
-    return {'image': image, 'agent_commit': env['HERMES_WEBUI_AGENT_COMMIT']}
+    return {'image': image, 'agent_commit': manifest['agent_commit']}
 
 
 def main() -> None:
@@ -98,7 +118,7 @@ def main() -> None:
             if not line or line.startswith('#'):
                 continue
             key, sep, value = line.partition('=')
-            if not sep or key not in _FIELDS or key in env:
+            if not sep or key not in (*_FIELDS, 'HERMES_WEBUI_AGENT_COMMIT') or key in env:
                 raise SetupError('Unexpected or duplicate updater setting')
             env[key] = value
         result = verify_setup(env)

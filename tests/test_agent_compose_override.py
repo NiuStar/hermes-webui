@@ -20,22 +20,22 @@ def test_agent_update_override_is_explicit_and_fails_closed():
     assert updater['profiles'] == ['self-update']
     env = updater['environment']
     assert env['HERMES_WEBUI_DOCKER_SELF_UPDATE'] == '1'
-    for key in ('HERMES_WEBUI_AGENT_COMMIT', 'HERMES_WEBUI_AGENT_MANIFEST_PATH',
+    for key in ('HERMES_WEBUI_AGENT_MANIFEST_PATH',
                 'HERMES_WEBUI_AGENT_MANIFEST_SIGNATURE_PATH',
                 'HERMES_WEBUI_AGENT_MANIFEST_PUBKEY',
                 'HERMES_WEBUI_AGENT_MANIFEST_PUBKEY_SHA256'):
         assert key in env
-    assert env['HERMES_WEBUI_AGENT_COMMIT'].endswith(':?required}')
+    assert 'HERMES_WEBUI_AGENT_COMMIT' not in env
     assert env['HERMES_WEBUI_AGENT_MANIFEST_PUBKEY_SHA256'].endswith(':?required}')
     assert env['HERMES_WEBUI_DOCKER_IMAGE'].endswith(':?required}')
     assert updater['network_mode'] == 'none'
     assert updater['read_only'] is True
     mounts = updater['volumes']
-    for name in ('manifest.json', 'manifest.json.sig', 'publisher.pub'):
-        matching = [v for v in mounts if v['target'] == '/run/hermes-agent-release/' + name]
-        assert len(matching) == 1 and matching[0]['read_only'] is True
-        assert matching[0]['type'] == 'bind'
-    assert all(not v.get('read_only') is False for v in mounts if isinstance(v, dict))
+    assert len(mounts) == 1
+    assert mounts[0]['type'] == 'bind'
+    assert mounts[0]['source'].endswith(':?required}')
+    assert mounts[0]['target'] == '/run/hermes-agent-release'
+    assert mounts[0]['read_only'] is True
 
 
 def test_base_compose_remains_unprovisioned():

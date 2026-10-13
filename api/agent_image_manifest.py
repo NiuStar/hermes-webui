@@ -44,7 +44,7 @@ def _invalid_constant(_value: str) -> None:
 
 def verify_manifest(
     raw: bytes, signature_b64: str, public_key: bytes, *,
-    repository: str, platform: str, agent_commit: str,
+    repository: str, platform: str, agent_commit: str | None = None,
 ) -> dict:
     """Verify exact signed bytes, expected target, and the complete v1 schema.
 
@@ -78,7 +78,7 @@ def verify_manifest(
             value = manifest[name]
             if not isinstance(value, str) or not _SHA.fullmatch(value):
                 raise ManifestError('Invalid commit')
-        if manifest['agent_commit'] != agent_commit:
+        if agent_commit is not None and manifest['agent_commit'] != agent_commit:
             raise ManifestError('Agent commit mismatch')
         for name in ('agent_version', 'webui_version'):
             value = manifest[name]

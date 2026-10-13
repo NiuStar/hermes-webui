@@ -56,7 +56,7 @@ def _read_trusted_manifest_file(path: str | os.PathLike[str], limit: int) -> byt
 
 def preflight_agent_manifest(
     manifest_path: str | os.PathLike[str], signature_path: str | os.PathLike[str], *,
-    repository: str, platform: str, agent_commit: str,
+    repository: str, platform: str, agent_commit: str | None = None,
 ) -> dict[str, str]:
     """Validate publisher-bound data without pulling or replacing a container.
 
@@ -1009,10 +1009,10 @@ def _control_request(
     if payload.get("action") in ("agent_preflight", "update_agent"):
         manifest_path = os.getenv("HERMES_WEBUI_AGENT_MANIFEST_PATH", "")
         signature_path = os.getenv("HERMES_WEBUI_AGENT_MANIFEST_SIGNATURE_PATH", "")
-        agent_commit = os.getenv("HERMES_WEBUI_AGENT_COMMIT", "")
+        agent_commit = os.getenv("HERMES_WEBUI_AGENT_COMMIT", "").strip() or None
         repository = os.getenv("HERMES_WEBUI_DOCKER_IMAGE", "24802117/hermes-webui").strip()
         if (not manifest_path or not signature_path
-                or not re.fullmatch(r"[0-9a-f]{40}", agent_commit)
+                or agent_commit is not None and not re.fullmatch(r"[0-9a-f]{40}", agent_commit)
                 or not re.fullmatch(r"(?:[a-z0-9][a-z0-9._-]*(?::[0-9]{1,5})?/)(?:[a-z0-9][a-z0-9._-]*/)*[a-z0-9][a-z0-9._-]*", repository)):
             return {"ok": False, "message": "Signed Agent release is not configured"}, None
         if payload.get("action") == "update_agent" and not busy.acquire(blocking=False):

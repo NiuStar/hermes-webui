@@ -48,6 +48,90 @@ def test_sidecar_preflight_only_returns_verified_digest(tmp_path, monkeypatch):
     assert result['webui_commit'] == 'b' * 40
 
 
+def test_sidecar_reads_rotating_agent_commit_from_signed_manifest(tmp_path, monkeypatch):
+    manifest = _artifact(tmp_path)
+    monkeypatch.setenv('HERMES_WEBUI_AGENT_MANIFEST_PUBKEY', str(tmp_path / 'trusted.pub'))
+    monkeypatch.setenv('HERMES_WEBUI_AGENT_MANIFEST_PUBKEY_SHA256',
+                       hashlib.sha256(base64.b64decode((tmp_path / 'trusted.pub').read_text())).hexdigest())
+    monkeypatch.delenv('HERMES_WEBUI_AGENT_COMMIT', raising=False)
+    result = dsu.preflight_agent_manifest(
+        tmp_path / 'manifest.json', tmp_path / 'manifest.json.sig',
+        repository=manifest['repository'], platform=manifest['platform'])
+    assert result['agent_commit'] == manifest['agent_commit']
+
+
+def test_sidecar_explicit_agent_commit_mismatch_remains_closed(tmp_path, monkeypatch):
+    manifest = _artifact(tmp_path)
+    monkeypatch.setenv('HERMES_WEBUI_AGENT_MANIFEST_PUBKEY', str(tmp_path / 'trusted.pub'))
+    monkeypatch.setenv('HERMES_WEBUI_AGENT_MANIFEST_PUBKEY_SHA256',
+                       hashlib.sha256(base64.b64decode((tmp_path / 'trusted.pub').read_text())).hexdigest())
+    with pytest.raises(dsu.DockerEngineError):
+        dsu.preflight_agent_manifest(
+            tmp_path / 'manifest.json', tmp_path / 'manifest.json.sig',
+            repository=manifest['repository'], platform=manifest['platform'],
+            agent_commit='f' * 40)
+
+
+def test_sidecar_preflight_can_accept_next_signed_agent_without_env_commit(tmp_path, monkeypatch):
+    manifest = _artifact(tmp_path)
+    for key, value in {
+        'HERMES_WEBUI_DOCKER_SELF_UPDATE': '1',
+        'HERMES_WEBUI_AGENT_MANIFEST_PATH': str(tmp_path / 'manifest.json'),
+        'HERMES_WEBUI_AGENT_MANIFEST_SIGNATURE_PATH': str(tmp_path / 'manifest.json.sig'),
+        'HERMES_WEBUI_AGENT_MANIFEST_PUBKEY': str(tmp_path / 'trusted.pub'),
+        'HERMES_WEBUI_AGENT_MANIFEST_PUBKEY_SHA256': hashlib.sha256(
+            base64.b64decode((tmp_path / 'trusted.pub').read_text())).hexdigest(),
+        'HERMES_WEBUI_UPDATE_TARGET': 'hermes-webui',
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv('HERMES_WEBUI_AGENT_COMMIT', raising=False)
+
+    class Engine:
+        def inspect(self, name):
+            assert name == 'hermes-webui'
+            return {'Image': 'sha256:' + 'f' * 64, 'State': {'Running': True},
+                    'Config': {'Env': ['HERMES_WEBUI_AGENT_DIR=/opt/hermes'], 'Labels': {}},
+                    'HostConfig': {'Binds': []}, 'Mounts': []}
+        def inspect_image(self, image):
+            assert image == 'sha256:' + 'f' * 64
+            return {'Id': image, 'Config': {'Labels': {
+                'org.opencontainers.image.version': manifest['webui_version'],
+                'org.opencontainers.image.revision': manifest['webui_commit'],
+                'org.opencontainers.image.hermes-agent.path': '/opt/hermes',
+                'org.opencontainers.image.hermes-agent.revision': 'e' * 40}}}
+        def pull(self, *_): pytest.fail('read-only preflight pulled an image')
+    monkeypatch.setattr(dsu, 'DockerEngine', Engine)
+    response, worker = dsu._control_request({'action': 'agent_preflight', 'token': 'secret'},
+                                            busy=threading.Lock(), expected_token='secret')
+    assert worker is None and response['ok'] is True
+    assert response['latest_sha'] == manifest['agent_commit']
+    assert response['latest_version'] == manifest['agent_version']
+
+
+def test_sidecar_rejects_rotated_unsigned_manifest_without_stopping_owner(tmp_path, monkeypatch):
+    manifest = _artifact(tmp_path)
+    for key, value in {
+        'HERMES_WEBUI_DOCKER_SELF_UPDATE': '1',
+        'HERMES_WEBUI_AGENT_MANIFEST_PATH': str(tmp_path / 'manifest.json'),
+        'HERMES_WEBUI_AGENT_MANIFEST_SIGNATURE_PATH': str(tmp_path / 'manifest.json.sig'),
+        'HERMES_WEBUI_AGENT_MANIFEST_PUBKEY': str(tmp_path / 'trusted.pub'),
+        'HERMES_WEBUI_AGENT_MANIFEST_PUBKEY_SHA256': hashlib.sha256(
+            base64.b64decode((tmp_path / 'trusted.pub').read_text())).hexdigest(),
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv('HERMES_WEBUI_AGENT_COMMIT', raising=False)
+    raw = json.loads((tmp_path / 'manifest.json').read_text())
+    raw['agent_commit'] = 'f' * 40
+    (tmp_path / 'manifest.json').write_text(json.dumps(raw))
+    class Engine:
+        def inspect(self, *_): pytest.fail('untrusted manifest must stop before Docker inspect')
+        def pull(self, *_): pytest.fail('untrusted manifest must never pull')
+    monkeypatch.setattr(dsu, 'DockerEngine', Engine)
+    response, worker = dsu._control_request({'action': 'agent_preflight', 'token': 'secret'},
+                                            busy=threading.Lock(), expected_token='secret')
+    assert response['ok'] is False and worker is None
+
+
 @pytest.mark.parametrize('failure', ['no-key', 'wrong-key', 'tamper', 'bad-mode', 'symlink', 'fifo'])
 def test_sidecar_preflight_fail_closed(tmp_path, monkeypatch, failure):
     manifest = _artifact(tmp_path)

@@ -87,8 +87,13 @@ reversible configuration-reconciliation path is implemented and tested.
 
 For online installation, first publish an independently verified
 WebUI+Agent image and signed manifest binding the full WebUI and Agent commits,
-compatibility tests, target platform and immutable registry digest. The
-updater sidecar must authenticate that manifest and pull by digest, check image
+compatibility tests, target platform and immutable registry digest. The signed
+Agent manifest supplies the next full Agent commit; the sidecar does
+not require a version-specific commit environment variable. A legacy
+`HERMES_WEBUI_AGENT_COMMIT` value, if explicitly set, must still match the
+manifest or preflight fails closed. The WebUI independently re-checks the
+published upstream Release (without GitHub API) at Apply. The updater sidecar
+must authenticate that manifest and pull by digest, check image
 identity *before* stopping the old container, then verify runtime, actual
 Agent source and health with rollback on failure. No production publisher key
 or release artifact is provisioned; the remaining publication and trust steps
@@ -173,11 +178,16 @@ For an **isolated configuration rehearsal only**, the optional
 `docker-compose.agent-update.yml` overlay is a fail-closed configuration
 template, not a ready-to-run Agent installer. Supply the complete initial accepted
 `HERMES_WEBUI_ACCEPTED_IMAGE=repository@sha256:…` and the matching
-`HERMES_WEBUI_DOCKER_IMAGE` repository, plus a full expected Agent commit.
+`HERMES_WEBUI_DOCKER_IMAGE` repository. The next Agent commit comes from the
+signed manifest, rather than a per-version sidecar environment setting.
 The accepted image is the **current** Compose pin; the signed manifest holds
 the **next** candidate digest, so those two digests normally differ.
-Provision the detached manifest, signature, and publisher public key in an
-operator-controlled directory and bind them as read-only files. Obtain the
+Provision the detached manifest, signature, and publisher public key in one
+operator-controlled directory mounted read-only. The directory bind lets an
+atomic manifest/signature replacement be observed without remounting the
+sidecar; the already pinned publisher-key fingerprint still rejects a key
+replacement. Publish a manifest/signature pair transactionally: a mixed pair
+must fail closed during a rotation. Obtain the
 publisher-key SHA-256 **independently of the manifest, image, and QA keys**.
 Run `python3 scripts/check_agent_update_setup.py --env-file <private-env-file>`
 on the target host, then resolve the exact ordered Compose stack with
