@@ -20,13 +20,9 @@ def test_agent_update_override_is_explicit_and_fails_closed():
     assert updater['profiles'] == ['self-update']
     env = updater['environment']
     assert env['HERMES_WEBUI_DOCKER_SELF_UPDATE'] == '1'
-    for key in ('HERMES_WEBUI_AGENT_MANIFEST_PATH',
-                'HERMES_WEBUI_AGENT_MANIFEST_SIGNATURE_PATH',
-                'HERMES_WEBUI_AGENT_MANIFEST_PUBKEY',
-                'HERMES_WEBUI_AGENT_MANIFEST_PUBKEY_SHA256'):
-        assert key in env
+    assert env['HERMES_WEBUI_AGENT_RELEASE_FILE'] == '/run/hermes-agent-release/release.json'
+    assert not any(key.startswith('HERMES_WEBUI_AGENT_MANIFEST_') for key in env)
     assert 'HERMES_WEBUI_AGENT_COMMIT' not in env
-    assert env['HERMES_WEBUI_AGENT_MANIFEST_PUBKEY_SHA256'].endswith(':?required}')
     assert env['HERMES_WEBUI_DOCKER_IMAGE'].endswith(':?required}')
     assert updater['network_mode'] == 'none'
     assert updater['read_only'] is True

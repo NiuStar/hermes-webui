@@ -1,5 +1,5 @@
 # Explicit single-container Agent update opt-in; use together with docker-compose.yml.
-# This is NOT a publisher key or release. All required values are operator-provisioned.
+# The release.json pin is operator-provisioned; it is not a browser input.
 # The existing runtime image must be pinned to the accepted immutable digest;
 # an update must reconcile the next effective Compose image before being durable.
 services:
@@ -18,10 +18,7 @@ services:
     environment:
       HERMES_WEBUI_DOCKER_SELF_UPDATE: "1"
       HERMES_WEBUI_DOCKER_IMAGE: ${HERMES_WEBUI_DOCKER_IMAGE:?required}
-      HERMES_WEBUI_AGENT_MANIFEST_PATH: /run/hermes-agent-release/manifest.json
-      HERMES_WEBUI_AGENT_MANIFEST_SIGNATURE_PATH: /run/hermes-agent-release/manifest.json.sig
-      HERMES_WEBUI_AGENT_MANIFEST_PUBKEY: /run/hermes-agent-release/publisher.pub
-      HERMES_WEBUI_AGENT_MANIFEST_PUBKEY_SHA256: ${HERMES_WEBUI_AGENT_MANIFEST_PUBKEY_SHA256:?required}
+      HERMES_WEBUI_AGENT_RELEASE_FILE: /run/hermes-agent-release/release.json
     volumes:
       - type: bind
         source: ${HERMES_WEBUI_AGENT_RELEASE_DIR:?required}

@@ -121,7 +121,7 @@ def apply_docker_update(channel=None) -> dict:
 
 
 def apply_docker_agent_update() -> dict:
-    """Ask the sidecar to install only its independently signed Agent image."""
+    """Ask the sidecar to install its operator-pinned Agent image."""
     blocker_snapshot = _restart_blocker_snapshot()
     if blocker_snapshot.get('restart_blocked'):
         return _restart_blocked_response('agent', blocker_snapshot)
@@ -136,11 +136,11 @@ def apply_docker_agent_update() -> dict:
                 or not isinstance(candidate.get('behind'), int) or candidate['behind'] <= 0):
             return {'ok': False, 'target': 'agent', 'message': 'No verified newer Agent release is available.'}
         if not docker_agent_release_ready(commit=commit, version=version):
-            return {'ok': False, 'target': 'agent', 'message': 'Signed Agent release does not match the verified official release.'}
+            return {'ok': False, 'target': 'agent', 'message': 'Agent release image does not match the verified official release.'}
         return request_agent_update()
     except Exception:
-        logger.exception('Signed Docker Agent update worker launch failed')
-        return {'ok': False, 'target': 'agent', 'message': 'Signed Agent release is not available for online installation.'}
+        logger.exception('Docker Agent update worker launch failed')
+        return {'ok': False, 'target': 'agent', 'message': 'Agent release image is not available for online installation.'}
     finally:
         _apply_lock.release()
 

@@ -262,7 +262,7 @@ def test_compose_owned_target_cannot_be_replaced_without_reconciled_pin(tmp_path
         response, worker = dsu._control_request({'action': action, 'token': 'secret'},
                                                 busy=threading.Lock(), expected_token='secret')
         assert response['ok'] is False and worker is None
-        assert response['message'] == 'Signed Agent release cannot be authenticated'
+        assert response['message'] == 'Agent release image cannot be verified'
 
 
 def test_compose_opt_in_still_refuses_when_exact_signed_image_is_not_local(tmp_path, monkeypatch):

@@ -1,6 +1,7 @@
-# Fail closed: creating a version tag must not publish an untested image,
-# mutable latest, or a GitHub Release. A protected, artifact-tested promotion
-# workflow is required before those side effects can be restored.
+# Fail closed: a version tag alone must not publish an untested image,
+# mutable latest, or a GitHub Release. Publication needs an artifact-tested
+# promotion workflow with digest/platform/source readback and operator approval.
+# An independent publisher signature is NOT required for Agent online updates.
 name: Release & Docker (publication disabled)
 
 on:
@@ -13,7 +14,7 @@ jobs:
   publication-blocked:
     runs-on: ubuntu-latest
     steps:
-      - name: Reject publication until artifact attestation is implemented
+      - name: Reject publication until artifact-tested promotion is implemented
         run: |
-          echo 'Release publication is disabled: a digest- and platform-bound CI receipt, independent signer, and operator approval are required.' >&2
+          echo 'Release publication is disabled: build the frozen WebUI+Agent source, verify runtime and digest/platform identity, and approve operator-controlled promotion first; no detached signature is required.' >&2
           exit 1

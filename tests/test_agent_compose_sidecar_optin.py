@@ -9,6 +9,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from api import docker_self_update as dsu
 from scripts.agent_compose_runtime import DockerComposeRuntime
+from tests.test_agent_unsigned_release import release as unsigned_release
 
 
 def configured(tmp_path,monkeypatch):
@@ -72,6 +73,56 @@ def test_verified_compose_preflight_is_install_ready(tmp_path,monkeypatch):
     monkeypatch.setattr(DockerComposeRuntime,'siblings',lambda self:())
     response,worker=dsu._control_request({'action':'agent_preflight','token':'secret'},
                                           busy=threading.Lock(),expected_token='secret')
+    assert response['ok'] is True and response['latest_sha']==manifest['agent_commit']
+    assert worker is None
+
+
+def test_unsigned_compose_preflight_is_install_ready(tmp_path,monkeypatch):
+    manifest,old,p=configured(tmp_path,monkeypatch)
+    pin=unsigned_release(tmp_path)
+    pin_data=json.loads(pin.read_text())
+    pin_data.update({'webui_commit':manifest['webui_commit'],
+                     'webui_version':manifest['webui_version'],
+                     'agent_commit':manifest['agent_commit'],
+                     'agent_version':manifest['agent_version']})
+    pin.write_text(json.dumps(pin_data))
+    for name in ('HERMES_WEBUI_AGENT_MANIFEST_PATH',
+                 'HERMES_WEBUI_AGENT_MANIFEST_SIGNATURE_PATH',
+                 'HERMES_WEBUI_AGENT_MANIFEST_PUBKEY',
+                 'HERMES_WEBUI_AGENT_MANIFEST_PUBKEY_SHA256'):
+        monkeypatch.delenv(name,raising=False)
+    monkeypatch.setenv('HERMES_WEBUI_AGENT_RELEASE_FILE',str(pin))
+    class Engine:
+        def inspect(self,name):
+            assert name=='hermes-webui'
+            return {'Name':'/hermes-webui','Id':'e'*64,'Image':'sha256:'+'f'*64,
+              'State':{'Running':True},'HostConfig':{'Binds':[]},'Mounts':[],
+              'Config':{'Env':['HERMES_WEBUI_AGENT_DIR=/opt/hermes'],
+              'Labels':{'com.docker.compose.project':'qa','com.docker.compose.service':'webui',
+                'com.docker.compose.project.working_dir':str(tmp_path),
+                'com.docker.compose.project.config_files':str(p),
+                'com.docker.compose.config-hash':'d'*64}}}
+        def inspect_image(self,ref):
+            if ref==manifest['repository']+'@'+manifest['digest']:
+                return {'Id':'sha256:'+'a'*64,'RepoDigests':[ref],
+                  'Os':'linux','Architecture':'amd64','Config':{'Labels':{
+                  'org.opencontainers.image.version':manifest['webui_version'],
+                  'org.opencontainers.image.revision':manifest['webui_commit'],
+                  'org.opencontainers.image.hermes-agent.path':'/opt/hermes',
+                  'org.opencontainers.image.hermes-agent.revision':manifest['agent_commit'],
+                  'org.opencontainers.image.hermes-agent.version':manifest['agent_version']}}}
+            return {'Id':'sha256:'+'f'*64,'RepoDigests':[old],
+              'Config':{'Labels':{'org.opencontainers.image.version':manifest['webui_version'],
+              'org.opencontainers.image.revision':manifest['webui_commit'],
+              'org.opencontainers.image.hermes-agent.path':'/opt/hermes',
+              'org.opencontainers.image.hermes-agent.revision':'d'*40}}}
+        def pull(self,*_):pytest.fail('preflight cannot pull')
+    monkeypatch.setattr(dsu,'DockerEngine',Engine)
+    monkeypatch.setattr(DockerComposeRuntime,'render',lambda self,path:{'name':'qa','services':{'webui':{'image':old}}})
+    monkeypatch.setattr(DockerComposeRuntime,'hash',lambda self:'d'*64)
+    monkeypatch.setattr(DockerComposeRuntime,'siblings',lambda self:())
+    response,worker=dsu._control_request({'action':'agent_preflight','token':'secret'},
+        busy=threading.Lock(),expected_token='secret')
     assert response['ok'] is True and response['latest_sha']==manifest['agent_commit']
     assert worker is None
 

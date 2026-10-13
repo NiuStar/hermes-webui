@@ -17,6 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from api.agent_image_manifest import ManifestError, verify_manifest
+from api.docker_self_update import DockerEngineError, preflight_agent_release
 
 
 class SetupError(ValueError):
@@ -53,6 +54,37 @@ def _read_regular(path: str, limit: int) -> bytes:
 
 
 def verify_setup(env: dict[str, str]) -> dict[str, str]:
+    if env.get('HERMES_WEBUI_AGENT_RELEASE_FILE'):
+        if any(env.get(key) for key in (
+            'HERMES_WEBUI_AGENT_MANIFEST_FILE',
+            'HERMES_WEBUI_AGENT_MANIFEST_SIGNATURE_FILE',
+            'HERMES_WEBUI_AGENT_PUBLISHER_PUBKEY_FILE',
+            'HERMES_WEBUI_AGENT_MANIFEST_PUBKEY_SHA256')):
+            raise SetupError('Agent release modes must not be mixed')
+        required = ('HERMES_WEBUI_AGENT_RELEASE_DIR', 'HERMES_WEBUI_ACCEPTED_IMAGE',
+                    'HERMES_WEBUI_DOCKER_IMAGE')
+        if any(not env.get(key) for key in required):
+            raise SetupError('Agent release pin is incomplete')
+        directory = Path(env['HERMES_WEBUI_AGENT_RELEASE_DIR'])
+        if (not directory.is_absolute() or directory.is_symlink()
+                or not directory.is_dir() or directory.stat().st_mode & 0o022
+                or Path(env['HERMES_WEBUI_AGENT_RELEASE_FILE']) != directory / 'release.json'):
+            raise SetupError('Agent release directory or file is unsafe')
+        repository = env['HERMES_WEBUI_DOCKER_IMAGE']
+        if not re.fullmatch(re.escape(repository) + r'@sha256:[0-9a-f]{64}',
+                            env['HERMES_WEBUI_ACCEPTED_IMAGE']):
+            raise SetupError('Accepted image must be the exact immutable repository digest')
+        machine = os.uname().machine
+        if machine not in ('x86_64', 'aarch64'):
+            raise SetupError('Unsupported Agent update platform')
+        try:
+            release = preflight_agent_release(env['HERMES_WEBUI_AGENT_RELEASE_FILE'],
+                repository=repository, platform='linux/amd64' if machine == 'x86_64' else 'linux/arm64',
+                agent_commit=env.get('HERMES_WEBUI_AGENT_COMMIT'))
+        except (ValueError, OSError, DockerEngineError) as exc:
+            raise SetupError('Agent release pin failed validation') from exc
+        return {'image': env['HERMES_WEBUI_ACCEPTED_IMAGE'],
+                'agent_commit': release['agent_commit']}
     if any(not env.get(key) for key in _FIELDS):
         raise SetupError('Agent updater opt-in requires all release settings')
     release_dir = env['HERMES_WEBUI_AGENT_RELEASE_DIR']
@@ -118,7 +150,8 @@ def main() -> None:
             if not line or line.startswith('#'):
                 continue
             key, sep, value = line.partition('=')
-            if not sep or key not in (*_FIELDS, 'HERMES_WEBUI_AGENT_COMMIT') or key in env:
+            if not sep or key not in (*_FIELDS, 'HERMES_WEBUI_AGENT_COMMIT',
+                                      'HERMES_WEBUI_AGENT_RELEASE_FILE') or key in env:
                 raise SetupError('Unexpected or duplicate updater setting')
             env[key] = value
         result = verify_setup(env)

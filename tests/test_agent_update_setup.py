@@ -10,6 +10,24 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from scripts.check_agent_update_setup import SetupError, verify_setup
 
+def test_operator_pinned_release_setup_needs_no_publisher_key(tmp_path):
+    root = tmp_path / 'release'; root.mkdir(mode=0o700)
+    pin = root / 'release.json'
+    pin.write_text(json.dumps({'repository':'24802117/hermes-webui',
+        'digest':'sha256:'+'c'*64,'platform':'linux/amd64',
+        'webui_commit':'d'*40,'webui_version':'v2026.10.13-r1',
+        'agent_commit':'b'*40,'agent_version':'v0.21.7'}))
+    pin.chmod(0o600)
+    env = {'HERMES_WEBUI_AGENT_RELEASE_DIR':str(root),
+           'HERMES_WEBUI_AGENT_RELEASE_FILE':str(pin),
+           'HERMES_WEBUI_ACCEPTED_IMAGE':'24802117/hermes-webui@sha256:'+'a'*64,
+           'HERMES_WEBUI_DOCKER_IMAGE':'24802117/hermes-webui'}
+    result = verify_setup(env)
+    assert result['agent_commit'] == 'b'*40
+    assert result['image'] == env['HERMES_WEBUI_ACCEPTED_IMAGE']
+    pin.unlink(); pin.symlink_to(root/'absent.json')
+    with pytest.raises(SetupError):verify_setup(env)
+
 
 def _settings(tmp_path):
     artifact = tmp_path / 'release'

@@ -91,6 +91,57 @@ def preflight_agent_manifest(
         "platform": manifest["platform"],
     }
 
+def preflight_agent_release(path: str | os.PathLike[str], *, repository: str,
+                            platform: str, agent_commit: str | None = None) -> dict[str, str]:
+    """Read an operator-pinned immutable release; no publisher key required.
+
+    This file is not the upstream Release proof. The WebUI independently checks
+    that proof on both display and Apply; Docker/Compose inspect binds the image.
+    """
+    try:
+        def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            data: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in data:
+                    raise ValueError('duplicate release field')
+                data[key] = value
+            return data
+        release_dir = Path(path).parent
+        directory_info = release_dir.stat()
+        if (not release_dir.is_absolute() or release_dir.is_symlink()
+                or not stat.S_ISDIR(directory_info.st_mode)
+                or directory_info.st_uid != os.geteuid() or directory_info.st_mode & 0o022):
+            raise ValueError('operator release directory is not protected')
+        release_info = os.lstat(path)
+        if release_info.st_uid != os.geteuid():
+            raise ValueError('operator release file owner differs')
+        raw = _read_trusted_manifest_file(path, 16384)
+        manifest = json.loads(raw, object_pairs_hook=unique,
+                              parse_constant=lambda _: (_ for _ in ()).throw(ValueError('non-finite value')))
+        fields = {'repository', 'digest', 'platform', 'webui_commit',
+                  'agent_commit', 'webui_version', 'agent_version'}
+        if not isinstance(manifest, dict) or set(manifest) != fields:
+            raise ValueError('release fields differ')
+        if (manifest['repository'] != repository
+                or not re.fullmatch(r'(?:[a-z0-9][a-z0-9._-]*(?::[0-9]{1,5})?/)(?:[a-z0-9][a-z0-9._-]*/)*[a-z0-9][a-z0-9._-]*', repository)
+                or not isinstance(manifest['digest'], str)
+                or not re.fullmatch(r'sha256:[0-9a-f]{64}', manifest['digest'])
+                or manifest['platform'] != platform or platform not in ('linux/amd64', 'linux/arm64')
+                or agent_commit is not None and manifest['agent_commit'] != agent_commit):
+            raise ValueError('release target differs')
+        for field in ('webui_commit', 'agent_commit'):
+            if not isinstance(manifest[field], str) or not re.fullmatch(r'[0-9a-f]{40}', manifest[field]):
+                raise ValueError('release commit is invalid')
+        for field in ('webui_version', 'agent_version'):
+            if not isinstance(manifest[field], str) or not re.fullmatch(r'v[0-9][0-9A-Za-z_.-]*', manifest[field]):
+                raise ValueError('release version is invalid')
+    except (OSError, UnicodeError, ValueError, TypeError, DockerEngineError) as exc:
+        raise DockerEngineError('Agent release pin is invalid or unavailable') from exc
+    return {'image': repository + '@' + manifest['digest'],
+            'webui_commit': manifest['webui_commit'], 'agent_commit': manifest['agent_commit'],
+            'webui_version': manifest['webui_version'],
+            'agent_version': manifest['agent_version'], 'platform': manifest['platform']}
+
 
 class UpdateProgress:
     """Thread-safe state for recent single-flight Docker updates."""
@@ -744,7 +795,7 @@ def _compose_agent_preflight(live: dict[str, Any], expected: dict[str, str],
 
 def _apply_signed_compose_agent(runtime: Any, old_ref: str,
                                 expected: dict[str, str], old_id: str) -> dict[str, Any]:
-    """Route only an authenticated, local digest to the Compose transaction."""
+    """Route only an operator-pinned, locally verified digest to Compose."""
     from scripts.agent_compose_apply import apply_compose_agent_image
     from scripts.agent_compose_runtime import DockerComposeRuntime
     if not isinstance(runtime, DockerComposeRuntime):
@@ -952,7 +1003,7 @@ def request_update(channel: str, version: str, sha: str, socket_path: str = CONT
 
 
 def request_agent_update(socket_path: str = CONTROL_SOCKET) -> dict[str, Any]:
-    """Request the sidecar's independently configured, signed Agent release."""
+    """Request the sidecar's independently configured Agent release."""
     token_path = Path(os.getenv("HERMES_WEBUI_UPDATE_TOKEN_FILE", CONTROL_TOKEN))
     token = token_path.read_text(encoding="utf-8").strip()
     payload = json.dumps({"action": "update_agent", "token": token}).encode()
@@ -1056,22 +1107,27 @@ def _control_request(
             return {"ok": False, "message": "Update operation not found"}, None
         return {"ok": True, "progress": snapshot}, None
     if payload.get("action") in ("agent_preflight", "update_agent"):
+        release_file = os.getenv("HERMES_WEBUI_AGENT_RELEASE_FILE", "")
         manifest_path = os.getenv("HERMES_WEBUI_AGENT_MANIFEST_PATH", "")
         signature_path = os.getenv("HERMES_WEBUI_AGENT_MANIFEST_SIGNATURE_PATH", "")
         agent_commit = os.getenv("HERMES_WEBUI_AGENT_COMMIT", "").strip() or None
         repository = os.getenv("HERMES_WEBUI_DOCKER_IMAGE", "24802117/hermes-webui").strip()
-        if (not manifest_path or not signature_path
+        if (bool(release_file) == bool(manifest_path and signature_path)
+                or release_file and (manifest_path or signature_path)
                 or agent_commit is not None and not re.fullmatch(r"[0-9a-f]{40}", agent_commit)
                 or not re.fullmatch(r"(?:[a-z0-9][a-z0-9._-]*(?::[0-9]{1,5})?/)(?:[a-z0-9][a-z0-9._-]*/)*[a-z0-9][a-z0-9._-]*", repository)):
-            return {"ok": False, "message": "Signed Agent release is not configured"}, None
+            return {"ok": False, "message": "Agent release pin is not configured"}, None
         if payload.get("action") == "update_agent" and not busy.acquire(blocking=False):
             return {"ok": False, "message": "Docker update already in progress"}, None
         try:
-            expected = preflight_agent_manifest(
-                manifest_path, signature_path, repository=repository,
-                platform=f"linux/{os.uname().machine.replace('x86_64', 'amd64').replace('aarch64', 'arm64')}",
-                agent_commit=agent_commit,
-            )
+            platform = f"linux/{os.uname().machine.replace('x86_64', 'amd64').replace('aarch64', 'arm64')}"
+            if release_file:
+                expected = preflight_agent_release(
+                    release_file, repository=repository, platform=platform, agent_commit=agent_commit)
+            else:
+                expected = preflight_agent_manifest(
+                    manifest_path, signature_path, repository=repository,
+                    platform=platform, agent_commit=agent_commit)
             target = os.getenv("HERMES_WEBUI_UPDATE_TARGET", "hermes-webui").strip()
             if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", target):
                 raise DockerEngineError("Invalid Agent update target")
@@ -1110,7 +1166,7 @@ def _control_request(
         except Exception:
             if payload.get("action") == "update_agent":
                 busy.release()
-            return {"ok": False, "message": "Signed Agent release cannot be authenticated"}, None
+            return {"ok": False, "message": "Agent release image cannot be verified"}, None
 
         def run_agent_update() -> None:
             try:
@@ -1127,7 +1183,7 @@ def _control_request(
                     )
                 progress_store.complete(operation_id, cleanup_pending=bool(result.get("cleanup_pending")))
             except Exception:
-                logger.exception("Signed Agent update operation %s failed", operation_id)
+                logger.exception("Agent update operation %s failed", operation_id)
                 progress_store.fail(operation_id)
             finally:
                 busy.release()

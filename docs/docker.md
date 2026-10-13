@@ -117,7 +117,20 @@ to pull based on an unverified tag. The existing source-only
 `v2026.10.09-r1` tag has no corresponding official GitHub Release or Docker
 Hub version image.
 
-The repository contains a signed-manifest contract and an opt-in installer path:
+The default Agent opt-in uses an operator-controlled `release.json` pin, **not**
+a detached publisher signature. Put exactly `repository`, `digest` (`sha256:`),
+`platform`, `webui_commit`, `agent_commit`, `webui_version`, and `agent_version`
+in a protected regular file in a protected directory. Set
+`HERMES_WEBUI_AGENT_RELEASE_FILE` in the updater sidecar and mount that
+directory read-only; do not accept a browser-supplied image or release path.
+The WebUI independently checks the published upstream Release and Git ancestry
+again on Apply. The sidecar checks the pinned registry digest and image labels,
+the live WebUI/Agent identities, Compose owner/config, and the actual runtime
+Agent after health. This removes **only** the separate signature requirement;
+it does not turn a bare Git tag, mutable image tag or an untested image into a
+safe install. Never point the pin at a QA candidate or let a browser change it.
+
+The legacy signed-manifest path remains available for already provisioned sites:
 `api/agent_image_manifest.py` verifies detached Ed25519 signatures over exact
 JSON bytes and requires a repository, platform, immutable `sha256:` digest,
 full WebUI/Agent commits, versions and a compatibility-receipt hash.
@@ -162,14 +175,12 @@ signed QA update keeps the stopped previous container for operator acceptance;
 it does not remove that rollback handle automatically. A failed update must
 wait for the restored old container to be healthy before reporting `rolled_back`.
 
-Before enabling installation: publish/verify a reproducible release receipt
-bound to the actual registry digest and platform on the build host; provision
-and rotate a trusted public key independently of WebUI content; make the
-sidecar verify the signed target against the pulled image and actual runtime
-Agent, including mount/Compose source overrides; preserve rollback and verify
-health plus an Agent call. Test each supported deployment topology in an
-isolated stack. A signature over a hand-written `passed: true` receipt or a
-self-reported image label alone must never open the install button.
+Before enabling installation: build from the frozen WebUI commit and exact
+published Agent commit; verify the final image's digest, platform, labels,
+runtime Agent and WebUI file identity with real execution. Pin that digest in
+the operator-owned release file, preserve Compose rollback, and exercise an
+actual isolated update to terminal status. A self-reported image label alone
+must never open the install button.
 The stock Compose file still uses floating tags and `pull_policy: always`;
 pin the accepted digest in Compose before treating a successful replacement
 as durable across future restarts/recreates.
@@ -178,39 +189,29 @@ For an **isolated configuration rehearsal only**, the optional
 `docker-compose.agent-update.yml` overlay is a fail-closed configuration
 template, not a ready-to-run Agent installer. Supply the complete initial accepted
 `HERMES_WEBUI_ACCEPTED_IMAGE=repository@sha256:…` and the matching
-`HERMES_WEBUI_DOCKER_IMAGE` repository. The next Agent commit comes from the
-signed manifest, rather than a per-version sidecar environment setting.
-The accepted image is the **current** Compose pin; the signed manifest holds
-the **next** candidate digest, so those two digests normally differ.
-Provision the detached manifest, signature, and publisher public key in one
-operator-controlled directory mounted read-only. The directory bind lets an
-atomic manifest/signature replacement be observed without remounting the
-sidecar; the already pinned publisher-key fingerprint still rejects a key
-replacement. Publish a manifest/signature pair transactionally: a mixed pair
-must fail closed during a rotation. Obtain the
-publisher-key SHA-256 **independently of the manifest, image, and QA keys**.
-Run `python3 scripts/check_agent_update_setup.py --env-file <private-env-file>`
+`HERMES_WEBUI_DOCKER_IMAGE` repository. The next Agent commit and digest come
+from operator-controlled `release.json`, not a per-version sidecar environment
+setting. The accepted image is the **current** Compose pin; the release file
+holds the **next** candidate digest, so they normally differ. Provision that
+file inside a protected directory mounted read-only; it must be rotated as a
+complete file, not partially written. Run
+`python3 scripts/check_agent_update_setup.py --env-file <private-env-file>`
 on the target host, then resolve the exact ordered Compose stack with
 `docker compose -f docker-compose.yml -f docker-compose.agent-update.yml
 --profile self-update config --format json` before any start. The setup check
-verifies file safety, pinned key, signature, platform, repository and Agent
-commit; it does **not** authenticate who ran the compatibility tests or grant
-permission to start production containers. The overlay requires explicit
-values and cannot be enabled by the default Compose command alone. **Do not
-start this overlay for Agent installation:** Compose-managed containers are
-currently rejected, because the sidecar cannot safely change the effective
-Compose digest as part of its rollback transaction. Once such a transaction
-exists, `scripts/check_agent_compose_pin.py` must verify the same ordered
-Compose stack, accepted registry digest, running container ID, image ID and
-health after recreation. An isolated QA container without Compose labels
-cannot satisfy that durability gate. Do not reuse a QA-only registry or
-signing key as the production publisher.
+verifies file safety, platform, repository and Agent commit, not image runtime
+compatibility or permission to restart production. The overlay requires
+explicit values and cannot be enabled by the default Compose command alone.
+The Compose opt-in remains closed until its signed-free, real sidecar Apply has
+passed isolated terminal-status and rollback acceptance on the final image,
+with Compose binary/config mounts explicitly provisioned. A detached `docker
+run` QA container without Compose labels cannot satisfy persistence.
 The existing WebUI-only tag update now requires the old container's immutable
 image ID to resolve to the same baked Agent commit as the candidate image and
 rejects Agent source overrides before stopping it. If a release would change
 the Agent (or either identity cannot be verified), it fails closed; use a
-separately verified combined-image release instead. This comparison is not
-a substitute for signed provenance of a new Agent release.
+a separately verified combined-image release instead. This comparison is not
+a substitute for the pinned new Agent digest and runtime acceptance.
 
 Multi-container and development deployments can still override that default with
 an explicit `HERMES_WEBUI_AGENT_DIR` and a read-only source mount. An override is
