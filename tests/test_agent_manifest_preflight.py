@@ -265,6 +265,43 @@ def test_compose_owned_target_cannot_be_replaced_without_reconciled_pin(tmp_path
         assert response['message'] == 'Signed Agent release cannot be authenticated'
 
 
+def test_compose_opt_in_still_refuses_when_exact_signed_image_is_not_local(tmp_path, monkeypatch):
+    manifest = _artifact(tmp_path)
+    monkeypatch.setenv('HERMES_WEBUI_DOCKER_SELF_UPDATE', '1')
+    for key, value in {
+        'HERMES_WEBUI_AGENT_MANIFEST_PATH': str(tmp_path / 'manifest.json'),
+        'HERMES_WEBUI_AGENT_MANIFEST_SIGNATURE_PATH': str(tmp_path / 'manifest.json.sig'),
+        'HERMES_WEBUI_AGENT_MANIFEST_PUBKEY': str(tmp_path / 'trusted.pub'),
+        'HERMES_WEBUI_AGENT_MANIFEST_PUBKEY_SHA256': hashlib.sha256(
+            base64.b64decode((tmp_path / 'trusted.pub').read_text())).hexdigest(),
+        'HERMES_WEBUI_AGENT_COMPOSE_ENABLED': '1',
+        'HERMES_WEBUI_AGENT_COMPOSE_FILE': str(tmp_path / 'compose.yaml'),
+        'HERMES_WEBUI_AGENT_COMPOSE_PROJECT': 'qa',
+        'HERMES_WEBUI_AGENT_COMPOSE_SERVICE': 'webui',
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv('HERMES_WEBUI_AGENT_COMMIT', raising=False)
+    (tmp_path / 'compose.yaml').write_text('name: qa\nservices:\n  webui:\n    image: 24802117/hermes-webui@sha256:' + 'f' * 64 + '\n')
+    class Engine:
+        def inspect(self, *_):
+            return {'Name': '/hermes-webui', 'Id': 'e' * 64, 'Image': 'sha256:' + 'f' * 64,
+                    'State': {'Running': True}, 'Config': {'Env': ['HERMES_WEBUI_AGENT_DIR=/opt/hermes'],
+                    'Labels': {'com.docker.compose.project': 'qa', 'com.docker.compose.service': 'webui'}}}
+        def inspect_image(self, ref):
+            if ref == manifest['repository'] + '@' + manifest['digest']:
+                raise dsu.DockerEngineError('Docker API 404: image not local')
+            return {'Id': 'sha256:' + 'f' * 64, 'Config': {'Labels': {
+                'org.opencontainers.image.version': manifest['webui_version'],
+                'org.opencontainers.image.revision': manifest['webui_commit'],
+                'org.opencontainers.image.hermes-agent.path': '/opt/hermes',
+                'org.opencontainers.image.hermes-agent.revision': 'd' * 40}}}
+        def pull(self, *_): pytest.fail('preflight must never pull')
+    monkeypatch.setattr(dsu, 'DockerEngine', Engine)
+    response, worker = dsu._control_request({'action': 'agent_preflight', 'token': 'secret'},
+                                            busy=threading.Lock(), expected_token='secret')
+    assert response['ok'] is False and worker is None
+
+
 def test_sidecar_direct_script_mode_imports_manifest_verifier(tmp_path):
     manifest = _artifact(tmp_path)
     root = Path(__file__).resolve().parents[1]

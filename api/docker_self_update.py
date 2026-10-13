@@ -707,6 +707,55 @@ def _require_unmanaged_agent_target(container: dict[str, Any]) -> None:
         raise DockerEngineError("Compose-managed Agent update needs digest reconciliation")
 
 
+def _compose_agent_preflight(live: dict[str, Any], expected: dict[str, str],
+                             repository: str, target: str) -> tuple[Any, str]:
+    """Explicit Compose opt-in; never infer installability from labels alone."""
+    if os.getenv('HERMES_WEBUI_AGENT_COMPOSE_ENABLED') != '1':
+        raise DockerEngineError('Compose Agent update is not enabled')
+    import sys as _sys
+    root = str(Path(__file__).resolve().parent.parent)
+    if root not in _sys.path:
+        _sys.path.insert(0, root)  # direct /apptoo/api/docker_self_update.py sidecar mode
+    from scripts.agent_compose_transaction import validate_compose_owner
+    from scripts.agent_compose_runtime import DockerComposeRuntime, verify_runtime_agent
+
+    path = os.getenv('HERMES_WEBUI_AGENT_COMPOSE_FILE', '')
+    project = os.getenv('HERMES_WEBUI_AGENT_COMPOSE_PROJECT', '')
+    service = os.getenv('HERMES_WEBUI_AGENT_COMPOSE_SERVICE', '')
+    files = [Path(path)] if path else []
+    runtime = DockerComposeRuntime(files, project=project, service=service,
+        container=target, repository=repository, agent_commit=expected['agent_commit'],
+        agent_version=expected['agent_version'], agent_probe=verify_runtime_agent)
+    labels = (live.get('Config') or {}).get('Labels') or {}
+    if labels.get('com.docker.compose.project') != project:
+        raise DockerEngineError('Compose project differs from the Agent owner')
+    old_image = DockerEngine().inspect_image(live['Image'])
+    _require_same_webui_identity(old_image, expected)
+    _require_unmounted_baked_agent(live)
+    old_ref = validate_compose_owner(live, old_image, files, runtime.render(files[-1]),
+        service=service, repository=repository, config_hash=runtime.hash())
+    image = DockerEngine().inspect_image(expected['image'])
+    _verified_agent_image_id(image, expected)
+    if image['Id'] == live['Image']:
+        raise DockerEngineError('Agent update image is already running')
+    runtime.siblings()  # inspect project scope before allowing an action
+    return runtime, old_ref
+
+
+def _apply_signed_compose_agent(runtime: Any, old_ref: str,
+                                expected: dict[str, str], old_id: str) -> dict[str, Any]:
+    """Route only an authenticated, local digest to the Compose transaction."""
+    from scripts.agent_compose_apply import apply_compose_agent_image
+    from scripts.agent_compose_runtime import DockerComposeRuntime
+    if not isinstance(runtime, DockerComposeRuntime):
+        raise DockerEngineError('Compose runtime is not provisioned')
+    image_info = DockerEngine().inspect_image(expected['image'])
+    new_image_id = _verified_agent_image_id(image_info, expected)
+    return apply_compose_agent_image(runtime.files[-1], runtime.files, runtime.service,
+        old_ref, expected['image'], repository=runtime.repository,
+        expected_old_id=old_id, expected_new_image_id=new_image_id, runtime=runtime)
+
+
 def replace_container(
     target: str,
     image: str,
@@ -1031,7 +1080,13 @@ def _control_request(
             live = DockerEngine().inspect(target)
             if not (live.get("State") or {}).get("Running"):
                 raise DockerEngineError("Agent update target is not running")
-            _require_unmanaged_agent_target(live)
+            compose_runtime = None
+            old_ref = None
+            labels = (live.get('Config') or {}).get('Labels') or {}
+            if any(str(k).startswith('com.docker.compose.') for k in labels):
+                compose_runtime, old_ref = _compose_agent_preflight(live, expected, repository, target)
+            else:
+                _require_unmanaged_agent_target(live)
             _require_unmounted_baked_agent(live)
             old_image_id = live.get("Image")
             if not isinstance(old_image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", old_image_id):
@@ -1059,12 +1114,17 @@ def _control_request(
 
         def run_agent_update() -> None:
             try:
-                result = replace_container(
-                    target, expected["image"], expected_agent_image=expected,
-                    expected_old_id=old_id,
-                    progress=lambda stage, step, **extra: progress_store.advance(
-                        operation_id, stage, step, **extra),
-                )
+                if compose_runtime is not None:
+                    result = _apply_signed_compose_agent(compose_runtime, old_ref, expected, old_id)
+                    if result.get('state') != 'succeeded':
+                        raise DockerEngineError('Compose Agent update restored the old service')
+                else:
+                    result = replace_container(
+                        target, expected["image"], expected_agent_image=expected,
+                        expected_old_id=old_id,
+                        progress=lambda stage, step, **extra: progress_store.advance(
+                            operation_id, stage, step, **extra),
+                    )
                 progress_store.complete(operation_id, cleanup_pending=bool(result.get("cleanup_pending")))
             except Exception:
                 logger.exception("Signed Agent update operation %s failed", operation_id)
