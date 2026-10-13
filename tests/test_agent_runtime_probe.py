@@ -74,6 +74,35 @@ def test_probe_engine_requires_exit_zero_and_uses_exact_revision():
         assert engine.commands[0]['Cmd'][-3] == 'v0.21.6'
 
 
+def test_probe_allows_bounded_cold_import_but_not_unbounded_wait(monkeypatch):
+    ticks=iter([0.0, 70.0, 145.0])
+    monkeypatch.setattr(dsu.time, 'monotonic', lambda: next(ticks))
+    class Engine:
+        def __init__(self): self.polls=0
+        def request(self,method,path,body=None,**_kw):
+            if path.endswith('/exec'):return {'Id':'a'*64}
+            if path.endswith('/start'):return None
+            if path.endswith('/json'):
+                self.polls+=1
+                return {'Running':False,'ExitCode':0}
+            raise AssertionError(path)
+    engine=Engine()
+    dsu._verify_imported_agent(engine,'candidate','a'*40,'v0.21.7')
+    assert engine.polls==1
+
+
+def test_probe_still_times_out_when_exec_never_finishes(monkeypatch):
+    ticks=iter([0.0, 190.0])
+    monkeypatch.setattr(dsu.time,'monotonic',lambda:next(ticks))
+    class Engine:
+        def request(self,method,path,body=None,**_kw):
+            if path.endswith('/exec'):return {'Id':'a'*64}
+            if path.endswith('/start'):return None
+            pytest.fail('timed out probe must not poll beyond deadline')
+    with pytest.raises(dsu.DockerEngineError,match='runtime Agent'):
+        dsu._verify_imported_agent(Engine(),'candidate','a'*40,'v0.21.7')
+
+
 def test_probe_rejects_import_outside_baked_or_staged_source(tmp_path):
     baked = tmp_path / 'baked'
     staged = tmp_path / 'staged'

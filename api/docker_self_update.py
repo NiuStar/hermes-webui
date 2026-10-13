@@ -587,7 +587,7 @@ def _verify_imported_agent(engine: DockerEngine, container: str, revision: str, 
     if not isinstance(exec_id, str) or not re.fullmatch(r"[0-9a-f]{64}", exec_id):
         raise DockerEngineError("Could not start runtime Agent verification")
     engine.request("POST", f"/exec/{exec_id}/start", {"Detach": True, "Tty": False})
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + 180
     while time.monotonic() < deadline:
         state = engine.request("GET", f"/exec/{exec_id}/json")
         if not isinstance(state, dict):

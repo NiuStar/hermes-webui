@@ -50,8 +50,6 @@ class DockerComposeRuntime:
         self.health_timeout=health_timeout
         self.agent_probe=agent_probe
         self.cwd=files[0].parent
-        self.prefix=['docker','compose','--project-directory',str(self.cwd)]
-        for f in files:self.prefix.extend(['-f',str(f)])
 
     @staticmethod
     def _run(cmd: list[str], *, timeout: int = 30) -> str:

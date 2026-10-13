@@ -91,3 +91,20 @@ def test_runtime_requires_provisioned_probe_before_starting_compose(tmp_path,mon
     monkeypatch.setattr(r,'_stack',forbidden)
     with pytest.raises(PinError,match='probe'):
         r.up()
+
+
+def test_runtime_render_preserves_full_ordered_stack(tmp_path,monkeypatch):
+    first=tmp_path/'base.yaml';last=tmp_path/'override.yaml'
+    first.write_text('services: {}\n');last.write_text('services: {}\n')
+    candidate=tmp_path/'candidate.yaml';candidate.write_text('services: {}\n')
+    seen=[]
+    def fake(cmd,**kwargs):
+        seen.append(cmd)
+        return type('R',(),{'returncode':0,'stdout':json.dumps({'name':'qa','services':{}}),'stderr':''})()
+    monkeypatch.setattr('scripts.agent_compose_runtime.subprocess.run',fake)
+    r=DockerComposeRuntime([first,last],project='qa',service='webui',container='qa-webui',
+                           repository='24802117/hermes-webui',agent_commit='b'*40,
+                           agent_version='v0.21.7',agent_probe=lambda *_:None)
+    r.render(candidate)
+    assert seen[0]==['docker','compose','--project-directory',str(tmp_path),
+                     '-f',str(first),'-f',str(candidate),'config','--format','json']
