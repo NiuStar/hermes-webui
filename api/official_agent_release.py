@@ -26,9 +26,12 @@ def prove_ancestry(current: str, target: str, version: str) -> None:
             or not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+',version) or current==target):
         raise ValueError('Invalid upgrade direction')
     with tempfile.TemporaryDirectory(prefix='hermes-release-proof-') as root:
-        env={**os.environ,'GIT_TERMINAL_PROMPT':'0','GIT_HTTP_LOW_SPEED_LIMIT':'1','GIT_HTTP_LOW_SPEED_TIME':'60'}
+        env={**os.environ,'GIT_TERMINAL_PROMPT':'0','GIT_NO_LAZY_FETCH':'1',
+             'GIT_HTTP_LOW_SPEED_LIMIT':'1','GIT_HTTP_LOW_SPEED_TIME':'30'}
         def git(*a,timeout=20):return subprocess.check_output(['git','-C',root,*a],env=env,stderr=subprocess.PIPE,text=True,timeout=timeout).strip()
         git('init','-q')
-        git('-c','http.version=HTTP/1.1','fetch','--quiet','--no-tags','--filter=blob:none','--shallow-since=2026-09-01',REPO,'refs/tags/'+version,timeout=180)
+        git('-c','protocol.version=2','-c','http.version=HTTP/1.1','fetch','--quiet',
+            '--no-tags','--filter=tree:0','--depth=1024',REPO+'.git',
+            'refs/tags/'+version,timeout=90)
         if git('rev-parse','FETCH_HEAD^{}')!=target or git('cat-file','-t',current)!='commit':raise ValueError('Official Git commit mismatch')
         git('merge-base','--is-ancestor',current,target)

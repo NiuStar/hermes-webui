@@ -1086,30 +1086,11 @@ def _agent_commit_comparison(current: str, latest: str) -> tuple[str, int]:
     cached = _agent_ancestry_cache.get((current, latest))
     if cached and time.monotonic() - cached[1] < CACHE_TTL:
         return 'ahead', cached[0]
-    import tempfile
-    with tempfile.TemporaryDirectory(prefix='hermes-agent-release-') as directory:
-        env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0',
-               'GIT_HTTP_LOW_SPEED_LIMIT': '1', 'GIT_HTTP_LOW_SPEED_TIME': '60'}
-        def git(*args, timeout=15):
-            return subprocess.run(['git', '-C', directory, *args], capture_output=True,
-                                  text=True, timeout=timeout, check=True, env=env).stdout.strip()
-        git('init', '-q')
-        git('-c', 'protocol.version=1', '-c', 'http.version=HTTP/1.1',
-            'fetch', '--quiet', '--no-tags', '--filter=blob:none',
-            '--shallow-since=2026-09-01', _AGENT_REPO, 'refs/tags/' + _agent_comparison_version(latest),
-            timeout=180)
-        if git('rev-parse', 'FETCH_HEAD^{}') != latest:
-            return 'unknown', 0
-        if git('cat-file', '-t', current) != 'commit':
-            return 'unknown', 0
-        relation = subprocess.run(['git', '-C', directory, 'merge-base', '--is-ancestor', current, latest],
-                                  capture_output=True, timeout=15, env=env)
-        if relation.returncode != 0:
-            return 'unknown', 0
-        # A shallow graph proves ancestry here, but cannot count every commit
-        # across merges. Return a positive update signal, not a false count.
-        _agent_ancestry_cache[(current, latest)] = (1, time.monotonic())
-        return 'ahead', 1
+    from api.official_agent_release import prove_ancestry
+    prove_ancestry(current, latest, _agent_comparison_version(latest))
+    # Only a positive ancestor proof is cacheable; missing shallow objects fail.
+    _agent_ancestry_cache[(current, latest)] = (1, time.monotonic())
+    return 'ahead', 1
 
 
 def _agent_comparison_version(latest: str) -> str:

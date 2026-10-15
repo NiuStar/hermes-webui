@@ -12,6 +12,8 @@ _REAL_BAKED_AGENT_PATH_OVERRIDDEN = updates._baked_agent_path_overridden
 def simulated_baked_image(monkeypatch):
     """Temp dirs model /opt/hermes unless explicitly modelling an override."""
     monkeypatch.setattr(updates, '_baked_agent_path_overridden', lambda _path: False)
+    # These fixtures use synthetic SHAs: never contact a real mounted updater.
+    monkeypatch.setattr(updates, 'request_agent_catalog', lambda *_a, **_k: {'ok': False})
 
 
 def _agent(tmp_path, revision='a' * 40):
@@ -74,6 +76,8 @@ def test_direct_agent_apply_refuses_signed_manifest_that_is_not_official_latest(
     monkeypatch.setattr(updates, 'deployment_info', lambda: {'type': 'docker', 'online_update': True})
     monkeypatch.setattr(updates, '_restart_blocker_snapshot', lambda: {'restart_blocked': False})
     monkeypatch.setattr(updates, '_published_agent_release', lambda: ('v0.21.6', 'b' * 40))
+    monkeypatch.setattr(updates, '_check_baked_agent_release', lambda _: {
+        'latest_sha': 'b' * 40, 'latest_version': 'v0.21.6', 'behind': 1})
     monkeypatch.setattr(updates, 'request_agent_preflight',
                         lambda: {'ok': True, 'latest_sha': 'c' * 40, 'latest_version': 'v0.21.5'})
     monkeypatch.setattr(updates, 'request_agent_update',
