@@ -14,7 +14,7 @@ def _replace_with_symlink(baked, staged):
     target.symlink_to(baked / 'hermes_cli' / 'runtime.py')
 
 
-def _run_probe(tmp_path, *, mutate=None):
+def _run_probe(tmp_path, *, mutate=None, import_root='staged'):
     baked = tmp_path / 'baked'
     staged = tmp_path / 'staged'
     for root in (baked, staged):
@@ -32,7 +32,18 @@ def _run_probe(tmp_path, *, mutate=None):
     cmd = [sys.executable, '-c', dsu._AGENT_RUNTIME_PROBE,
            'a' * 40, 'v0.21.6', str(baked), str(staged)]
     return subprocess.run(cmd, capture_output=True, text=True, timeout=15,
-                          cwd=tmp_path, env={**os.environ, 'PYTHONPATH': str(staged)})
+                          cwd=tmp_path, env={**os.environ, 'PYTHONPATH': str(baked if import_root=='baked' else staged)})
+
+
+def test_probe_accepts_production_baked_pythonpath(tmp_path):
+    result = _run_probe(tmp_path, import_root='baked')
+    assert result.returncode == 0, result.stderr
+
+
+def test_probe_rejects_stale_staged_code_with_baked_pythonpath(tmp_path):
+    result = _run_probe(tmp_path, import_root='baked', mutate=lambda b,s:
+                        (s/'run_agent.py').write_text('VALUE=99'))
+    assert result.returncode != 0
 
 
 def test_probe_detects_imported_source_and_matching_code(tmp_path):

@@ -63,7 +63,7 @@ def test_success_pins_compose_and_preserves_sibling(tmp_path):
     assert h.siblings()=='f'*64
 
 
-def test_acceptance_failure_recreates_old_service_and_original_bytes(tmp_path):
+def test_acceptance_failure_recreates_old_service_and_original_bytes(tmp_path, caplog):
     p=_fixture(tmp_path);initial=p.read_bytes();h=Harness(p);h.fail=True
     result=apply.apply_compose_agent_image(p,[p],'webui',OLD,NEW,
         repository='24802117/hermes-webui',expected_old_id=OID,
@@ -71,6 +71,7 @@ def test_acceptance_failure_recreates_old_service_and_original_bytes(tmp_path):
     assert result['state']=='rolled_back'
     assert result['restored_id']==RID and result['restored_id']!=OID
     assert p.read_bytes()==initial and h.events==['up','accept','up','restore_health']
+    assert 'injected acceptance failure' in caplog.text
 
 
 def test_changed_owner_refuses_before_write_or_recreate(tmp_path):

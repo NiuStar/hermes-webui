@@ -7,6 +7,9 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import logging
+
+logger = logging.getLogger(__name__)
 try:
     from .agent_compose_transaction import (
         PinError, pin_lock, validate_compose_owner, prepare_pin,
@@ -83,6 +86,7 @@ def apply_compose_agent_image(path: Path, files: list[Path], service: str,
                                    runtime.render(path), service=service,
                                    repository=repository, config_hash=runtime.hash())
         except Exception as exc:
+            logger.exception('Compose Agent candidate acceptance failed; attempting guarded rollback')
             observed = runtime.inspect()
             if runtime.siblings() != siblings:
                 raise PinError('Sibling changed; manual recovery required') from exc

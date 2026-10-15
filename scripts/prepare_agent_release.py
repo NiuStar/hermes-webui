@@ -98,7 +98,7 @@ LABEL org.opencontainers.image.hermes-agent.revision="{commit}" org.opencontaine
     def hashes(image):return run(['docker','run','--rm','--network','none','--read-only','--entrypoint','python3',image,'-B','-c',compare],timeout=120)
     assert hashes(old['Id'])==hashes(new['Id']),'Agent-only build changed WebUI payload'
     name='hermes-agent-release-qa-'+commit[:12]+'-'+str(os.getpid())
-    cid=run(['docker','run','-d','--name',name,'--restart=no','-e','HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui','-e','HERMES_WEBUI_AUTH_MODE=none',new['Id']])
+    cid=run(['docker','run','-d','--name',name,'--restart=no','-e','HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui','-e','HERMES_WEBUI_AUTH_MODE=none','-e','PYTHONPATH=/opt/hermes','-e','HERMES_WEBUI_AGENT_DIR=/opt/hermes',new['Id']])
     try:
         deadline=time.monotonic()+420
         while time.monotonic()<deadline:

@@ -624,7 +624,10 @@ identity = get_code_identity(refresh=True)
 if identity.get('sha') != revision or identity.get('version') != version.removeprefix('v'):
     raise SystemExit(2)
 import run_agent
-if pathlib.Path(run_agent.__file__).resolve(strict=True) != (staged / 'run_agent.py').resolve(strict=True):
+# The deployment may intentionally import the immutable baked tree via
+# PYTHONPATH=/opt/hermes. Both complete trees were hash-compared above; require
+# run_agent to come from the SAME verified root as hermes_cli, not only staged.
+if pathlib.Path(run_agent.__file__).resolve(strict=True) != (origin.parent.parent / 'run_agent.py').resolve(strict=True):
     raise SystemExit(2)
 """
 
