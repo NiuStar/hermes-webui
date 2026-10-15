@@ -82,6 +82,26 @@ def test_changed_owner_refuses_before_write_or_recreate(tmp_path):
     assert p.read_bytes()==initial and not h.events
 
 
+@pytest.mark.parametrize('fail_on', [1,2])
+def test_active_work_before_pin_or_recreate_preserves_old_service(tmp_path, fail_on):
+    p=_fixture(tmp_path);h=Harness(p);initial=p.read_bytes();calls=[]
+    def guard():
+        calls.append('guard')
+        if len(calls)==fail_on:raise pin.PinError('active work blocks update')
+    h.guard_idle=guard
+    if fail_on==1:
+        with pytest.raises(pin.PinError,match='active work'):
+            apply.apply_compose_agent_image(p,[p],'webui',OLD,NEW,
+                repository='24802117/hermes-webui',expected_old_id=OID,
+                expected_new_image_id=h.images[NEW],runtime=h)
+    else:
+        result=apply.apply_compose_agent_image(p,[p],'webui',OLD,NEW,
+            repository='24802117/hermes-webui',expected_old_id=OID,
+            expected_new_image_id=h.images[NEW],runtime=h)
+        assert result['state']=='rolled_back'
+    assert p.read_bytes()==initial and h.owner==OID and not h.events
+
+
 def test_foreign_owner_after_recreate_is_not_overwritten(tmp_path):
     p=_fixture(tmp_path);h=Harness(p);h.foreign=True
     with pytest.raises(pin.PinError,match='foreign'):

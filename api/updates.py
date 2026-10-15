@@ -24,7 +24,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from api.agent_health import get_active_profile_gateway_running_pid
-from api.docker_self_update import CONTROL_SOCKET, request_agent_preflight, request_agent_update, request_status, request_update
+from api.docker_self_update import CONTROL_SOCKET, request_agent_preflight, request_agent_update, request_agent_catalog, request_status, request_update
 from api.gateway_restart import restart_active_profile_gateway
 from api.profiles import get_active_profile_name
 from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
@@ -137,7 +137,11 @@ def apply_docker_agent_update() -> dict:
             return {'ok': False, 'target': 'agent', 'message': 'No verified newer Agent release is available.'}
         if not docker_agent_release_ready(commit=commit, version=version):
             return {'ok': False, 'target': 'agent', 'message': 'Agent release image does not match the verified official release.'}
-        return request_agent_update()
+        legacy = request_agent_preflight()
+        if (legacy.get('ok') is True and legacy.get('latest_sha') == commit
+                and legacy.get('latest_version') == version):
+            return request_agent_update()
+        return request_agent_catalog(commit, version, apply=True)
     except Exception:
         logger.exception('Docker Agent update worker launch failed')
         return {'ok': False, 'target': 'agent', 'message': 'Agent release image is not available for online installation.'}
@@ -151,6 +155,9 @@ def docker_agent_release_ready(*, commit: str | None = None, version: str | None
         return False
     try:
         release = request_agent_preflight()
+        if not (release.get('ok') is True and release.get('latest_sha') == commit
+                and release.get('latest_version') == version):
+            release = request_agent_catalog(commit, version)
         return (release.get('ok') is True
                 and isinstance(commit, str) and re.fullmatch(r'[0-9a-f]{40}', commit) is not None
                 and isinstance(version, str) and bool(version)
@@ -1169,7 +1176,7 @@ def _check_baked_agent_release(path) -> dict:
     update = {
         **base, 'behind': ahead, 'manual_update': True,
         'compare_url': base['repo_url'] + '/compare/' + current + '...' + latest,
-        'update_instruction': ('A separately authenticated Agent image is ready for Docker online installation.'
+        'update_instruction': ('A compatible Agent image is ready for Docker online installation.'
                                if base['deployment_online_update'] else
                                'Docker Agent online installation is unavailable. A separate WebUI update does not guarantee an Agent update.'),
     }

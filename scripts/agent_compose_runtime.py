@@ -49,6 +49,7 @@ class DockerComposeRuntime:
         self.agent_version=agent_version
         self.health_timeout=health_timeout
         self.agent_probe=agent_probe
+        self.progress=None
         self.cwd=files[0].parent
 
     @staticmethod
@@ -113,7 +114,14 @@ class DockerComposeRuntime:
             raise PinError('Verified runtime Agent probe not configured')
         self._stack(['up','-d','--no-deps','--pull','never',self.service],timeout=240)
 
+    def guard_idle(self) -> None:
+        code = ("import json,urllib.request,os;"
+                "h=json.load(urllib.request.urlopen('http://127.0.0.1:'+os.getenv('HERMES_WEBUI_PORT','8787')+'/health',timeout=5));"
+                "assert h.get('active_runs')==0 and h.get('active_streams')==0,'active work blocks update'")
+        self._run(['docker','exec',self.container,'/app/venv/bin/python3','-c',code],timeout=10)
+
     def _wait(self,owner: dict,expected_image: str) -> dict:
+        if callable(self.progress):self.progress('waiting_for_health',5)
         deadline=time.monotonic()+self.health_timeout
         while True:
             actual=self.inspect();labels=(actual.get('Config') or {}).get('Labels') or {}
@@ -134,6 +142,7 @@ class DockerComposeRuntime:
             raise PinError('Verified runtime Agent probe not configured')
         if image['Id']==owner.get('Image'):
             checked=self._wait(owner,image['Id'])
+            if callable(self.progress):self.progress('verifying_runtime',6)
             self.agent_probe(checked,self.agent_commit,self.agent_version)
         else:raise PinError('Agent candidate image changed')
 

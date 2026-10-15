@@ -1,0 +1,11 @@
+[Unit]
+Description=Follow official Agent Releases on the builder (no production restart)
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=30min
+RandomizedDelaySec=30
+Unit=agent-release-builder.service
+
+[Install]
+WantedBy=timers.target

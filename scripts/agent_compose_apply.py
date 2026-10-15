@@ -49,6 +49,9 @@ def apply_compose_agent_image(path: Path, files: list[Path], service: str,
         plan = prepare_pin(path, service, old_ref, new_ref, baseline, runtime.render)
         if runtime.inspect().get('Id') != expected_old_id or runtime.siblings() != siblings:
             raise PinError('Compose ownership changed before pin')
+        guard = getattr(runtime, 'guard_idle', None)
+        if callable(guard):
+            guard()
         apply_pin(plan, runtime.render)
         try:
             verify_pin(plan, runtime.render)
@@ -58,6 +61,8 @@ def apply_compose_agent_image(path: Path, files: list[Path], service: str,
             restore_pin(plan, runtime.render)
             raise PinError('candidate pin verification failed; original Compose config restored') from exc
         try:
+            if callable(guard):
+                guard()
             runtime.up()
             candidate = runtime.inspect()
             if (candidate.get('Id') == expected_old_id

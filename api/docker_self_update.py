@@ -304,6 +304,9 @@ class DockerEngine:
     def inspect_image(self, image: str) -> dict[str, Any]:
         return self.request("GET", "/images/" + urllib.parse.quote(image, safe="") + "/json")
 
+    def distribution(self, image: str) -> dict[str, Any]:
+        return self.request("GET", "/distribution/" + urllib.parse.quote(image, safe="") + "/json", timeout=30)
+
 
 def _decode_chunked(data: bytes) -> bytes:
     out = bytearray()
@@ -759,7 +762,7 @@ def _require_unmanaged_agent_target(container: dict[str, Any]) -> None:
 
 
 def _compose_agent_preflight(live: dict[str, Any], expected: dict[str, str],
-                             repository: str, target: str) -> tuple[Any, str]:
+                             repository: str, target: str, *, require_image: bool = True) -> tuple[Any, str]:
     """Explicit Compose opt-in; never infer installability from labels alone."""
     if os.getenv('HERMES_WEBUI_AGENT_COMPOSE_ENABLED') != '1':
         raise DockerEngineError('Compose Agent update is not enabled')
@@ -773,7 +776,8 @@ def _compose_agent_preflight(live: dict[str, Any], expected: dict[str, str],
     path = os.getenv('HERMES_WEBUI_AGENT_COMPOSE_FILE', '')
     project = os.getenv('HERMES_WEBUI_AGENT_COMPOSE_PROJECT', '')
     service = os.getenv('HERMES_WEBUI_AGENT_COMPOSE_SERVICE', '')
-    files = [Path(path)] if path else []
+    chain = os.getenv('HERMES_WEBUI_AGENT_COMPOSE_FILES', '')
+    files = [Path(p) for p in chain.split(os.pathsep)] if chain else ([Path(path)] if path else [])
     runtime = DockerComposeRuntime(files, project=project, service=service,
         container=target, repository=repository, agent_commit=expected['agent_commit'],
         agent_version=expected['agent_version'], agent_probe=verify_runtime_agent)
@@ -785,12 +789,82 @@ def _compose_agent_preflight(live: dict[str, Any], expected: dict[str, str],
     _require_unmounted_baked_agent(live)
     old_ref = validate_compose_owner(live, old_image, files, runtime.render(files[-1]),
         service=service, repository=repository, config_hash=runtime.hash())
-    image = DockerEngine().inspect_image(expected['image'])
-    _verified_agent_image_id(image, expected)
-    if image['Id'] == live['Image']:
-        raise DockerEngineError('Agent update image is already running')
+    if require_image:
+        image = DockerEngine().inspect_image(expected['image'])
+        _verified_agent_image_id(image, expected)
+        if image['Id'] == live['Image']:
+            raise DockerEngineError('Agent update image is already running')
     runtime.siblings()  # inspect project scope before allowing an action
     return runtime, old_ref
+
+
+def _catalog_request(payload: dict[str, Any], *, busy: threading.Lock,
+                     progress: UpdateProgress) -> tuple[dict[str, Any], threading.Thread | None]:
+    """Fixed-repository prepared images; official Release proof belongs to WebUI.
+
+    No arbitrary image, repository, target, path or command is accepted. The
+    caller passes only the official version/SHA already revalidated by WebUI.
+    """
+    if os.getenv('HERMES_WEBUI_AGENT_CATALOG_ENABLED') != '1':
+        return {'ok': False, 'message': 'Agent image catalog is not enabled'}, None
+    commit = payload.get('agent_commit'); version = payload.get('agent_version')
+    if (not isinstance(commit, str) or not re.fullmatch(r'[0-9a-f]{40}', commit)
+            or not isinstance(version, str) or not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', version)):
+        return {'ok': False, 'message': 'Invalid official Agent release'}, None
+    repository = os.getenv('HERMES_WEBUI_DOCKER_IMAGE', '24802117/hermes-webui')
+    target = os.getenv('HERMES_WEBUI_UPDATE_TARGET', 'hermes-webui')
+    engine = DockerEngine()
+    try:
+        if __package__:
+            from .agent_image_catalog import resolve
+        else:
+            from agent_image_catalog import resolve
+        live = engine.inspect(target)
+        old_image = engine.inspect_image(live['Image'])
+        labels = old_image.get('Config', {}).get('Labels', {})
+        old_contract = _baked_agent_contract(old_image)
+        if old_contract is None or old_contract[1] == commit:
+            raise DockerEngineError('No newer Agent image required')
+        expected = resolve(engine, repository=repository,
+            webui_commit=labels.get('org.opencontainers.image.revision'),
+            webui_version=labels.get('org.opencontainers.image.version'),
+            agent_commit=commit, agent_version=version,
+            platform=f"linux/{os.uname().machine.replace('x86_64', 'amd64').replace('aarch64', 'arm64')}")
+        runtime, old_ref = _compose_agent_preflight(live, expected, repository, target, require_image=False)
+        # Capabilities must be available in the actual privileged runtime.
+        runtime._run(['docker', 'compose', 'version'])
+    except Exception:
+        return {'ok': False, 'message': 'Compatible Agent image or Compose runtime is not ready'}, None
+    if payload['action'] == 'agent_catalog_preflight':
+        return {'ok': True, 'latest_sha': commit, 'latest_version': version, 'mode': 'catalog'}, None
+    if not busy.acquire(blocking=False):
+        return {'ok': False, 'message': 'Docker update already in progress'}, None
+    operation_id, initial = progress.start(version)
+    def worker() -> None:
+        try:
+            progress.advance(operation_id, 'pulling_image', 1)
+            engine.pull(expected['image'])
+            progress.advance(operation_id, 'verifying_image', 2)
+            if engine.inspect(target).get('Id') != live.get('Id'):
+                raise DockerEngineError('Agent target owner changed')
+            checked, checked_ref = _compose_agent_preflight(engine.inspect(target), expected, repository, target)
+            if checked_ref != old_ref:
+                raise DockerEngineError('Compose baseline changed during pull')
+            checked.progress = lambda stage, step: progress.advance(operation_id, stage, step)
+            progress.advance(operation_id, 'stopping_old_container', 3)
+            result = _apply_signed_compose_agent(checked, old_ref, expected, live['Id'])
+            if result.get('state') != 'succeeded':
+                progress.advance(operation_id, 'rolled_back', 6, rolled_back=True)
+                raise DockerEngineError('Compose Agent update rolled back')
+            progress.complete(operation_id)
+        except Exception:
+            logger.exception('Catalog Agent update operation %s failed', operation_id)
+            progress.fail(operation_id)
+        finally:
+            busy.release()
+    return {'ok': True, 'target': 'agent', 'operation_id': operation_id,
+            'progress': initial, 'restart_scheduled': True, 'latest_sha': commit,
+            'latest_version': version}, threading.Thread(target=worker, daemon=True)
 
 
 def _apply_signed_compose_agent(runtime: Any, old_ref: str,
@@ -1036,6 +1110,20 @@ def request_agent_preflight(socket_path: str = CONTROL_SOCKET) -> dict[str, Any]
     return result if isinstance(result, dict) else {"ok": False}
 
 
+def request_agent_catalog(commit: str, version: str, *, apply: bool = False,
+                          socket_path: str = CONTROL_SOCKET) -> dict[str, Any]:
+    token_path = Path(os.getenv('HERMES_WEBUI_UPDATE_TOKEN_FILE', CONTROL_TOKEN))
+    payload = {'action': 'agent_catalog_update' if apply else 'agent_catalog_preflight',
+               'agent_commit': commit, 'agent_version': version,
+               'token': token_path.read_text().strip()}
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(45)
+        client.connect(socket_path)
+        client.sendall(json.dumps(payload).encode() + b'\n')
+        result = json.loads(client.recv(8192))
+    return result if isinstance(result, dict) else {'ok': False}
+
+
 def request_health(socket_path: str = CONTROL_SOCKET) -> dict[str, Any]:
     """Probe the authenticated control loop without touching Docker state."""
     token_path = Path(os.getenv("HERMES_WEBUI_UPDATE_TOKEN_FILE", CONTROL_TOKEN))
@@ -1106,6 +1194,8 @@ def _control_request(
         if snapshot is None:
             return {"ok": False, "message": "Update operation not found"}, None
         return {"ok": True, "progress": snapshot}, None
+    if payload.get('action') in ('agent_catalog_preflight', 'agent_catalog_update'):
+        return _catalog_request(payload, busy=busy, progress=progress_store)
     if payload.get("action") in ("agent_preflight", "update_agent"):
         release_file = os.getenv("HERMES_WEBUI_AGENT_RELEASE_FILE", "")
         manifest_path = os.getenv("HERMES_WEBUI_AGENT_MANIFEST_PATH", "")

@@ -1,0 +1,13 @@
+[Unit]
+Description=Prepare verified Agent-only image for the latest official Release
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Install source in a protected builder-only directory. File contains only
+# HERMES_AGENT_BASE_IMAGE, HERMES_AGENT_IMAGE_REPOSITORY, HERMES_AGENT_RELEASE_ROOT.
+EnvironmentFile=/etc/hermes-agent-release-builder.env
+ExecStart=/usr/bin/python3 /opt/hermes-agent-release-builder/scripts/prepare_agent_release.py --base ${HERMES_AGENT_BASE_IMAGE} --repository ${HERMES_AGENT_IMAGE_REPOSITORY} --root ${HERMES_AGENT_RELEASE_ROOT} --publish
+TimeoutStartSec=2400
+UMask=0077

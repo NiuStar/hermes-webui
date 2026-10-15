@@ -1,0 +1,29 @@
+# Agent catalog opt-in: one-time setup, not per-release pins.
+# Base file(s) and .env must be readable at the SAME absolute paths as the host.
+# Only the dedicated final image-override directory may be writable by updater.
+# Use an operator-installed Docker CLI/plugin, bound read-only (never expose
+# the Docker socket to the WebUI). Resolve/compare the full stack before start.
+services:
+  hermes-webui-updater:
+    environment:
+      HERMES_WEBUI_AGENT_CATALOG_ENABLED: "1"
+      HERMES_WEBUI_AGENT_COMPOSE_ENABLED: "1"
+      HERMES_WEBUI_AGENT_COMPOSE_FILES: ${HERMES_AGENT_COMPOSE_FILES:?absolute ordered paths separated by colon}
+      HERMES_WEBUI_AGENT_COMPOSE_PROJECT: ${HERMES_AGENT_COMPOSE_PROJECT:?required}
+      HERMES_WEBUI_AGENT_COMPOSE_SERVICE: ${HERMES_AGENT_COMPOSE_SERVICE:-hermes-webui}
+    volumes:
+      - type: bind
+        source: ${HERMES_AGENT_COMPOSE_BASE_DIR:?protected configuration-only directory}
+        target: ${HERMES_AGENT_COMPOSE_BASE_DIR:?required}
+        read_only: true
+      - type: bind
+        source: ${HERMES_AGENT_COMPOSE_WRITE_DIR:?dedicated image-only override directory}
+        target: ${HERMES_AGENT_COMPOSE_WRITE_DIR:?required}
+      - type: bind
+        source: ${HERMES_DOCKER_CLI:?verified Docker CLI executable}
+        target: /usr/bin/docker
+        read_only: true
+      - type: bind
+        source: ${HERMES_DOCKER_PLUGIN_DIR:?verified Docker CLI plugin directory}
+        target: /usr/libexec/docker/cli-plugins
+        read_only: true
