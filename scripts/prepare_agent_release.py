@@ -15,6 +15,18 @@ def run(args,timeout=60,**kwargs):
     if result.returncode:raise RuntimeError('release command failed: '+args[0]+' '+str(result.returncode))
     return result.stdout.strip()
 
+def normalize_source_permissions(root: pathlib.Path) -> None:
+    """Public upstream code must be traversable by the non-root image runtime.
+
+    Keep private build receipts/output outside this tree at service umask 0077.
+    Preserve executable intent, never setuid/setgid or group/world write bits.
+    """
+    for path in [root, *root.rglob('*')]:
+        if path.is_symlink():
+            raise ValueError('Unexpected symlink in release source')
+        mode = path.stat().st_mode
+        path.chmod(0o755 if path.is_dir() or mode & 0o111 else 0o644)
+
 def prepare(base: str, repository: str, root: pathlib.Path, *, publish: bool) -> dict:
     import re
     if (not re.fullmatch(re.escape(repository)+r'@sha256:[0-9a-f]{64}',base)
@@ -63,6 +75,7 @@ def prepare(base: str, repository: str, root: pathlib.Path, *, publish: bool) ->
     source=attempt/('hermes-agent-'+commit)
     (source/'.hermes-agent-revision').write_text(commit+'\n')
     (source/'install-stamp.json').write_text(json.dumps({'baseVersion':version[1:],'commit':commit,'source':'docker','distribution':'docker','updateMechanism':'external'}))
+    normalize_source_permissions(source)
     localbase='hermes-agent-release-base:'+old['Id'].split(':')[1][:16]
     run(['docker','tag',old['Id'],localbase])
     (attempt/'Dockerfile').write_text(f'''FROM {localbase}
@@ -77,6 +90,9 @@ LABEL org.opencontainers.image.hermes-agent.revision="{commit}" org.opencontaine
         result=subprocess.run(['docker','build','--pull=false','-t',target,str(attempt)],stdout=log,stderr=subprocess.STDOUT,timeout=600)
     if result.returncode:raise RuntimeError('Candidate image build failed')
     new=json.loads(run(['docker','image','inspect',target]))[0]
+    readable="import os,pathlib;root=pathlib.Path('/opt/hermes');assert os.access(root,os.R_OK|os.X_OK);assert all(os.access(p,os.R_OK|(os.X_OK if p.is_dir() else 0)) for p in root.rglob('*'))"
+    run(['docker','run','--rm','--network','none','--read-only','--user','1024:1024',
+         '--entrypoint','python3',new['Id'],'-B','-c',readable],timeout=60)
     # Actual immutable base/candidate payload comparison, not labels alone.
     compare="import pathlib,hashlib,json;print(json.dumps({str(p.relative_to('/apptoo')):hashlib.sha256(p.read_bytes()).hexdigest() for p in pathlib.Path('/apptoo').rglob('*') if p.is_file()},sort_keys=True))"
     def hashes(image):return run(['docker','run','--rm','--network','none','--read-only','--entrypoint','python3',image,'-B','-c',compare],timeout=120)
