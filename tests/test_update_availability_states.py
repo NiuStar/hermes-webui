@@ -87,7 +87,8 @@ def _js_function(source,name):
     return source[m.start():end]
 
 
-def test_settings_check_keeps_agent_ready_despite_webui_warning():
+@pytest.mark.parametrize('behind',[0,1])
+def test_settings_check_keeps_agent_ready_despite_webui_warning(behind):
     root=Path(__file__).resolve().parents[1]
     ui=(root/'static/ui.js').read_text();panels=(root/'static/panels.js').read_text()
     script='''
@@ -98,14 +99,55 @@ let shown=null;global._showUpdateBanner=(d)=>{shown=d};
 global.api=async()=>({webui:{no_git:true,release_based:true,behind:null,error:'missing release',release_status:'CURRENT_RELEASE_UNPUBLISHED'},
 agent:{no_git:true,image_managed:true,behind:1,latest_version:'v0.22.3',deployment_online_update:true,availability:'READY'}});
 '''
+    script=script.replace('behind:1,latest_version',f'behind:{behind},latest_version')
+    if behind==0:script=script.replace('deployment_online_update:true','deployment_online_update:false')
     script+='\n'.join(_js_function(ui,n) for n in ['_i18nUpdateText','_formatUpdateTargetStatus','_formatManualUpdateInstruction','_formatAgentImageUpdateInstruction','_formatUpdateCheckError'])
     script+='\n'+_js_function(panels,'checkUpdatesNow')
     script+='''
 (async()=>{await checkUpdatesNow();const text=nodes.checkUpdatesStatus.textContent;
 if(!text.includes('Agent')||!text.includes('WebUI'))throw Error(text);
 if(text.includes('settings_update_no_git'))throw Error('false non-git warning: '+text);
-if(!shown||shown.agent.deployment_online_update!==true)throw Error('Agent banner hidden');
+if(!shown)throw Error('Agent result hidden');
 console.log(text)})().catch(e=>{console.error(e);process.exit(1)});
 '''
     result=subprocess.run(['node','-e',script],capture_output=True,text=True,timeout=15)
     assert result.returncode==0,result.stderr
+
+
+def test_banner_only_ready_enables_agent_apply_with_webui_unpublished():
+    ui=(Path(__file__).resolve().parents[1]/'static/ui.js').read_text()
+    script='''
+const nodes={updateBanner:{classList:{add(){},remove(){}}},updateMsg:{},
+btnApplyUpdate:{style:{}},btnForceUpdate:{style:{},dataset:{}},btnClearUpdateLock:{style:{},dataset:{}}};
+global.$=id=>nodes[id]||null;global.window={};global.t=key=>key;
+global._renderUpdateWhatsNewLinks=()=>{};
+'''
+    script+='\n'.join(_js_function(ui,n) for n in ['_i18nUpdateText','_formatUpdateTargetStatus',
+        '_formatManualUpdateInstruction','_formatAgentImageUpdateInstruction','_formatUpdateCheckError','_showUpdateBanner'])
+    script+='''
+for(const state of ['READY','IMAGE_PENDING','IMAGE_PREPARING','IMAGE_FAILED','REGISTRY_UNAVAILABLE','RUNTIME_BLOCKED','CATALOG_DISABLED','UPDATER_UNAVAILABLE']){
+ _showUpdateBanner({webui:{behind:null,no_git:true,error:'missing',release_status:'CURRENT_RELEASE_UNPUBLISHED'},
+ agent:{behind:1,no_git:true,manual_update:true,image_managed:true,availability:state,deployment_online_update:state==='READY'}});
+ const text=nodes.updateMsg.textContent;
+ if(!text.includes('['+state+']')||!text.includes('WebUI'))throw Error(text);
+ if(text.includes('not enabled')||text.includes('settings_agent_'))throw Error('misleading fallback: '+text);
+ if(nodes.btnApplyUpdate.disabled!==(state!=='READY'))throw Error('unsafe apply: '+state);
+}
+'''
+    r=subprocess.run(['node','-e',script],capture_output=True,text=True,timeout=15)
+    assert r.returncode==0,r.stderr
+
+
+@pytest.mark.parametrize('mutate',[
+    lambda p:p.write_text('{'),
+    lambda p:p.chmod(0o666),
+    lambda p:p.write_text(p.read_text().replace('10000','999999')),
+])
+def test_preparation_damaged_insecure_or_future_evidence_is_unknown(tmp_path,monkeypatch,mutate):
+    from api import agent_preparation_status as status
+    from tests.test_agent_catalog import WEBUI
+    from api.agent_image_catalog import image_tag
+    monkeypatch.setattr(status.time,'time',lambda:10000)
+    status.write_status(tmp_path,WEBUI,AGENT,'v0.22.3','IMAGE_FAILED')
+    mutate(tmp_path/(image_tag(WEBUI,AGENT)+'.json'))
+    assert status.read_status(tmp_path,WEBUI,AGENT,'v0.22.3') is None

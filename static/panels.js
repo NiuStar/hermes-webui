@@ -12281,7 +12281,7 @@ async function checkUpdatesNow(channelOverride){
       if(data.agent&&data.agent.no_git&&!data.agent.image_managed&&!data.agent.deployment_online_update&&!data.agent.ignored) noGitParts.push('Agent');
       const checkedParts=[];
       if(data.webui&&!data.webui.error&&(!data.webui.no_git||data.webui.deployment_online_update||data.webui.manual_update)&&(data.webui.latest_version||Number.isFinite(data.webui.behind))) checkedParts.push('WebUI');
-      if(data.agent&&!data.agent.error&&(!data.agent.no_git||data.agent.deployment_online_update||data.agent.manual_update)&&(data.agent.latest_version||Number.isFinite(data.agent.behind))) checkedParts.push('Agent');
+      if(data.agent&&!data.agent.error&&(!data.agent.no_git||data.agent.image_managed||data.agent.deployment_online_update||data.agent.manual_update)&&(data.agent.latest_version||Number.isFinite(data.agent.behind))) checkedParts.push('Agent');
       if(parts.length){
         let txt=parts.join(' · ');
         if(manualInstruction) txt+=' · WebUI: '+manualInstruction;
