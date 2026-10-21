@@ -7,6 +7,29 @@ from scripts import prepare_agent_release as builder
 BASE='24802117/hermes-webui@sha256:'+'a'*64
 
 
+def test_verifier_uses_pinned_compatible_updater_not_agent_candidate(monkeypatch):
+    calls=[]
+    verifier='24802117/hermes-webui@sha256:'+'f'*64
+    def run(args,**kwargs):
+        calls.append(args)
+        if args[:3]==['docker','image','inspect']:
+            return json.dumps([{'Id':'sha256:'+'9'*64,'Os':'linux','Architecture':'amd64',
+                'Config':{'Labels':{'org.opencontainers.image.revision':'b'*40,
+                 'org.opencontainers.image.version':'v2026.10.15-r2'}}}])
+        return ''
+    monkeypatch.setattr(builder,'run',run)
+    result=builder.runtime_verifier(verifier,'24802117/hermes-webui','b'*40,
+                                    'v2026.10.15-r2','linux/amd64')
+    assert result=='sha256:'+'9'*64
+    assert calls[0]==['docker','pull',verifier]
+    with pytest.raises(ValueError,match='Immutable verifier'):
+        builder.runtime_verifier('repo:latest','24802117/hermes-webui','b'*40,
+                                 'v2026.10.15-r2','linux/amd64')
+    with pytest.raises(ValueError,match='Verifier WebUI identity'):
+        builder.runtime_verifier(verifier,'24802117/hermes-webui','c'*40,
+                                 'v2026.10.15-r2','linux/amd64')
+
+
 def test_source_permissions_under_private_service_umask(tmp_path):
     import os
     root=tmp_path/'agent';root.mkdir(mode=0o700)

@@ -27,7 +27,21 @@ def normalize_source_permissions(root: pathlib.Path) -> None:
         mode = path.stat().st_mode
         path.chmod(0o755 if path.is_dir() or mode & 0o111 else 0o644)
 
-def prepare(base: str, repository: str, root: pathlib.Path, *, publish: bool) -> dict:
+def runtime_verifier(image, repository, webui, version, platform):
+    import re
+    if not re.fullmatch(re.escape(repository)+r'@sha256:[0-9a-f]{64}',image):
+        raise ValueError('Immutable verifier image required')
+    run(['docker','pull',image],timeout=600)
+    actual=json.loads(run(['docker','image','inspect',image]))[0]
+    labels=actual['Config']['Labels']
+    if (labels.get('org.opencontainers.image.revision')!=webui or
+            labels.get('org.opencontainers.image.version')!=version or
+            actual['Os']+'/'+actual['Architecture']!=platform):
+        raise ValueError('Verifier WebUI identity/platform mismatch')
+    return actual['Id']
+
+
+def prepare(base: str, repository: str, root: pathlib.Path, *, publish: bool, verifier=None) -> dict:
     import re
     if (not re.fullmatch(re.escape(repository)+r'@sha256:[0-9a-f]{64}',base)
             or not root.is_absolute()):raise ValueError('Immutable configured base required')
@@ -56,6 +70,8 @@ def prepare(base: str, repository: str, root: pathlib.Path, *, publish: bool) ->
     if not any(s in check.stderr.lower() for s in ('no such manifest','manifest unknown','not found')):
         raise RuntimeError('Registry availability unknown; refusing to overwrite or rebuild')
     if shutil.disk_usage(root).free<3*1024**3:raise RuntimeError('Insufficient build/QA disk headroom')
+    verifier_id=(runtime_verifier(verifier,repository,webui,webver,old['Os']+'/'+old['Architecture'])
+                 if verifier else None)
     attempt=root/(tag+'-'+time.strftime('%Y%m%dT%H%M%SZ',time.gmtime()));attempt.mkdir(mode=0o700)
     archive=attempt/'agent.tar.gz'
     with urllib.request.urlopen('https://codeload.github.com/NousResearch/hermes-agent/tar.gz/'+commit,timeout=120) as response,archive.open('wb') as f:
@@ -111,12 +127,13 @@ LABEL org.opencontainers.image.hermes-agent.revision="{commit}" org.opencontaine
         run(['docker','exec',cid,'chmod','644','/tmp/agent_release_tool_probe.py'])
         loop=run(['docker','exec','-u','1024:1024',cid,'/app/venv/bin/python3','/tmp/agent_release_tool_probe.py',commit,version],timeout=210)
         probe="import sys;sys.path.insert(0,'/apptoo');from api.docker_self_update import DockerEngine,_verify_imported_agent;_verify_imported_agent(DockerEngine(),"+repr(cid)+','+repr(commit)+','+repr(version)+");print('verified')"
-        run(['docker','run','--rm','--network','none','--read-only','-v','/var/run/docker.sock:/var/run/docker.sock','--entrypoint','python3',new['Id'],'-B','-c',probe],timeout=210)
+        run(['docker','run','--rm','--network','none','--read-only','-v','/var/run/docker.sock:/var/run/docker.sock','--entrypoint','python3',verifier_id or new['Id'],'-B','-c',probe],timeout=210)
     finally:
         run(['docker','stop',cid],timeout=45)
     # Recheck publication identity immediately before push; no stale target promotion.
     if latest()!=(version,commit):raise RuntimeError('Official release changed during build')
     receipt={'state':'verified','base':base,'image':target,'image_id':new['Id'],'webui_commit':webui,'webui_version':webver,'agent_commit':commit,'agent_version':version,'platform':new['Os']+'/'+new['Architecture'],'archive_sha256':hashlib.sha256(archive.read_bytes()).hexdigest(),'tool_loop':json.loads(loop),'qa_container':cid}
+    receipt['verifier_image_id']=verifier_id or new['Id']
     (attempt/'verification.json').write_text(json.dumps(receipt,indent=2))
     if publish:
         repeated=subprocess.run(['docker','manifest','inspect',target],capture_output=True,text=True,timeout=45)
@@ -135,4 +152,5 @@ LABEL org.opencontainers.image.hermes-agent.revision="{commit}" org.opencontaine
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--base',required=True);p.add_argument('--repository',default='24802117/hermes-webui');p.add_argument('--root',type=pathlib.Path,required=True);p.add_argument('--publish',action='store_true');args=p.parse_args()
-    print(json.dumps(prepare(args.base,args.repository,args.root,publish=args.publish)))
+    print(json.dumps(prepare(args.base,args.repository,args.root,publish=args.publish,
+                            verifier=os.getenv('HERMES_AGENT_VERIFIER_IMAGE') or None)))

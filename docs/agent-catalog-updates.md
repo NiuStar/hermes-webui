@@ -23,6 +23,14 @@ keys. It does not remove normal runtime/Compose/active-run safety checks.
    new Agent releases do NOT require per-version pins or editing the schedule.
    Do not enable the timer with insufficient space; there is a 3 GiB preflight
    but also retain headroom for the normal-init writable layer and audit output.
+   If the accepted base predates a separately shipped updater correction, set
+   `HERMES_AGENT_VERIFIER_IMAGE=repository@sha256:<accepted-updater>` in the
+   builder's protected environment file. Its WebUI commit/version and platform
+   must match the base. The candidate keeps the base WebUI payload, while its
+   runtime acceptance runs through that immutable corrected updater. Publisher
+   QA uses production `PYTHONPATH=/opt/hermes` and Agent directory, not a clean
+   environment that can hide import-path failures. Deploy the frozen builder
+   script update as well as the runtime updater; a Git push alone updates neither.
 4. Use `docker-compose.agent-catalog.yml` on the target. The updater only has
    network-none/read-only root, the Docker socket, read-only Docker CLI/plugins,
    full ordered Compose config at matching host paths and a **dedicated image-
