@@ -82,3 +82,23 @@ def test_registry_unknown_does_not_start_build(tmp_path,monkeypatch):
     with pytest.raises(RuntimeError,match='Registry availability unknown'):
         builder.prepare(BASE,'24802117/hermes-webui',tmp_path,publish=True)
     assert not (tmp_path/'last-result.json').exists()
+
+
+def test_builder_failure_writes_target_bound_diagnostic_status(tmp_path,monkeypatch):
+    from api.agent_preparation_status import read_status
+    monkeypatch.setenv('HERMES_AGENT_PREPARATION_STATUS_DIR',str(tmp_path/'public'))
+    monkeypatch.setattr(builder,'latest',lambda:('v0.22.3','c'*40))
+    monkeypatch.setattr(builder,'prove_ancestry',lambda *_:None)
+    def run(args,**_):
+        if args[:3]==['docker','image','inspect']:
+            return json.dumps([{'Id':'sha256:'+'d'*64,'Os':'linux','Architecture':'amd64',
+                'Config':{'Labels':{'org.opencontainers.image.revision':'b'*40,
+                'org.opencontainers.image.version':'v2026.10.15-r2',
+                'org.opencontainers.image.hermes-agent.revision':'e'*40}}}])
+        return ''
+    monkeypatch.setattr(builder,'run',run)
+    monkeypatch.setattr(builder.subprocess,'run',lambda *a,**k:type('R',(),{'returncode':1,'stderr':'manifest unknown'})())
+    monkeypatch.setattr(builder.shutil,'disk_usage',lambda _:type('D',(),{'free':1})())
+    with pytest.raises(RuntimeError,match='disk headroom'):
+        builder.prepare(BASE,'24802117/hermes-webui',tmp_path,publish=True)
+    assert read_status(tmp_path/'public','b'*40,'c'*40,'v0.22.3')=='IMAGE_FAILED'

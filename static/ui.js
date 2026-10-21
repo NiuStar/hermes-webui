@@ -10095,11 +10095,28 @@ function _formatManualUpdateInstruction(info){
   return t('settings_update_manual_docker','One-click Docker update is disabled for this deployment.');
 }
 function _formatAgentImageUpdateInstruction(info){
-  if(!(info&&info.image_managed&&info.behind>0&&!info.deployment_online_update)) return null;
-  return _i18nUpdateText('settings_agent_image_pending','Agent has a newer upstream release, but Docker Agent online installation is not enabled. Updating WebUI separately does not necessarily update Agent.');
+  if(!(info&&info.image_managed&&info.behind>0)) return null;
+  const state=info.deployment_online_update?'READY':(info.availability||'PREFLIGHT_UNAVAILABLE');
+  const messages={
+    READY:['settings_agent_ready','兼容镜像已就绪，可在线安装'],
+    IMAGE_PENDING:['settings_agent_pending','官方版本已发布，兼容镜像尚未就绪；构建进度未确认'],
+    IMAGE_PREPARING:['settings_agent_preparing','兼容镜像正在构建或验收'],
+    IMAGE_FAILED:['settings_agent_failed','兼容镜像准备失败，需检查构建任务'],
+    REGISTRY_UNAVAILABLE:['settings_agent_registry_unavailable','镜像仓库查询失败，请稍后重新检查'],
+    IMAGE_INCOMPATIBLE:['settings_agent_incompatible','兼容镜像的平台或元数据不匹配'],
+    RUNTIME_BLOCKED:['settings_agent_runtime_blocked','安装配置或 Compose 校验未通过'],
+    CATALOG_DISABLED:['settings_agent_catalog_disabled','当前部署未启用 Agent 镜像目录'],
+    UPDATER_UNAVAILABLE:['settings_agent_updater_unavailable','更新服务不可用，请检查 updater'],
+    PREFLIGHT_UNAVAILABLE:['settings_agent_preflight_unavailable','安装预检结果不可用，请重新检查']
+  };
+  const item=messages[state]||messages.PREFLIGHT_UNAVAILABLE;
+  return _i18nUpdateText(item[0],item[1])+' ['+state+']';
 }
 function _formatUpdateCheckError(label,info){
   if(!info||!info.error) return null;
+  if(info.release_status==='CURRENT_RELEASE_UNPUBLISHED'){
+    return label+': '+_i18nUpdateText('settings_webui_unpublished','当前版本缺少正式 Release 记录，无法判断更新方向；不影响 Agent 独立检查');
+  }
   const detail=String(info.error).replace(/^fetch failed:?\s*/i,'').trim();
   return detail ? `${label}: ${detail}` : label;
 }
@@ -10435,7 +10452,8 @@ function _showUpdateBanner(data){
   if(msg){
     const manualInstruction=_formatManualUpdateInstruction(data&&data.webui);
     const agentInstruction=_formatAgentImageUpdateInstruction(data&&data.agent);
-    msg.textContent='\u2B06 '+parts.join(', ')+' available'+(manualInstruction?' · '+manualInstruction:'')+(agentInstruction?' · '+agentInstruction:'');
+    const errors=[_formatUpdateCheckError('WebUI',data&&data.webui),_formatUpdateCheckError('Agent',data&&data.agent)].filter(Boolean);
+    msg.textContent='\u2B06 '+parts.join(' · ')+(manualInstruction?' · WebUI: '+manualInstruction:'')+(agentInstruction?' · Agent: '+agentInstruction:'')+(errors.length?' · '+errors.join(' · '):'');
   }
   const banner=$('updateBanner');
   if(banner) banner.classList.add('visible');

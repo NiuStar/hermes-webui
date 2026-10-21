@@ -12277,21 +12277,22 @@ async function checkUpdatesNow(channelOverride){
       // checkout + one no-git install) never hides the "can't check" state
       // behind an up-to-date summary (#4356).
       const noGitParts=[];
-      if(data.webui&&data.webui.no_git&&!data.webui.deployment_online_update) noGitParts.push('WebUI');
+      if(data.webui&&data.webui.no_git&&!data.webui.release_based&&!data.webui.error&&!data.webui.deployment_online_update) noGitParts.push('WebUI');
       if(data.agent&&data.agent.no_git&&!data.agent.image_managed&&!data.agent.deployment_online_update&&!data.agent.ignored) noGitParts.push('Agent');
       const checkedParts=[];
       if(data.webui&&!data.webui.error&&(!data.webui.no_git||data.webui.deployment_online_update||data.webui.manual_update)&&(data.webui.latest_version||Number.isFinite(data.webui.behind))) checkedParts.push('WebUI');
       if(data.agent&&!data.agent.error&&(!data.agent.no_git||data.agent.deployment_online_update||data.agent.manual_update)&&(data.agent.latest_version||Number.isFinite(data.agent.behind))) checkedParts.push('Agent');
       if(parts.length){
-        let txt=t('settings_updates_available').replace('{count}',parts.join(', '));
-        if(manualInstruction) txt+=' · '+manualInstruction;
-        if(agentImageInstruction) txt+=' · '+agentImageInstruction;
-        if(noGitParts.length) txt+=' · '+t('settings_update_no_git');
+        let txt=parts.join(' · ');
+        if(manualInstruction) txt+=' · WebUI: '+manualInstruction;
+        if(agentImageInstruction) txt+=' · Agent: '+agentImageInstruction;
+        if(errorParts.length) txt+=' · '+errorParts.join(' · ');
+        if(noGitParts.length) txt+=' · '+noGitParts.join(', ')+': '+t('settings_update_no_git');
         if(status){status.textContent=txt;status.style.color='var(--accent)';}
         // Also trigger the update banner
         if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
       } else if(checkedParts.length){
-        let txt=t('settings_up_to_date');
+        let txt=checkedParts.join(', ')+': '+t('settings_up_to_date');
         if(errorParts.length) txt+=' · '+errorParts.join(', ');
         if(noGitParts.length) txt+=' · '+noGitParts.join(', ')+': '+t('settings_update_no_git');
         if(status){status.textContent=txt;status.style.color=errorParts.length?'var(--error)':'var(--success)';}

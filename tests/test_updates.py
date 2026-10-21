@@ -211,14 +211,15 @@ def test_check_repo_redacts_credentialed_fetch_failure(tmp_path):
     assert 'Authentication failed' in info['error']
 
 
-def test_release_tags_use_published_api_not_tag_only_atom(tmp_path, monkeypatch):
-    published = json.dumps([{'tag_name': 'v2026.09.19-r6', 'draft': False, 'prerelease': False}]).encode()
+def test_release_tags_use_published_html_not_tag_only_atom(tmp_path, monkeypatch):
+    from tests.test_docker_release_detection import page
+    published = page(('v2026.09.19-r6',False)).encode()
     calls = []
 
     class Response:
         def __enter__(self): return self
         def __exit__(self, *args): return False
-        def read(self): return published
+        def read(self, *_): return published
 
     def fake_urlopen(request, timeout=0):
         calls.append(request.full_url)
@@ -228,10 +229,10 @@ def test_release_tags_use_published_api_not_tag_only_atom(tmp_path, monkeypatch)
 
     monkeypatch.setattr(updates.urllib.request, 'urlopen', fake_urlopen)
     assert [x['name'] for x in updates._github_release_tags(channel='stable')] == ['v2026.09.19-r6']
-    assert calls == ['https://api.github.com/repos/NiuStar/hermes-webui/releases?per_page=100']
+    assert calls == ['https://github.com/NiuStar/hermes-webui/releases']
 
 
-def test_release_api_failure_does_not_fall_back_to_tag_only_atom(tmp_path, monkeypatch):
+def test_release_page_failure_does_not_fall_back_to_tag_only_atom(tmp_path, monkeypatch):
     monkeypatch.setattr(updates, 'WEBUI_VERSION', 'v2026.10.08-r1')
     def fake_urlopen(request, timeout=0):
         if request.full_url.endswith('/releases.atom'):
@@ -250,7 +251,7 @@ def test_no_published_release_never_offers_install(tmp_path, monkeypatch):
     class Response:
         def __enter__(self): return self
         def __exit__(self, *args): return False
-        def read(self): return b'[]'
+        def read(self, *_): return b'<html>No published releases</html>'
     monkeypatch.setattr(updates.urllib.request, 'urlopen', lambda *args, **kwargs: Response())
     info = updates._check_repo(tmp_path, 'webui')
     assert info['behind'] is None
@@ -263,9 +264,8 @@ def test_unpublished_qa_version_cannot_downgrade_to_older_release(tmp_path, monk
     class Response:
         def __enter__(self): return self
         def __exit__(self, *args): return False
-        def read(self): return json.dumps([
-            {'tag_name': 'v2026.10.08-r1', 'draft': False, 'prerelease': False},
-        ]).encode()
+        def read(self, *_): return ('<section data-release-anchor="release-v2026.10.08-r1">'
+                '<a href="/NiuStar/hermes-webui/releases/tag/v2026.10.08-r1">v2026.10.08-r1</a></section>').encode()
     monkeypatch.setattr(updates.urllib.request, 'urlopen', lambda *args, **kwargs: Response())
     info = updates._check_repo(tmp_path, 'webui')
     assert info['behind'] is None
@@ -281,9 +281,8 @@ def test_source_only_tag_never_appears_as_installable_release(tmp_path, monkeypa
     class Response:
         def __enter__(self): return self
         def __exit__(self, *args): return False
-        def read(self): return json.dumps([
-            {'tag_name': 'v2026.10.08-r1', 'draft': False, 'prerelease': False},
-        ]).encode()
+        def read(self, *_): return ('<section data-release-anchor="release-v2026.10.08-r1">'
+                '<a href="/NiuStar/hermes-webui/releases/tag/v2026.10.08-r1">v2026.10.08-r1</a></section>').encode()
     monkeypatch.setattr(updates.urllib.request, 'urlopen', lambda *args, **kwargs: Response())
     info = updates._check_repo(tmp_path, 'webui')
     assert info['behind'] == 0
@@ -304,7 +303,7 @@ def test_check_repo_reports_manual_update_for_baked_webui_version(tmp_path, monk
         def __exit__(self, exc_type, exc, tb):
             return False
 
-        def read(self):
+        def read(self, *_):
             return self._body
 
     payload = [
@@ -317,7 +316,8 @@ def test_check_repo_reports_manual_update_for_baked_webui_version(tmp_path, monk
     def fake_urlopen(request, timeout=0):
         seen['url'] = request.full_url
         seen['timeout'] = timeout
-        return FakeResponse(json.dumps(payload).encode('utf-8'))
+        from tests.test_docker_release_detection import page
+        return FakeResponse(page(*[(x['tag_name'],x['prerelease']) for x in payload]).encode())
 
     monkeypatch.setattr(updates.urllib.request, 'urlopen', fake_urlopen)
     monkeypatch.setattr(updates, 'WEBUI_VERSION', 'v0.51.833')
@@ -331,13 +331,13 @@ def test_check_repo_reports_manual_update_for_baked_webui_version(tmp_path, monk
     assert info['behind'] == 1
     assert info['current_version'] == 'v0.51.833'
     assert info['latest_version'] == 'v0.51.914'
-    assert info['current_sha'] == 'v0.51.833'
-    assert info['latest_sha'] == 'v0.51.914'
+    assert info['current_sha'] == 'a'*40
+    assert info['latest_sha'] == 'a'*40
     assert info['compare_url'] == (
-        'https://github.com/NiuStar/hermes-webui/compare/v0.51.833...v0.51.914'
+        'https://github.com/NiuStar/hermes-webui/compare/'+'a'*40+'...'+'a'*40
     )
-    assert seen['url'] == 'https://api.github.com/repos/NiuStar/hermes-webui/releases?per_page=100'
-    assert seen['timeout'] == 3.0
+    assert seen['url'] == 'https://github.com/NiuStar/hermes-webui/releases'
+    assert seen['timeout'] == 5.0
 
 
 def test_check_repo_webui_no_git_falls_back_to_old_payload_on_tags_failure(tmp_path, monkeypatch):

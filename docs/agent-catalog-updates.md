@@ -69,3 +69,38 @@ an Agent-only image for an older WebUI does not magically retrofit catalog
 support into its existing sidecar. Keep this one-time deployment distinct from
 all future Agent updates. An empty-state isolated success is not production-state
 migration acceptance.
+
+## Availability diagnostics (independent WebUI / Agent results)
+
+WebUI discovery reads bounded, same-repository published Release HTML sections,
+not GitHub REST or the tag-only Atom feed. A current version absent from those
+records stays `CURRENT_RELEASE_UNPUBLISHED`, with unknown direction and no WebUI
+Apply. Publish the missing Release rather than weakening that gate. The UI
+labels this warning as WebUI-only; it does not hide an install-ready Agent or
+misreport a release-checked Docker snapshot as "not a Git checkout".
+
+Agent availability is separate from upstream version discovery:
+- `READY`: registry digest/platform and Compose preflight passed.
+- `IMAGE_PENDING`: authoritative missing-manifest result; preparation progress
+  is unknown, not assumed running.
+- `IMAGE_PREPARING` / `IMAGE_FAILED`: only from recent matching builder evidence.
+- `REGISTRY_UNAVAILABLE`: transport/auth/query failed; no absence inferred.
+- `IMAGE_INCOMPATIBLE`, `RUNTIME_BLOCKED`, `CATALOG_DISABLED`,
+  `UPDATER_UNAVAILABLE`, `PREFLIGHT_UNAVAILABLE`: explicit non-installable states.
+
+For preparation evidence set `HERMES_AGENT_PREPARATION_STATUS_DIR` on the builder
+to a **dedicated public diagnostic directory**, outside private output/receipts.
+The builder writes atomic sanitized `agent-<webui>-<agent>.json` records (0644)
+for preparing, failure and publication. Provide a read-only mirror of that
+directory to the updater at `HERMES_WEBUI_AGENT_PREPARATION_DIR`; on separate
+hosts the operator must arrange bounded file replication, not mount private
+builder output or credentials. No mirror configured, invalid/future/expired or
+wrong-target evidence remains `IMAGE_PENDING`/unknown. Preparing expires after
+one hour; failure after one day. These records are **diagnostic only**: they
+cannot enable installation or override registry/identity/Compose validation.
+An actually ready registry image wins over old failure evidence. A network
+failure remains unavailable even if a build receipt exists.
+
+Non-ready Agent preflight results expire after 60 seconds rather than the normal
+30-minute release cache; explicit Check now always forces a fresh request.
+This change does not introduce unattended production installation or restarts.

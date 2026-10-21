@@ -809,7 +809,7 @@ def _catalog_request(payload: dict[str, Any], *, busy: threading.Lock,
     caller passes only the official version/SHA already revalidated by WebUI.
     """
     if os.getenv('HERMES_WEBUI_AGENT_CATALOG_ENABLED') != '1':
-        return {'ok': False, 'message': 'Agent image catalog is not enabled'}, None
+        return {'ok': False, 'availability': 'CATALOG_DISABLED', 'message': 'Agent image catalog is not enabled'}, None
     commit = payload.get('agent_commit'); version = payload.get('agent_version')
     if (not isinstance(commit, str) or not re.fullmatch(r'[0-9a-f]{40}', commit)
             or not isinstance(version, str) or not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', version)):
@@ -819,9 +819,9 @@ def _catalog_request(payload: dict[str, Any], *, busy: threading.Lock,
     engine = DockerEngine()
     try:
         if __package__:
-            from .agent_image_catalog import resolve
+            from .agent_image_catalog import resolve, CatalogUnavailable
         else:
-            from agent_image_catalog import resolve
+            from agent_image_catalog import resolve, CatalogUnavailable
         live = engine.inspect(target)
         old_image = engine.inspect_image(live['Image'])
         labels = old_image.get('Config', {}).get('Labels', {})
@@ -836,10 +836,22 @@ def _catalog_request(payload: dict[str, Any], *, busy: threading.Lock,
         runtime, old_ref = _compose_agent_preflight(live, expected, repository, target, require_image=False)
         # Capabilities must be available in the actual privileged runtime.
         runtime._run(['docker', 'compose', 'version'])
+    except CatalogUnavailable as exc:
+        state = exc.state
+        if state == 'IMAGE_PENDING':
+            if __package__:
+                from .agent_preparation_status import read_status
+            else:
+                from agent_preparation_status import read_status
+            state = read_status(os.getenv('HERMES_WEBUI_AGENT_PREPARATION_DIR'),
+                                labels.get('org.opencontainers.image.revision'),commit,version) or state
+        return {'ok': False, 'availability': state,
+                'message': 'Agent image catalog check: '+state}, None
     except Exception:
-        return {'ok': False, 'message': 'Compatible Agent image or Compose runtime is not ready'}, None
+        return {'ok': False, 'availability': 'RUNTIME_BLOCKED',
+                'message': 'Agent Compose ownership, configuration or runtime check failed'}, None
     if payload['action'] == 'agent_catalog_preflight':
-        return {'ok': True, 'latest_sha': commit, 'latest_version': version, 'mode': 'catalog'}, None
+        return {'ok': True, 'availability': 'READY', 'latest_sha': commit, 'latest_version': version, 'mode': 'catalog'}, None
     if not busy.acquire(blocking=False):
         return {'ok': False, 'message': 'Docker update already in progress'}, None
     operation_id, initial = progress.start(version)

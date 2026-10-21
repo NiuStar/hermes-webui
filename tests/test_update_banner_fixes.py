@@ -2382,12 +2382,12 @@ if(!classes.has('is-complete')||classes.has('is-failed'))throw new Error('wrong 
         assert '_formatUpdateTargetStatus' in fn
         assert "formatUpdatePart('WebUI',data.webui)" in fn
         assert "formatUpdatePart('Agent',data.agent)" in fn
-        assert "data.webui&&data.webui.no_git&&!data.webui.deployment_online_update" in fn
+        assert "data.webui&&data.webui.no_git&&!data.webui.release_based&&!data.webui.error&&!data.webui.deployment_online_update" in fn
 
     def test_docker_no_git_online_update_does_not_show_non_git_warning(self):
         src = read('static/panels.js')
-        assert "data.webui&&data.webui.no_git&&!data.webui.deployment_online_update" in src
-        assert "data.agent&&data.agent.no_git&&!data.agent.deployment_online_update&&!data.agent.ignored" in src
+        assert "data.webui&&data.webui.no_git&&!data.webui.release_based&&!data.webui.error&&!data.webui.deployment_online_update" in src
+        assert "data.agent&&data.agent.no_git&&!data.agent.image_managed&&!data.agent.deployment_online_update&&!data.agent.ignored" in src
 
         src = read('static/ui.js')
         format_fn = extract_js_function(src, '_formatUpdateTargetStatus')
@@ -2464,6 +2464,8 @@ function _showUpdateBanner() {{}}
         format_fn = extract_js_function(src, '_formatUpdateTargetStatus')
         instruction_fn = extract_js_function(src, '_formatManualUpdateInstruction')
         show_fn = extract_js_function(src, '_showUpdateBanner')
+        agent_fn = extract_js_function(src, '_formatAgentImageUpdateInstruction')
+        error_fn = extract_js_function(src, '_formatUpdateCheckError')
         script = f"""
 const state = {{
   updateBanner: {{ classList: {{ added: false, add() {{ this.added = true; }}, remove() {{ this.removed = true; }} }} }},
@@ -2482,6 +2484,8 @@ global.t = (key, ...args) => {{
 }};
 {format_fn}
 {instruction_fn}
+{agent_fn}
+{error_fn}
 {show_fn}
 _showUpdateBanner({{
   webui: {{

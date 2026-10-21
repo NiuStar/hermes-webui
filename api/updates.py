@@ -151,20 +151,30 @@ def apply_docker_agent_update() -> dict:
 
 def docker_agent_release_ready(*, commit: str | None = None, version: str | None = None) -> bool:
     """Offer only the sidecar release matching the independently verified latest."""
+    return docker_agent_release_status(commit=commit, version=version)['ok']
+
+
+def docker_agent_release_status(*, commit=None, version=None) -> dict:
+    """Preserve preflight reasons; never infer a build's progress from absence."""
     if deployment_info().get('online_update') is not True:
-        return False
+        return {'ok': False, 'availability': 'UPDATER_UNAVAILABLE'}
     try:
         release = request_agent_preflight()
         if not (release.get('ok') is True and release.get('latest_sha') == commit
                 and release.get('latest_version') == version):
             release = request_agent_catalog(commit, version)
-        return (release.get('ok') is True
+        ready = (release.get('ok') is True
                 and isinstance(commit, str) and re.fullmatch(r'[0-9a-f]{40}', commit) is not None
                 and isinstance(version, str) and bool(version)
                 and release.get('latest_sha') == commit
                 and release.get('latest_version') == version)
+        state = release.get('availability')
+        allowed = {'IMAGE_PENDING','IMAGE_PREPARING','IMAGE_FAILED','REGISTRY_UNAVAILABLE',
+                   'IMAGE_INCOMPATIBLE','RUNTIME_BLOCKED','CATALOG_DISABLED'}
+        return {'ok': ready, 'availability': 'READY' if ready else
+                (state if state in allowed else 'PREFLIGHT_UNAVAILABLE')}
     except Exception:
-        return False
+        return {'ok': False, 'availability': 'UPDATER_UNAVAILABLE'}
 
 
 def _apply_docker_update_inner(channel=None) -> dict:
@@ -990,55 +1000,23 @@ def _is_stable_release_tag(tag):
     return bool(_RELEASE_TAG_RE.fullmatch(raw) and '-' not in raw[1:])
 
 
-def _release_api_url() -> str:
+def _webui_release_page_url() -> str:
     repository = os.getenv('HERMES_WEBUI_RELEASE_REPOSITORY', 'NiuStar/hermes-webui').strip()
     if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository):
         repository = 'NiuStar/hermes-webui'
-    return f'https://api.github.com/repos/{repository}/releases?per_page=100'
+    return f'https://github.com/{repository}/releases'
 
 
-def _github_release_tags(url=None, *, timeout=3.0, channel=DEFAULT_UPDATE_CHANNEL):
-    """Return only published GitHub Releases; source tags are not releases.
-
-    The Atom feed also includes bare Git tags with no Release or image. It must
-    never authorize an online update. On REST failure callers fail closed.
-    """
-    headers = {
-        'Accept': 'application/vnd.github+json',
-        'User-Agent': 'hermes-webui',
-        'X-GitHub-Api-Version': '2022-11-28',
-    }
-    token = os.getenv('HERMES_WEBUI_GITHUB_TOKEN', '').strip() or os.getenv('GITHUB_TOKEN', '').strip()
-    if token:
-        headers['Authorization'] = f'Bearer {token}'
-    request = urllib.request.Request(
-        url or _release_api_url(),
-        headers=headers,
-    )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        payload = json.loads(response.read().decode('utf-8'))
-    if not isinstance(payload, list):
-        return []
-    tags = []
-    for item in payload:
-        if not isinstance(item, dict):
-            continue
-        if item.get('draft'):
-            continue
-        prerelease = bool(item.get('prerelease'))
-        if channel == 'stable' and prerelease:
-            continue
-        if channel == 'experimental' and not prerelease:
-            continue
-        name = item.get('tag_name') or item.get('name')
-        if not isinstance(name, str):
-            continue
-        name = name.strip()
-        valid = bool(_RELEASE_TAG_RE.fullmatch(name)) if channel == 'stable' else bool(re.fullmatch(r'exp-v[0-9][0-9A-Za-z.+-]*', name))
-        if not valid:
-            continue
-        sha = name
-        tags.append({'name': name, 'sha': sha})
+def _github_release_tags(url=None, *, timeout=5.0, channel=DEFAULT_UPDATE_CHANNEL):
+    """Read published Release HTML only; never REST/Atom/bare source tags."""
+    from api.webui_release_pages import published
+    repository = os.getenv('HERMES_WEBUI_RELEASE_REPOSITORY', 'NiuStar/hermes-webui').strip()
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository):
+        repository = 'NiuStar/hermes-webui'
+    expected = 'https://github.com/'+repository+'/releases'
+    if url is not None and url != expected:
+        raise ValueError('Only the configured public Release page is supported')
+    tags = published(repository, channel, timeout)
     return sorted(tags, key=lambda item: _release_tag_sort_key(item['name']), reverse=True)
 
 
@@ -1152,14 +1130,15 @@ def _check_baked_agent_release(path) -> dict:
         return {**base, 'error': 'Could not verify the published Agent release or commit history.'}
     if relation != 'ahead':
         return {**base, 'error': 'Published Agent release is not a verified descendant of the baked revision.'}
-    if ahead > 0 and docker_agent_release_ready(commit=latest, version=version):
-        base['deployment_online_update'] = True
+    status = docker_agent_release_status(commit=latest, version=version)
+    base['deployment_online_update'] = status['ok']
+    base['availability'] = status['availability']
     update = {
         **base, 'behind': ahead, 'manual_update': True,
         'compare_url': base['repo_url'] + '/compare/' + current + '...' + latest,
         'update_instruction': ('A compatible Agent image is ready for Docker online installation.'
                                if base['deployment_online_update'] else
-                               'Docker Agent online installation is unavailable. A separate WebUI update does not guarantee an Agent update.'),
+                               'Agent installation is not ready: '+base['availability']),
     }
     return update
 
@@ -1193,7 +1172,7 @@ def _check_webui_published_release_update(channel=DEFAULT_UPDATE_CHANNEL):
     current = next((item for item in tags if item['name'] == current_version), None) or {}
     current_ref = current.get('sha') or (current_version if current_version == latest_version else None)
     latest_ref = latest.get('sha') or latest_version
-    repo_url = _release_api_url().split('/releases?', 1)[0].replace('api.github.com/repos/', 'github.com/')
+    repo_url = _webui_release_page_url().removesuffix('/releases')
     update = {
         'name': 'webui',
         'behind': behind,
@@ -1208,6 +1187,7 @@ def _check_webui_published_release_update(channel=DEFAULT_UPDATE_CHANNEL):
         'manual_update': True,
     }
     if behind is None:
+        update['release_status'] = 'CURRENT_RELEASE_UNPUBLISHED'
         update['error'] = 'Current WebUI version is not a published release; update direction cannot be verified.'
         update['deployment_online_update'] = False
     return update
@@ -1691,7 +1671,8 @@ def check_for_updates(force=False, *, include_agent=True, channel=None):
         if (
             not force
             and cache_matches
-            and time.time() - _update_cache['checked_at'] < CACHE_TTL
+            and time.time() - _update_cache['checked_at'] < (
+                60 if (_update_cache.get('agent') or {}).get('availability') not in (None,'READY') else CACHE_TTL)
         ):
             return dict(_update_cache)
         if _check_in_progress and cache_matches:
