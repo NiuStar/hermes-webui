@@ -58,3 +58,14 @@ def test_release_pagination_is_bounded_and_exact_repository(monkeypatch):
     with pytest.raises(ValueError,match='pagination'):
         updates._github_release_tags()
     assert seen==['https://github.com/NiuStar/hermes-webui/releases','https://github.com/NiuStar/hermes-webui/releases?page=2']
+
+
+def test_explicit_empty_release_page_ends_history_without_hiding_latest(monkeypatch):
+    seen=[]
+    def fetch(req,**_):
+        seen.append(req.full_url)
+        if len(seen)==1:
+            return Response(page(('v2.0.0',False))+'<a rel="next" href="/NiuStar/hermes-webui/releases?page=2">Next</a>')
+        return Response('<h2>There aren’t any releases here</h2>')
+    monkeypatch.setattr(updates.urllib.request,'urlopen',fetch)
+    assert [x['name'] for x in updates._github_release_tags()]==['v2.0.0']

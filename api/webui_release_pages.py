@@ -50,7 +50,10 @@ def published(repository, channel='stable', timeout=5):
             raw=r.read(2_000_001)
         if len(raw)>2_000_000:raise ValueError('Release page too large')
         parser=ReleasePage(repository);parser.feed(raw.decode('utf-8'))
-        if not parser.seen_section:raise ValueError('Published Release sections unavailable')
+        if not parser.seen_section:
+            if re.search(r'<h2\b[^>]*>\s*There (?:aren’t|aren\x27t) any releases here\s*</h2>',raw.decode('utf-8')):
+                break  # GitHub's explicit empty-history page, not a fetch failure.
+            raise ValueError('Published Release sections unavailable')
         for item in parser.releases:
             name=item['name'];experimental=channel=='experimental'
             pattern=r'exp-v[0-9][0-9A-Za-z.+-]*' if experimental else r'v[0-9][0-9A-Za-z.+-]*'
