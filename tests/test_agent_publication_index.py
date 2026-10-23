@@ -40,3 +40,17 @@ def test_publication_rejects_wrong_or_missing_platform_payload(monkeypatch,doc):
     monkeypatch.setattr(b,'run',run)
     with pytest.raises(RuntimeError,match='Published platform index mismatch'):
         b.publish_platform_index(REPO+':payload',REPO+':catalog',REPO,'linux/amd64')
+
+
+def test_publication_accepts_already_indexed_verified_payload(monkeypatch):
+    doc={'manifests':[{'digest':CHILD,'platform':{'os':'linux','architecture':'amd64'}}]}
+    calls=[]
+    def run(a,**_):
+        calls.append(a)
+        if a[-1]=='{{json .Manifest}}':return json.dumps({'digest':INDEX,**doc})
+        if a[-1]=='--raw':return json.dumps(doc)
+        return ''
+    monkeypatch.setattr(b,'run',run)
+    result=b.publish_platform_index(REPO+':payload',REPO+':catalog',REPO,'linux/amd64')
+    assert result['payload_digest']==CHILD
+    assert ['docker','buildx','imagetools','create','--tag',REPO+':catalog',REPO+'@'+CHILD] in calls

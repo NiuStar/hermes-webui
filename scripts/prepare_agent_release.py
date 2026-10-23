@@ -228,6 +228,12 @@ def publish_platform_index(payload, target, repository, platform):
     # Do not expose the catalog tag as a single manifest, even briefly.
     retry_transport(lambda:run(['docker','push',payload],timeout=600))
     descriptor=json.loads(run(['docker','buildx','imagetools','inspect',payload,'--format','{{json .Manifest}}'],timeout=60))
+    if 'manifests' in descriptor:
+        children=descriptor['manifests']
+        if (not isinstance(children,list) or len(children)!=1 or
+                children[0].get('platform')!={'os':platform.split('/')[0],'architecture':platform.split('/')[1]}):
+            raise RuntimeError('Published platform index mismatch')
+        descriptor=children[0]
     digest=descriptor.get('digest')
     if not isinstance(digest,str) or not re.fullmatch(r'sha256:[0-9a-f]{64}',digest):
         raise RuntimeError('Published payload digest ambiguous')
