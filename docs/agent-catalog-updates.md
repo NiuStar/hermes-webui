@@ -104,3 +104,35 @@ failure remains unavailable even if a build receipt exists.
 Non-ready Agent preflight results expire after 60 seconds rather than the normal
 30-minute release cache; explicit Check now always forces a fresh request.
 This change does not introduce unattended production installation or restarts.
+
+## Builder lifecycle / unattended preparation
+
+Enable `HERMES_AGENT_MANAGED_CLEANUP=1` only for the protected dedicated builder
+output. The timer checks every five minutes under the existing single-flight
+lock. Release HTML, archive and Git transport use up to three bounded attempts;
+identity/ancestry refusal, build and tool-QA failures are never bypassed or
+blindly retried. A published matching pair is label/platform-checked directly,
+without repeatedly fetching its old Git history. Missing pairs still require
+real Git ancestry before build and current Release revalidation before push.
+
+Every attempt records its QA container ID and ownership label. After stopping,
+the builder saves private metadata/logs and removes only that exact unmounted
+QA container. Terminal receipts retain archive SHA, image identity, tool-loop
+result and failure class; downloaded/expanded scratch is removed. Earlier
+published attempts can be reclaimed only through their matching receipt and
+exact stopped/no-mount container identity. Unreceipted historical QA is never
+globally pruned. Cleanup errors preserve evidence and never hide the primary
+QA failure. Abandoned running owners fail closed instead of being killed.
+
+Only two latest receipted local catalog tags are retained, additionally keeping
+the base/verifier and every image referenced by any container. Removal rechecks
+exact local tag ID and never uses force, volume deletion or global Docker prune.
+Legacy no-cache builds remove their intermediate containers instead of adding
+per-release BuildKit cache; pin Docker's support for that builder and monitor
+its deprecation. Registry artifacts remain available by immutable digest.
+
+This prevents this builder's normal per-release scratch/QA accumulation, not
+arbitrary growth by unrelated services on a shared disk. Below 3GiB after scoped
+reclamation remains a real capacity failure and is surfaced via diagnostics.
+New upstream runtime incompatibility also remains a genuine failure requiring
+review; the system must not promise every future Release is compatible.

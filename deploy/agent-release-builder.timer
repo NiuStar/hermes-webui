@@ -3,7 +3,7 @@ Description=Follow official Agent Releases on the builder (no production restart
 
 [Timer]
 OnBootSec=5min
-OnUnitInactiveSec=30min
+OnUnitInactiveSec=5min
 RandomizedDelaySec=30
 Unit=agent-release-builder.service
 
