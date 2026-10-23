@@ -224,6 +224,23 @@ def validate_compatibility_check(returncode, report):
         raise RuntimeError('Unexpected dependency incompatibility')
 
 
+def publish_platform_index(payload, target, repository, platform):
+    # Do not expose the catalog tag as a single manifest, even briefly.
+    retry_transport(lambda:run(['docker','push',payload],timeout=600))
+    descriptor=json.loads(run(['docker','buildx','imagetools','inspect',payload,'--format','{{json .Manifest}}'],timeout=60))
+    digest=descriptor.get('digest')
+    if not isinstance(digest,str) or not re.fullmatch(r'sha256:[0-9a-f]{64}',digest):
+        raise RuntimeError('Published payload digest ambiguous')
+    child=repository+'@'+digest
+    retry_transport(lambda:run(['docker','buildx','imagetools','create','--tag',target,child],timeout=120))
+    index=json.loads(run(['docker','buildx','imagetools','inspect',target,'--raw'],timeout=60))
+    entries=index.get('manifests') or []
+    if (len(entries)!=1 or entries[0].get('digest')!=child.split('@')[1] or
+            entries[0].get('platform')!={'os':platform.split('/')[0],'architecture':platform.split('/')[1]}):
+        raise RuntimeError('Published platform index mismatch')
+    return {'payload_digest':child.split('@')[1],'index':index}
+
+
 def prepare(base: str, repository: str, root: pathlib.Path, *, publish: bool, verifier=None, rehearse=False) -> dict:
     import re
     if (not re.fullmatch(re.escape(repository)+r'@sha256:[0-9a-f]{64}',base)
@@ -372,13 +389,14 @@ print(json.dumps({'passed':True,'pillow':m.version('Pillow'),'browser_harness':m
             repeated=registry_manifest(target)
             if repeated.returncode==0 or not any(s in repeated.stderr.lower() for s in ('no such manifest','manifest unknown','not found')):
                 raise RuntimeError('Catalog target appeared or registry unavailable before push')
-            retry_transport(lambda:run(['docker','push',target],timeout=600))
-            distribution=json.loads(run(['docker','manifest','inspect',target],timeout=60))
-            if not distribution:raise RuntimeError('Published manifest missing')
+            payload=target+'-payload'
+            run(['docker','tag',new['Id'],payload])
+            receipt['publication']=publish_platform_index(payload,target,repository,receipt['platform'])
             retry_transport(lambda:run(['docker','pull',target],timeout=600))
             actual=json.loads(run(['docker','image','inspect',target]))[0]
             assert actual['Config']['Labels']['org.opencontainers.image.hermes-agent.revision']==commit
-            receipt.update(state='published',repo_digests=actual['RepoDigests'])
+            receipt.update(state='published',image_id=actual['Id'],repo_digests=actual['RepoDigests'])
+            run(['docker','image','rm',payload])  # tag only, never force/cache prune
         (attempt/'receipt.json').write_text(json.dumps(receipt,indent=2))
         (root/'last-result.json').write_text(json.dumps(receipt,indent=2))
         if publish:status('PUBLISHED')

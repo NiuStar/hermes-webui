@@ -69,7 +69,7 @@ def test_real_prepare_runs_dependency_gates_before_publication(tmp_path,monkeypa
     def run(a,**_):
         calls.append(a)
         if a[:3]==['docker','image','inspect']:
-            return json.dumps([{'Id':'sha256:'+'d'*64,'Os':'linux','Architecture':'amd64','RepoDigests':[],
+            return json.dumps([{'Id':'sha256:'+'d'*64,'Os':'linux','Architecture':'amd64','RepoDigests':['24802117/hermes-webui@sha256:'+'d'*64],
               'Config':{'Labels':{'org.opencontainers.image.revision':'b'*40,
                'org.opencontainers.image.version':'v1.0.0','org.opencontainers.image.hermes-agent.revision':(COMMIT if ':agent-' in a[-1] else 'e'*40)}}}])
         if a[:2]==['docker','inspect']:return json.dumps([{'State':{'Running':True,'Health':{'Status':'healthy'}}}])
@@ -77,6 +77,8 @@ def test_real_prepare_runs_dependency_gates_before_publication(tmp_path,monkeypa
         if a[:2]==['docker','exec'] and a[-2]=='-c':return json.dumps({'passed':True,'pillow':'13.0.0'})
         if a[:2]==['docker','exec'] and '/tmp/agent_release_tool_probe.py' in a:return json.dumps({'passed':True})
         if a[:3]==['docker','manifest','inspect']:return '{"schemaVersion":2}'
+        if a[-1]=='--raw':return json.dumps({'manifests':[{'digest':'sha256:'+'d'*64,'platform':{'os':'linux','architecture':'amd64'}}]})
+        if a[-1]=='{{json .Manifest}}':return json.dumps({'digest':'sha256:'+'d'*64})
         return ''
     monkeypatch.setattr(b,'run',run)
     def subprocess_run(a,**_):

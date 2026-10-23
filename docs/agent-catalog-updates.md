@@ -55,6 +55,15 @@ platform digest and valid Compose capabilities. Browser payloads never select
 an image/repository, target or file. If the builder has not finished QA/publishing,
 installation stays unavailable; it does not require a human-created manifest.
 
+Publication pushes the verified payload to a non-catalog `-payload` reference,
+then creates the fixed catalog tag as a platform-bearing image index referencing
+that exact registry digest. Read back its child digest and `linux/amd64` or
+`linux/arm64` before declaring publication complete. A bare single OCI manifest
+may return `Platforms: null` from Docker's distribution endpoint, so push success
+alone is insufficient for page installability. Never fix this by guessing a
+platform or weakening the consumer gate. The local temporary payload tag is
+removed without force; immutable registry digests remain accessible.
+
 Apply revalidates Release/ancestry through the WebUI, resolves the catalog tag
 again to a digest, then the sidecar pulls **that digest**, validates all image
 labels, unchanged WebUI identity and exact live owner, rechecks active tasks,
