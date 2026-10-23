@@ -186,6 +186,29 @@ def runtime_verifier(image, repository, webui, version, platform):
     return actual['Id']
 
 
+V0225_PYPROJECT_SHA256='68325d6717bd4ebc3a7b015c5150bea4d5600c612259b9b7393e964caa828761'
+
+
+def apply_dependency_compatibility(source, commit, version, attempt):
+    # Operator-approved metadata-only correction, not a policy for future releases.
+    if (commit,version)!=('bf0203a794a07aac3ff764972ab9087baa4e4f4e','v0.22.5'):return None
+    path=source/'pyproject.toml';original=path.read_bytes()
+    old=b'Pillow==13.0.0';new=b'Pillow==12.3.0'
+    if (hashlib.sha256(original).hexdigest()!=V0225_PYPROJECT_SHA256 or original.count(old)!=1):
+        raise ValueError('Approved dependency source mismatch')
+    patched=original.replace(old,new)
+    evidence={'agent_commit':commit,'agent_version':version,
+              'upstream_sha256':hashlib.sha256(original).hexdigest(),
+              'patched_sha256':hashlib.sha256(patched).hexdigest(),
+              'overrides':{'Pillow':'12.3.0'},
+              'reason':'Operator-approved correction of browser-harness 0.1.13 exact Pillow conflict'}
+    (attempt/'upstream-pyproject.toml').write_bytes(original)
+    path.write_bytes(patched)
+    (source/'.hermes-compatibility.json').write_text(json.dumps(evidence,sort_keys=True))
+    (attempt/'dependency-compatibility.json').write_text(json.dumps(evidence,sort_keys=True))
+    return evidence
+
+
 def prepare(base: str, repository: str, root: pathlib.Path, *, publish: bool, verifier=None, rehearse=False) -> dict:
     import re
     if (not re.fullmatch(re.escape(repository)+r'@sha256:[0-9a-f]{64}',base)
@@ -248,6 +271,7 @@ def prepare(base: str, repository: str, root: pathlib.Path, *, publish: bool, ve
                     raise ValueError('Unexpected official archive member')
             tar.extractall(attempt,filter='data')
         source=attempt/('hermes-agent-'+commit)
+        compatibility=apply_dependency_compatibility(source,commit,version,attempt)
         (source/'.hermes-agent-revision').write_text(commit+'\n')
         (source/'install-stamp.json').write_text(json.dumps({'baseVersion':version[1:],'commit':commit,'source':'docker','distribution':'docker','updateMechanism':'external'}))
         normalize_source_permissions(source)
@@ -286,6 +310,22 @@ def prepare(base: str, repository: str, root: pathlib.Path, *, publish: bool, ve
                 if owner['State'].get('Health',{}).get('Status')=='healthy':break
                 time.sleep(5)
             else:raise RuntimeError('Candidate health deadline')
+            dependency_probe=None
+            if compatibility:
+                # No --no-deps / metadata-only success: test the installed graph
+                # and the affected image stack in the actual non-root venv.
+                run(['docker','exec','-u','1024:1024',cid,'uv','pip','check','--python','/app/venv/bin/python3'],timeout=60)
+                image_probe="""import io,json,importlib.metadata as m
+from PIL import Image
+import pillow_heif,browser_harness
+assert m.version('Pillow')=='12.3.0'
+assert m.version('browser-harness')=='0.1.13'
+for fmt in ('PNG','JPEG'):
+    b=io.BytesIO();Image.new('RGB',(17,11),(12,34,56)).save(b,format=fmt);b.seek(0)
+    im=Image.open(b);im.load();assert im.size==(17,11)
+print(json.dumps({'passed':True,'pillow':m.version('Pillow'),'browser_harness':m.version('browser-harness'),'pillow_heif':m.version('pillow-heif'),'formats':['PNG','JPEG']}))
+"""
+                dependency_probe=json.loads(run(['docker','exec','-u','1024:1024',cid,'/app/venv/bin/python3','-c',image_probe],timeout=60))
             run(['docker','cp',str(pathlib.Path(__file__).with_name('agent_release_tool_probe.py')),cid+':/tmp/agent_release_tool_probe.py'])
             run(['docker','exec',cid,'chmod','644','/tmp/agent_release_tool_probe.py'])
             loop=run(['docker','exec','-u','1024:1024',cid,'/app/venv/bin/python3','/tmp/agent_release_tool_probe.py',commit,version],timeout=210)
@@ -305,6 +345,9 @@ def prepare(base: str, repository: str, root: pathlib.Path, *, publish: bool, ve
         if retry_transport(latest)!=(version,commit):raise RuntimeError('Official release changed during build')
         receipt={'state':'verified','base':base,'image':target,'image_id':new['Id'],'webui_commit':webui,'webui_version':webver,'agent_commit':commit,'agent_version':version,'platform':new['Os']+'/'+new['Architecture'],'archive_sha256':hashlib.sha256(archive.read_bytes()).hexdigest(),'tool_loop':json.loads(loop),'qa_container':cid}
         receipt['verifier_image_id']=verifier_id or new['Id']
+        if compatibility:
+            receipt['dependency_compatibility']=compatibility
+            receipt['dependency_probe']=dependency_probe
         (attempt/'verification.json').write_text(json.dumps(receipt,indent=2))
         if publish:
             repeated=registry_manifest(target)

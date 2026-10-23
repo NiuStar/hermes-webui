@@ -136,3 +136,18 @@ arbitrary growth by unrelated services on a shared disk. Below 3GiB after scoped
 reclamation remains a real capacity failure and is surfaced via diagnostics.
 New upstream runtime incompatibility also remains a genuine failure requiring
 review; the system must not promise every future Release is compatible.
+
+## Approved v0.22.5 dependency compatibility
+
+Only official commit `bf0203a794a07aac3ff764972ab9087baa4e4f4e` / `v0.22.5`
+has an operator-approved metadata correction: Pillow `13.0.0` -> `12.3.0`,
+matching its pinned `browser-harness==0.1.13`. The original pyproject SHA-256
+must equal `68325d6717bd4ebc3a7b015c5150bea4d5600c612259b9b7393e964caa828761`.
+No Python source changes, dependency-check bypass, or future-release relaxation
+is allowed. Preserve the upstream file privately and bake a
+`.hermes-compatibility.json` recording both metadata hashes, commit and delta.
+The release receipt records that same evidence and the actual runtime tests:
+`uv pip check`, Pillow/browser-harness/pillow-heif imports, PNG/JPEG roundtrip,
+normal init, tool loop and unchanged source/runtime gates. A failed gate prevents
+publication; production Apply remains operator-controlled. This is a downstream
+compatibility build of the official release, not an unmodified upstream image.
