@@ -140,14 +140,21 @@ review; the system must not promise every future Release is compatible.
 ## Approved v0.22.5 dependency compatibility
 
 Only official commit `bf0203a794a07aac3ff764972ab9087baa4e4f4e` / `v0.22.5`
-has an operator-approved metadata correction: Pillow `13.0.0` -> `12.3.0`,
-matching its pinned `browser-harness==0.1.13`. The original pyproject SHA-256
-must equal `68325d6717bd4ebc3a7b015c5150bea4d5600c612259b9b7393e964caa828761`.
-No Python source changes, dependency-check bypass, or future-release relaxation
-is allowed. Preserve the upstream file privately and bake a
-`.hermes-compatibility.json` recording both metadata hashes, commit and delta.
-The release receipt records that same evidence and the actual runtime tests:
-`uv pip check`, Pillow/browser-harness/pillow-heif imports, PNG/JPEG roundtrip,
-normal init, tool loop and unchanged source/runtime gates. A failed gate prevents
-publication; production Apply remains operator-controlled. This is a downstream
-compatibility build of the official release, not an unmodified upstream image.
+has operator approval to apply its own upstream security override explicitly:
+Pillow `13.0.0`, despite the stale `browser-harness==0.1.13` pin to `12.3.0`.
+Do not downgrade Pillow: upstream documents security fixes in 13.0.0. The
+original pyproject SHA-256 must equal
+`68325d6717bd4ebc3a7b015c5150bea4d5600c612259b9b7393e964caa828761` and
+`tool.uv.override-dependencies` must already declare `Pillow==13.0.0`.
+Keep upstream source/pyproject unchanged. Set `UV_OVERRIDE` in this exact
+candidate to a baked, hashed requirements file so normal init from `/app`
+does not lose the upstream override through config discovery. No future
+release gets this exception automatically. Preserve the upstream file and bake
+`.hermes-compatibility.json` recording the exact source/override hashes and target.
+Run `uv pip check`; accept only its exact single browser-harness/Pillow
+12.3.0 -> 13.0.0 metadata mismatch, never any missing dependency, additional
+failure or truncated report. Also require actual Pillow/browser-harness/
+pillow-heif imports, PNG/JPEG roundtrip, normal init, tool loop and unchanged
+source/runtime gates. The receipt records these checks; production Apply remains
+operator-controlled. The Python source is upstream, with a downstream explicit
+application of its documented dependency override, not a downgrade.

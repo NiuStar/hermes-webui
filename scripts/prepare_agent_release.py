@@ -190,23 +190,38 @@ V0225_PYPROJECT_SHA256='68325d6717bd4ebc3a7b015c5150bea4d5600c612259b9b7393e964c
 
 
 def apply_dependency_compatibility(source, commit, version, attempt):
-    # Operator-approved metadata-only correction, not a policy for future releases.
+    # Apply upstream's security override explicitly when uv pip is invoked from
+    # /app, outside the Agent pyproject's config-discovery directory.
     if (commit,version)!=('bf0203a794a07aac3ff764972ab9087baa4e4f4e','v0.22.5'):return None
     path=source/'pyproject.toml';original=path.read_bytes()
-    old=b'Pillow==13.0.0';new=b'Pillow==12.3.0'
-    if (hashlib.sha256(original).hexdigest()!=V0225_PYPROJECT_SHA256 or original.count(old)!=1):
+    import tomllib
+    if hashlib.sha256(original).hexdigest()!=V0225_PYPROJECT_SHA256:
         raise ValueError('Approved dependency source mismatch')
-    patched=original.replace(old,new)
+    upstream=tomllib.loads(original.decode())
+    if 'Pillow==13.0.0' not in upstream.get('tool',{}).get('uv',{}).get('override-dependencies',[]):
+        raise ValueError('Approved upstream security override missing')
+    overrides=source/'.hermes-compatibility-overrides.txt'
+    overrides.write_text('Pillow==13.0.0\n')
     evidence={'agent_commit':commit,'agent_version':version,
               'upstream_sha256':hashlib.sha256(original).hexdigest(),
-              'patched_sha256':hashlib.sha256(patched).hexdigest(),
-              'overrides':{'Pillow':'12.3.0'},
-              'reason':'Operator-approved correction of browser-harness 0.1.13 exact Pillow conflict'}
+              'source_unchanged':True,
+              'override_sha256':hashlib.sha256(overrides.read_bytes()).hexdigest(),
+              'overrides':{'Pillow':'13.0.0'},
+              'reason':'Operator-approved application of upstream security override outside project config discovery'}
     (attempt/'upstream-pyproject.toml').write_bytes(original)
-    path.write_bytes(patched)
     (source/'.hermes-compatibility.json').write_text(json.dumps(evidence,sort_keys=True))
     (attempt/'dependency-compatibility.json').write_text(json.dumps(evidence,sort_keys=True))
     return evidence
+
+
+def validate_compatibility_check(returncode, report):
+    if returncode==0:return
+    # Only the exact upstream-documented metadata mismatch is accepted.
+    # Unknown/truncated reports, missing dependencies and other overrides fail.
+    expected='The package `browser-harness` requires `pillow==12.3.0`, but `13.0.0` is installed'
+    lines=[line.strip() for line in report.splitlines() if line.strip().startswith('The package ')]
+    if returncode!=1 or lines!=[expected] or not re.search(r'^Found 1 incompatibility$',report,re.M):
+        raise RuntimeError('Unexpected dependency incompatibility')
 
 
 def prepare(base: str, repository: str, root: pathlib.Path, *, publish: bool, verifier=None, rehearse=False) -> dict:
@@ -277,10 +292,12 @@ def prepare(base: str, repository: str, root: pathlib.Path, *, publish: bool, ve
         normalize_source_permissions(source)
         localbase='hermes-agent-release-base:'+old['Id'].split(':')[1][:16]
         run(['docker','tag',old['Id'],localbase])
+        override_env=('ENV UV_OVERRIDE=/opt/hermes/.hermes-compatibility-overrides.txt' if compatibility else '')
         (attempt/'Dockerfile').write_text(f'''FROM {localbase}
     USER root
     RUN rm -rf /opt/hermes && mkdir -p /opt/hermes
     COPY --chown=root:root hermes-agent-{commit}/ /opt/hermes/
+    {override_env}
     LABEL org.opencontainers.image.hermes-agent.revision="{commit}" org.opencontainers.image.hermes-agent.version="{version}"
     ''')
         (attempt/'.dockerignore').write_text('/agent.tar.gz\n/*.json\n/*.log\n')
@@ -314,11 +331,13 @@ def prepare(base: str, repository: str, root: pathlib.Path, *, publish: bool, ve
             if compatibility:
                 # No --no-deps / metadata-only success: test the installed graph
                 # and the affected image stack in the actual non-root venv.
-                run(['docker','exec','-u','1024:1024',cid,'uv','pip','check','--python','/app/venv/bin/python3'],timeout=60)
+                checked=subprocess.run(['docker','exec','-u','1024:1024',cid,'uv','pip','check','--python','/app/venv/bin/python3'],capture_output=True,text=True,timeout=60)
+                validate_compatibility_check(checked.returncode,checked.stdout+'\n'+checked.stderr)
+                (attempt/'dependency-check.log').write_text(checked.stdout+'\n'+checked.stderr)
                 image_probe="""import io,json,importlib.metadata as m
 from PIL import Image
 import pillow_heif,browser_harness
-assert m.version('Pillow')=='12.3.0'
+assert m.version('Pillow')=='13.0.0'
 assert m.version('browser-harness')=='0.1.13'
 for fmt in ('PNG','JPEG'):
     b=io.BytesIO();Image.new('RGB',(17,11),(12,34,56)).save(b,format=fmt);b.seek(0)
