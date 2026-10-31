@@ -65,12 +65,9 @@ def test_question_jump_button_matches_bottom_button_size_on_mobile():
     assert ".msg-question-jump-btn span:last-child { display: none; }" in STYLE_CSS
 
 
-def test_question_jump_footer_is_discoverable_on_desktop_without_exposing_actions():
-    # Desktop cannot rely on the mobile always-visible footer override, but the
-    # per-turn jump affordance is navigation, not quiet action chrome. Keep only
-    # the jump button discoverable at rest; reveal timestamp/actions on hover or
-    # keyboard focus.
-    block_anchor = "Desktop/tablet keeps the per-turn jump affordance discoverable"
+def test_question_jump_footer_keeps_actions_targetable_without_hover():
+    # Timestamps may fade, but copy must accept the first click after settlement.
+    block_anchor = "Desktop/tablet keeps jump navigation visible"
     block_start = STYLE_CSS.index(block_anchor)
     block_end = STYLE_CSS.index(".assistant-turn .msg-foot-with-usage", block_start)
     desktop_jump_block = STYLE_CSS[block_start:block_end]
@@ -80,10 +77,9 @@ def test_question_jump_footer_is_discoverable_on_desktop_without_exposing_action
     assert ".assistant-turn .msg-foot:has(.msg-question-jump-btn)" in desktop_jump_block
     assert "opacity: 1;" in desktop_jump_block
     assert ".msg-foot:has(.msg-question-jump-btn) .msg-time" in desktop_jump_block
-    assert ".msg-foot:has(.msg-question-jump-btn) .msg-actions" in desktop_jump_block
+    assert ".msg-foot:has(.msg-question-jump-btn) .msg-actions" not in desktop_jump_block
     assert "pointer-events: none;" in desktop_jump_block
-    assert ".assistant-turn:hover .msg-foot:has(.msg-question-jump-btn) .msg-actions" in desktop_jump_block
-    assert ".assistant-turn:focus-within .msg-foot:has(.msg-question-jump-btn) .msg-actions" in desktop_jump_block
+    assert ".assistant-turn:hover .msg-foot:has(.msg-question-jump-btn) .msg-time" in desktop_jump_block
     assert "pointer-events: auto;" in desktop_jump_block
 
 

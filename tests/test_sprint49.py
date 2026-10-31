@@ -49,15 +49,17 @@ def test_timestamp_footer_stays_on_visible_response_segments():
     )
 
 
-def test_footer_chrome_is_hover_only_for_user_and_assistant_messages():
+def test_footer_actions_remain_available_without_hover():
     assert ".msg-row[data-role=\"user\"] .msg-foot {\n  opacity: 0;" in UI_CSS
     assert ".msg-row[data-role=\"user\"]:hover .msg-foot," in UI_CSS
     assert ".msg-row[data-role=\"assistant\"] .msg-foot," in UI_CSS
     assert ".assistant-turn .msg-foot {" in UI_CSS
     assert ".assistant-turn:hover .msg-foot," in UI_CSS
+    assert '.msg-row .msg-foot:has(.msg-actions),' in UI_CSS
+    assert '.assistant-turn .msg-foot:has(.msg-actions) {\n  opacity: 1;' in UI_CSS
 
 
-def test_last_assistant_keeps_usage_visible_and_reveals_time_and_actions_on_hover():
+def test_last_assistant_keeps_usage_and_actions_visible_and_reveals_time_on_hover():
     assert "usage.className='msg-usage-inline';" in UI_JS
     assert "targetFoot.classList.add('msg-foot-with-usage');" in UI_JS
     assert (
@@ -67,7 +69,8 @@ def test_last_assistant_keeps_usage_visible_and_reveals_time_and_actions_on_hove
     )
     assert ".assistant-turn .msg-foot-with-usage," in UI_CSS
     assert ".msg-row[data-role=\"assistant\"] .msg-foot-with-usage {\n  opacity: 1;" in UI_CSS
-    assert ".msg-foot-with-usage .msg-time,\n.msg-foot-with-usage .msg-actions {\n  opacity: 0;" in UI_CSS
+    assert ".msg-foot-with-usage .msg-time {\n  opacity: 0;" in UI_CSS
+    assert '.assistant-turn .msg-foot .msg-actions {\n  opacity: 1;\n  pointer-events: auto;' in UI_CSS
     assert ".assistant-turn:hover .msg-foot-with-usage .msg-time," in UI_CSS
 
 
