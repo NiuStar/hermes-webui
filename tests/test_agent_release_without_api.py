@@ -1,6 +1,7 @@
 """Agent release discovery must not depend on api.github.com."""
 from unittest.mock import patch
 import subprocess
+import pytest
 
 from api import updates
 
@@ -15,29 +16,25 @@ def test_official_release_page_links_commit(monkeypatch):
 
 def test_release_page_missing_commit_fails_closed(monkeypatch):
     monkeypatch.setattr(updates, '_agent_release_html', lambda: ('v0.21.6', '<html>v0.21.6</html>'))
-    with patch.object(updates.subprocess, 'run', side_effect=AssertionError('invalid page must not query git')):
-        try:
+    with patch.object(updates.subprocess, 'check_output', side_effect=AssertionError('invalid page must not query git')):
+        with pytest.raises(ValueError):
             updates._published_agent_release()
-        except ValueError:
-            pass
-        else:
-            raise AssertionError('ambiguous release page accepted')
 
 
 def test_ancestry_is_proven_by_git_objects_not_github_api(monkeypatch):
+    updates._agent_ancestry_cache.clear()
     calls = []
     def git(args, **kwargs):
         calls.append(args)
         if args[-2:] == ['rev-parse', 'FETCH_HEAD^{}']:
-            return subprocess.CompletedProcess(args, 0, 'b' * 40 + '\n', '')
+            return 'b' * 40 + '\n'
         if args[-3:] == ['cat-file', '-t', 'a' * 40]:
-            return subprocess.CompletedProcess(args, 0, 'commit\n', '')
-        if 'merge-base' in args:
-            return subprocess.CompletedProcess(args, 0, '', '')
-        return subprocess.CompletedProcess(args, 0, '', '')
-    monkeypatch.setattr(updates.subprocess, 'run', git)
+            return 'commit\n'
+        return ''
+    monkeypatch.setattr(updates.subprocess, 'check_output', git)
     monkeypatch.setattr(updates, '_agent_comparison_version', lambda _latest: 'v0.21.6')
     assert updates._agent_commit_comparison('a' * 40, 'b' * 40) == ('ahead', 1)
+    assert any('merge-base' in a for a in calls)
     assert all('api.github.com' not in ' '.join(a) for a in calls)
 
 
@@ -45,22 +42,20 @@ def test_diverged_git_history_fails_closed(monkeypatch):
     updates._agent_ancestry_cache.clear()
     def git(args, **kwargs):
         if args[-2:] == ['rev-parse', 'FETCH_HEAD^{}']:
-            return subprocess.CompletedProcess(args, 0, 'b' * 40 + '\n', '')
+            return 'b' * 40 + '\n'
         if args[-3:] == ['cat-file', '-t', 'a' * 40]:
-            return subprocess.CompletedProcess(args, 0, 'commit\n', '')
+            return 'commit\n'
         if 'merge-base' in args:
-            return subprocess.CompletedProcess(args, 1, '', '')
-        return subprocess.CompletedProcess(args, 0, '', '')
-    monkeypatch.setattr(updates.subprocess, 'run', git)
+            raise subprocess.CalledProcessError(1, args)
+        return ''
+    monkeypatch.setattr(updates.subprocess, 'check_output', git)
     monkeypatch.setattr(updates, '_agent_comparison_version', lambda _latest: 'v0.21.6')
-    assert updates._agent_commit_comparison('a' * 40, 'b' * 40) == ('unknown', 0)
+    with pytest.raises(subprocess.CalledProcessError):
+        updates._agent_commit_comparison('a' * 40, 'b' * 40)
+    assert not updates._agent_ancestry_cache
 
 
 def test_release_commit_mismatch_fails_closed(monkeypatch):
     monkeypatch.setattr(updates, '_published_agent_release', lambda: ('v0.21.6', 'a' * 40))
-    try:
+    with pytest.raises(ValueError):
         updates._agent_comparison_version('b' * 40)
-    except ValueError:
-        pass
-    else:
-        raise AssertionError('changed Release commit accepted')

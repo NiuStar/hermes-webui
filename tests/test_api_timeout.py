@@ -230,7 +230,7 @@ def test_session_message_loads_keep_explicit_longer_timeouts():
     src = _source(SESSIONS_JS)
     assert (
         "api(\n"
-        "      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`,\n"
+        "      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${boundedReloadLimit}${expandParam}`,\n"
         "      {timeoutMs:120000}\n"
         "    )"
     ) in src
