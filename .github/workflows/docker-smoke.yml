@@ -345,10 +345,11 @@ jobs:
           set -euo pipefail
 
           # ----- Trap-guaranteed cleanup, regardless of exit reason -----
+          mkdir -p ci-evidence
           cleanup() {
             local rc=$?
             echo "::group::Cleanup (rc=$rc)"
-            docker compose -p "$PROJECT" -f "$COMPOSE_FILE" logs --no-color --tail=200 || true
+            docker compose -p "$PROJECT" -f "$COMPOSE_FILE" logs --no-color --tail=200 2>&1 | tee ci-evidence/compose.log || true
             docker compose -p "$PROJECT" -f "$COMPOSE_FILE" down -v --remove-orphans || true
             rm -rf "$HERMES_HOME" "$HERMES_WORKSPACE" || true
             echo "::endgroup::"
@@ -390,6 +391,7 @@ jobs:
           # "errorless", URL paths) are improbable for these specific tokens.
           echo "::group::Startup log scan"
           LOGS="$(docker compose -p "$PROJECT" -f "$COMPOSE_FILE" logs --no-color)"
+          printf '%s\n' "$LOGS" > ci-evidence/startup.log
           # `!! ERROR` + `!! Exiting script` are the actual strings emitted by
           # docker_init.bash's error_exit() helper — the function name itself
           # never appears in output. The literal token `error_exit` is kept as
@@ -401,3 +403,9 @@ jobs:
           fi
           echo "✅ No known-bad patterns in startup logs"
           echo "::endgroup::"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: docker-smoke-${{ matrix.variant }}
+          path: ci-evidence/
+          if-no-files-found: ignore

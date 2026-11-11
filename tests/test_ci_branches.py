@@ -52,7 +52,8 @@ def test_full_test_matrix_and_required_execution_are_preserved():
     }
     assert jobs["test"]["if"] == "${{ always() }}"
     test_step = next(step for step in jobs["test"]["steps"] if step.get("name", "").startswith("Run tests"))
-    assert test_step["run"] == "pytest tests/ -v --timeout=60 --shard-id=${{ matrix.shard }} --num-shards=5"
+    assert "pytest tests/ -v --timeout=60 --shard-id=${{ matrix.shard }} --num-shards=5" in test_step["run"]
+    assert "set -o pipefail" in test_step["run"]
     assert test_step["if"] == "needs.changes.outputs.docs_only != 'true'"
 
 

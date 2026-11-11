@@ -254,4 +254,13 @@ jobs:
 
       - name: Run tests (shard ${{ matrix.shard }} of 5)
         if: needs.changes.outputs.docs_only != 'true'
-        run: pytest tests/ -v --timeout=60 --shard-id=${{ matrix.shard }} --num-shards=5
+        run: |
+          set -o pipefail
+          mkdir -p ci-evidence
+          pytest tests/ -v --timeout=60 --shard-id=${{ matrix.shard }} --num-shards=5 --junitxml=ci-evidence/pytest.xml 2>&1 | tee ci-evidence/pytest.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pytest-${{ matrix.python-version }}-${{ matrix.shard }}
+          path: ci-evidence/
+          if-no-files-found: ignore
