@@ -55,8 +55,8 @@ maintainer-run, safe-fixes-only decision (tracked in #3273).
 ```bash
 # one-time dev setup (ruff is a dev-only tool):
 pip install ruff            # or: uv tool install ruff / uvx ruff ...
-# the gate (only flags violations on lines you added/changed vs origin/master):
-python3 scripts/ruff_lint.py --diff origin/master
+# the gate (only flags violations on lines you added/changed vs origin/main):
+python3 scripts/ruff_lint.py --diff origin/main
 # whole-tree backlog report (informational — never blocks):
 python3 scripts/ruff_lint.py --all
 ```
@@ -66,7 +66,12 @@ syntax/runtime) findings and verifies the curated config shape; it runs in-suite
 when ruff is present and **skips gracefully** when it isn't — so environments
 without ruff aren't blocked, while CI (which installs ruff) enforces it. The
 diff-scoped gate runs as the `lint` job in `.github/workflows/tests.yml` and is
-also part of the maintainer pre-release pre-gate.
+also part of the maintainer pre-release pre-gate. CI admits PR targets and pushes
+on `main`, legacy `master`, and `fix/**` repair branches. The lint fetch and diff
+use the same base: a PR's target branch, `master` for legacy master pushes, and
+`main` for other admitted pushes. A missing lint base fails the fetch rather than
+silently passing an empty diff. Existing path filters and the complete pytest
+matrix remain in force.
 
 ## Automated browser smoke (runtime brick-class gate)
 
@@ -78,8 +83,8 @@ that throws only when a real browser executes the page (e.g. a `function X(){}` 
 `tests/browser_smoke.py` boots the real `server.py` (agent-free, on an ephemeral
 port, with an isolated temp state dir) and loads the key pages in headless
 Chromium, failing if **any** console error or uncaught JS exception fires on load.
-It runs in CI (`.github/workflows/browser-smoke.yml`) on every PR and push to
-master, and locally:
+It runs in CI (`.github/workflows/browser-smoke.yml`) on every PR targeting
+`main`, `master`, or `fix/**` and every push to those branches, and locally:
 
 ```bash
 pip install playwright && python -m playwright install chromium

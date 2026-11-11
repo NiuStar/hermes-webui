@@ -19,7 +19,7 @@ name: Docs CI
 
 on:
   pull_request:
-    branches: [master]
+    branches: [main, master, 'fix/**']
     paths:
       - '**/*.md'
       - '**/*.markdown'
@@ -28,7 +28,7 @@ on:
       - 'CHANGELOG*'
       - '**/README*'
   push:
-    branches: [master]
+    branches: [main, master, 'fix/**']
     paths:
       - '**/*.md'
       - '**/*.markdown'
@@ -40,6 +40,11 @@ on:
 # Read-only; no secrets needed. Fork PRs already get a read-only token, but pin it.
 permissions:
   contents: read
+
+# PRs compare to their target; legacy master pushes keep their own base.
+# Repair-branch pushes compare to the primary main branch, not the branch itself.
+env:
+  CI_BASE_BRANCH: ${{ github.base_ref || (github.ref_name == 'master' && 'master' || 'main') }}
 
 jobs:
   docs-ci:
@@ -66,7 +71,7 @@ jobs:
           # LINE. We never echo untrusted names into another shell; downstream steps
           # read this file. Fall back to all tracked docs if the diff can't compute.
           if [ -n "${BASE_SHA:-}" ] && [ -n "${HEAD_SHA:-}" ]; then
-            git fetch --no-tags --depth=1 origin "$BASE_SHA" 2>/dev/null || git fetch --no-tags origin master || true
+            git fetch --no-tags --depth=1 origin "$BASE_SHA" 2>/dev/null || git fetch --no-tags origin "$CI_BASE_BRANCH" || true
             RANGE="$BASE_SHA...$HEAD_SHA"
           else
             RANGE="${{ github.event.before }}...${{ github.sha }}"

@@ -17,9 +17,14 @@ name: Browser smoke
 
 on:
   pull_request:
-    branches: [master]
+    branches: [main, master, 'fix/**']
   push:
-    branches: [master]
+    branches: [main, master, 'fix/**']
+
+# PRs compare to their target; legacy master pushes keep their own base.
+# Repair-branch pushes compare to the primary main branch, not the branch itself.
+env:
+  CI_BASE_BRANCH: ${{ github.base_ref || (github.ref_name == 'master' && 'master' || 'main') }}
 
 jobs:
   changes:
@@ -59,7 +64,7 @@ jobs:
             return 1
           }
           if [ -n "${BASE_SHA:-}" ] && [ -n "${HEAD_SHA:-}" ]; then
-            git fetch --no-tags --depth=1 origin "$BASE_SHA" 2>/dev/null || git fetch --no-tags origin master || true
+            git fetch --no-tags --depth=1 origin "$BASE_SHA" 2>/dev/null || git fetch --no-tags origin "$CI_BASE_BRANCH" || true
             RANGE="$BASE_SHA...$HEAD_SHA"
           else
             RANGE="${{ github.event.before }}...${{ github.sha }}"
