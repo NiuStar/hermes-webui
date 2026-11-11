@@ -26,10 +26,25 @@ def test_exact_approved_override_preserves_original_and_records_delta(tmp_path,m
     assert json.loads((source/'.hermes-compatibility.json').read_text())==evidence
 
 
+def test_v0231_applies_its_own_hash_bound_upstream_override(tmp_path,monkeypatch):
+    source=tmp_path/'source';source.mkdir();(source/'pyproject.toml').write_bytes(ORIGINAL)
+    monkeypatch.setattr(b,'V0231_PYPROJECT_SHA256',hashlib.sha256(ORIGINAL).hexdigest(),raising=False)
+    evidence=b.apply_dependency_compatibility(source,'3b421578588243f920886e6fe79a6faa87ea026e','v0.23.1',tmp_path)
+    assert evidence is not None
+    assert evidence['overrides']=={'Pillow':'13.0.0'}
+    assert (source/'pyproject.toml').read_bytes()==ORIGINAL
+
+
 def test_unapproved_release_is_unchanged(tmp_path):
     p=tmp_path/'pyproject.toml';p.write_text('Pillow==13.0.0')
     assert b.apply_dependency_compatibility(tmp_path,'c'*40,'v0.22.6',tmp_path) is None
     assert p.read_text()=='Pillow==13.0.0'
+
+
+def test_successor_clears_only_inherited_managed_override():
+    assert b.dependency_override_env(None, ['UV_OVERRIDE=/opt/hermes/.hermes-compatibility-overrides.txt']) == 'ENV UV_OVERRIDE=""'
+    assert b.dependency_override_env(None, ['UV_OVERRIDE=/operator/custom.txt']) == ''
+    assert b.dependency_override_env({'overrides': {'Pillow': '13.0.0'}}, []) == 'ENV UV_OVERRIDE=/opt/hermes/.hermes-compatibility-overrides.txt'
 
 
 def test_changed_approved_source_refuses_before_write(tmp_path):

@@ -49,10 +49,15 @@ def test_version_tag_cannot_publish_unverified_release_or_latest():
     workflow = yaml.safe_load((ROOT / '.github/workflows/release.yml').read_text(encoding='utf-8'))
     # YAML 1.1 treats `on` as a boolean; inspect the parsed trigger regardless.
     trigger = workflow.get('on', workflow.get(True))
-    assert trigger == {'workflow_dispatch': None}
+    assert trigger == {'push': {'tags': ['v20*.*.*-r*']}}
     assert workflow['permissions'] == {'contents': 'read'}
-    assert not {'release', 'build', 'publish'} & set(workflow['jobs'])
-    assert 'action-gh-release' not in str(workflow)
+    jobs = workflow['jobs']
+    assert jobs['artifact-verification']['needs'] == 'source-tests'
+    assert jobs['publish']['needs'] == ['source-tests', 'artifact-verification']
+    assert jobs['publish']['permissions'] == {'contents': 'write'}
+    assert 'scripts/release_promotion.py' in str(jobs['artifact-verification'])
+    assert './scripts/test.sh tests/' in str(jobs['source-tests'])
+    assert '--verify-tag' in str(jobs['publish'])
     assert 'build-push-action' not in str(workflow)
     assert not any('type=raw,value=latest' in str(job) or 'ghcr.io/' in str(job)
                    for job in workflow['jobs'].values())

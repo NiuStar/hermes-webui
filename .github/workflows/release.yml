@@ -1,20 +1,70 @@
-# Fail closed: a version tag alone must not publish an untested image,
-# mutable latest, or a GitHub Release. Publication needs an artifact-tested
-# promotion workflow with digest/platform/source readback and operator approval.
-# An independent publisher signature is NOT required for Agent online updates.
-name: Release & Docker (publication disabled)
+# Image publication stays on the approved builder. A tag alone is not sufficient:
+# the exact registry image must pass fresh runtime acceptance before Release creation.
+name: Verified release promotion
 
 on:
-  workflow_dispatch:
+  push:
+    tags:
+      - 'v20*.*.*-r*'
 
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  publication-blocked:
+  source-tests:
     runs-on: ubuntu-latest
     steps:
-      - name: Reject publication until artifact-tested promotion is implemented
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install test dependencies
         run: |
-          echo 'Release publication is disabled: build the frozen WebUI+Agent source, verify runtime and digest/platform identity, and approve operator-controlled promotion first; no detached signature is required.' >&2
-          exit 1
+          python -m pip install -r requirements-dev.txt playwright
+          python -m playwright install --with-deps chromium
+      - name: Verify source syntax and full suite
+        run: |
+          python -m compileall -q api server.py bootstrap.py mcp_server.py tests scripts
+          ./scripts/test.sh tests/ -q --timeout=60
+
+  artifact-verification:
+    needs: source-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Independently pull and exercise the exact version image
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+          RELEASE_COMMIT: ${{ github.sha }}
+        run: python3 scripts/release_promotion.py --version "$RELEASE_VERSION" --commit "$RELEASE_COMMIT" --output release-image.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-image
+          path: release-image.json
+          if-no-files-found: error
+
+  publish:
+    needs: [source-tests, artifact-verification]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-image
+          path: release-artifact
+      - name: Publish verified release metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          sha256sum release-artifact/release-image.json > release-artifact/SHA256SUMS
+          gh release create "$RELEASE_VERSION" --verify-tag --title "$RELEASE_VERSION" --notes-file docs/releases/"$RELEASE_VERSION".md release-artifact/release-image.json release-artifact/SHA256SUMS

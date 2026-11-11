@@ -187,15 +187,19 @@ def runtime_verifier(image, repository, webui, version, platform):
 
 
 V0225_PYPROJECT_SHA256='68325d6717bd4ebc3a7b015c5150bea4d5600c612259b9b7393e964caa828761'
+V0231_PYPROJECT_SHA256='ee825ad304ad685625c8878cd34b7923ec64579cdc08e646b84b76ba3d4c1cfc'
 
 
 def apply_dependency_compatibility(source, commit, version, attempt):
     # Apply upstream's security override explicitly when uv pip is invoked from
     # /app, outside the Agent pyproject's config-discovery directory.
-    if (commit,version)!=('bf0203a794a07aac3ff764972ab9087baa4e4f4e','v0.22.5'):return None
+    approved={('bf0203a794a07aac3ff764972ab9087baa4e4f4e','v0.22.5'):V0225_PYPROJECT_SHA256,
+              ('3b421578588243f920886e6fe79a6faa87ea026e','v0.23.1'):V0231_PYPROJECT_SHA256}
+    expected=approved.get((commit,version))
+    if expected is None:return None
     path=source/'pyproject.toml';original=path.read_bytes()
     import tomllib
-    if hashlib.sha256(original).hexdigest()!=V0225_PYPROJECT_SHA256:
+    if hashlib.sha256(original).hexdigest()!=expected:
         raise ValueError('Approved dependency source mismatch')
     upstream=tomllib.loads(original.decode())
     if 'Pillow==13.0.0' not in upstream.get('tool',{}).get('uv',{}).get('override-dependencies',[]):
@@ -245,6 +249,14 @@ def publish_platform_index(payload, target, repository, platform):
             entries[0].get('platform')!={'os':platform.split('/')[0],'architecture':platform.split('/')[1]}):
         raise RuntimeError('Published platform index mismatch')
     return {'payload_digest':child.split('@')[1],'index':index}
+
+
+def dependency_override_env(compatibility, inherited):
+    """Do not carry a deleted, release-specific managed override into its successor."""
+    managed='/opt/hermes/.hermes-compatibility-overrides.txt'
+    if compatibility:return 'ENV UV_OVERRIDE='+managed
+    if 'UV_OVERRIDE='+managed in (inherited or []):return 'ENV UV_OVERRIDE=""'
+    return ''
 
 
 def prepare(base: str, repository: str, root: pathlib.Path, *, publish: bool, verifier=None, rehearse=False) -> dict:
@@ -315,7 +327,7 @@ def prepare(base: str, repository: str, root: pathlib.Path, *, publish: bool, ve
         normalize_source_permissions(source)
         localbase='hermes-agent-release-base:'+old['Id'].split(':')[1][:16]
         run(['docker','tag',old['Id'],localbase])
-        override_env=('ENV UV_OVERRIDE=/opt/hermes/.hermes-compatibility-overrides.txt' if compatibility else '')
+        override_env=dependency_override_env(compatibility,old['Config'].get('Env'))
         (attempt/'Dockerfile').write_text(f'''FROM {localbase}
     USER root
     RUN rm -rf /opt/hermes && mkdir -p /opt/hermes
