@@ -54,6 +54,10 @@ pulling or running containers, and offers installation only with a matching
 platform digest and valid Compose capabilities. Browser payloads never select
 an image/repository, target or file. If the builder has not finished QA/publishing,
 installation stays unavailable; it does not require a human-created manifest.
+The shared WebUI/builder ancestry proof first fetches a bounded commit-only
+history of depth 1024; if the baked Agent commit is absent, it retries at depth
+8192. The peeled Release tag must still match on both fetches, and a missing
+commit or failed ancestor check remains unknown (never installable).
 
 Publication pushes the verified payload to a non-catalog `-payload` reference,
 then creates the fixed catalog tag as a platform-bearing image index referencing

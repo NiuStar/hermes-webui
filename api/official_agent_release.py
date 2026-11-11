@@ -1,6 +1,5 @@
 """Official Agent release identity via human-facing Release HTML and Git, never API."""
 import os
-from pathlib import Path
 import re
 import subprocess
 import tempfile
@@ -30,8 +29,16 @@ def prove_ancestry(current: str, target: str, version: str) -> None:
              'GIT_HTTP_LOW_SPEED_LIMIT':'1','GIT_HTTP_LOW_SPEED_TIME':'30'}
         def git(*a,timeout=20):return subprocess.check_output(['git','-C',root,*a],env=env,stderr=subprocess.PIPE,text=True,timeout=timeout).strip()
         git('init','-q')
-        git('-c','protocol.version=2','-c','http.version=HTTP/1.1','fetch','--quiet',
-            '--no-tags','--filter=tree:0','--depth=1024',REPO+'.git',
-            'refs/tags/'+version,timeout=90)
-        if git('rev-parse','FETCH_HEAD^{}')!=target or git('cat-file','-t',current)!='commit':raise ValueError('Official Git commit mismatch')
+        def fetch(depth):
+            git('-c','protocol.version=2','-c','http.version=HTTP/1.1','fetch','--quiet',
+                '--no-tags','--filter=tree:0',f'--depth={depth}',REPO+'.git',
+                'refs/tags/'+version,timeout=90)
+            if git('rev-parse','FETCH_HEAD^{}')!=target:
+                raise ValueError('Official Git tag moved during ancestry proof')
+        def has_current():
+            try:return git('cat-file','-t',current)=='commit'
+            except subprocess.CalledProcessError:return False
+        fetch(1024)
+        if not has_current():fetch(8192)
+        if not has_current():raise ValueError('Official Git commit mismatch')
         git('merge-base','--is-ancestor',current,target)
