@@ -69,10 +69,32 @@ def test_api_modules_exist(cleanup_test_sessions):
                 "workspace.py", "upload.py", "streaming.py"]:
         assert (base / mod).exists(), f"Missing api/{mod}"
 
-def test_server_py_under_750_lines(cleanup_test_sessions):
-    """server.py should be under 750 lines after the split."""
-    lines = len((REPO_ROOT / "server.py").read_text().splitlines())
-    assert lines < 750, f"server.py is {lines} lines -- split may not have landed"
+def test_server_py_delegates_api_handlers():
+    """The entry point delegates API behavior, independent of incidental line count."""
+    import ast
+
+    tree = ast.parse((REPO_ROOT / "server.py").read_text())
+    delegated = {"handle_get", "handle_post", "handle_put", "handle_patch", "handle_delete"}
+    route_imports = {
+        alias.name for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module == "api.routes"
+        for alias in node.names
+    }
+    assert delegated <= route_imports
+    handler = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Handler")
+    methods = {node.name: node for node in handler.body if isinstance(node, ast.FunctionDef)}
+    for verb in ("GET", "POST", "PUT", "PATCH", "DELETE"):
+        method = methods[f"do_{verb}"]
+        route = f"handle_{verb.lower()}"
+        routed = any(
+            isinstance(node, ast.Call) and (
+                isinstance(node.func, ast.Name) and node.func.id == route
+                or isinstance(node.func, ast.Attribute) and node.func.attr == "_handle_write"
+                and any(isinstance(arg, ast.Name) and arg.id == route for arg in node.args)
+            )
+            for node in ast.walk(method)
+        )
+        assert routed, f"{verb} must delegate to api.routes.{route}"
 
 def test_api_config_has_cancel_flags(cleanup_test_sessions):
     src = (REPO_ROOT / "api/config.py").read_text()

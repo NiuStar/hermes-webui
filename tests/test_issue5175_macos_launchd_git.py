@@ -93,7 +93,8 @@ def test_check_repo_does_not_report_git_not_found_via_launchd_fallback(tmp_path)
 
     def fake_run(cmd, **kwargs):
         assert cmd[0] == '/usr/bin/git'
-        git_args = cmd[1:]
+        assert cmd[1:3] == ['-c', f'safe.directory={tmp_path.resolve()}']
+        git_args = cmd[3:]
         if git_args == ['fetch', 'origin', '--tags', '--force']:
             return MagicMock(returncode=0, stdout='', stderr='')
         if git_args == ['tag', '--list', 'v*', '--sort=-v:refname']:

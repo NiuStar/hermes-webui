@@ -5636,8 +5636,9 @@ def _persisted_message_count(sid) -> int | None:
                 # non-evictable (the eviction check treats an unknown disk count
                 # as "do not evict"), which can let new_session() evict its own
                 # unsaved session and 404 the first send. Full-parse to get the
-                # authoritative count (Session.load re-caches the facts for
-                # legacy files under a TOCTOU-guarded signature). Re-verify the
+                # authoritative raw count. Do not call Session.load here: it
+                # can self-heal duplicate partials via save(), which calls this
+                # helper again for the pre-shrink backup check. Re-verify the
                 # stat signature is stable across the parse so we never return a
                 # count from a file that was atomically replaced mid-read; retry
                 # boundedly on mismatch, then fall through to None. Bounded
@@ -5645,14 +5646,21 @@ def _persisted_message_count(sid) -> int | None:
                 for _attempt in range(3):
                     sig_before = _sidecar_stat_signature(p)
                     try:
-                        _full = Session.load(sid)
+                        _full = json.loads(p.read_text(encoding='utf-8'))
                     except Exception:
                         _full = None
                     sig_after = _sidecar_stat_signature(p)
                     if _full is None:
                         return None
                     if sig_before is not None and sig_before == sig_after:
-                        return len(getattr(_full, 'messages', None) or [])
+                        count = len(_full.get('messages') or [])
+                        _legacy_sidecar_facts_put(
+                            sid,
+                            count,
+                            _anchor_scene_index_from_records(_full.get('anchor_activity_scenes')),
+                            expected_sig=sig_before,
+                        )
+                        return count
                     # File changed during the parse — the count is uncertain;
                     # retry with a fresh snapshot.
                 return None

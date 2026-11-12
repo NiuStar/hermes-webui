@@ -343,35 +343,41 @@ def test_deleted_session_does_not_appear_in_list(cleanup_test_sessions):
 
 
 def test_server_delete_prunes_session_index(cleanup_test_sessions):
-    """session/delete should prune the deleted row without discarding the index."""
-    src = (REPO_ROOT / "server.py").read_text()
-    routes_src = (REPO_ROOT / "api" / "routes.py").read_text() if (REPO_ROOT / "api" / "routes.py").exists() else ""
-    # Find the delete handler in either file
-    for label, text in [("server.py", src), ("api/routes.py", routes_src)]:
-        # Accept both single-quote and double-quote style (formatting varies by contributor)
-        delete_idx = max(
-            text.find("if parsed.path == '/api/session/delete':"),
-            text.find('if parsed.path == "/api/session/delete":'),
-        )
-        if delete_idx >= 0:
-            delete_block = text[delete_idx:delete_idx+2400]
-            assert "prune_session_from_index(sid)" in delete_block, \
-                f"{label} session/delete must prune SESSION_INDEX_FILE"
-            return
-    assert False, "session/delete handler not found in server.py or api/routes.py"
+    """Delete one row without discarding the index or another conversation."""
+    from api.config import SESSION_INDEX_FILE
+
+    sid = make_session(cleanup_test_sessions)
+    retained_sid = make_session(cleanup_test_sessions)
+    _make_session_visible(sid)
+    _make_session_visible(retained_sid)
+    before = json.loads(SESSION_INDEX_FILE.read_text())
+    retained = next(row for row in before if row["session_id"] == retained_sid)
+    assert any(row["session_id"] == sid for row in before)
+
+    result, status = post("/api/session/delete", {"session_id": sid})
+
+    assert status == 200 and result["ok"] is True
+    after = json.loads(SESSION_INDEX_FILE.read_text())
+    assert all(row["session_id"] != sid for row in after)
+    assert next(row for row in after if row["session_id"] == retained_sid) == retained
 
 
 def test_server_delete_removes_session_bak_snapshot(cleanup_test_sessions):
-    """session/delete must remove sidecar backups so deleted sessions stay deleted."""
-    routes_src = (REPO_ROOT / "api" / "routes.py").read_text()
-    delete_idx = max(
-        routes_src.find("if parsed.path == '/api/session/delete':"),
-        routes_src.find('if parsed.path == "/api/session/delete":'),
-    )
-    assert delete_idx >= 0, "session/delete handler not found in api/routes.py"
-    delete_block = routes_src[delete_idx:delete_idx+2400]
-    assert "with_suffix('.json.bak').unlink" in delete_block or 'with_suffix(".json.bak").unlink' in delete_block, \
-        "session/delete must unlink <sid>.json.bak to avoid later orphan-backup recovery"
+    """Deleted sessions cannot be resurrected from their sidecar backup."""
+    from api.config import SESSION_DIR
+
+    sid = make_session(cleanup_test_sessions)
+    _make_session_visible(sid)
+    sidecar = SESSION_DIR / f"{sid}.json"
+    backup = sidecar.with_suffix(".json.bak")
+    backup.write_bytes(sidecar.read_bytes())
+    assert sidecar.exists() and backup.exists()
+
+    result, status = post("/api/session/delete", {"session_id": sid})
+
+    assert status == 200 and result["ok"] is True
+    assert not sidecar.exists()
+    assert not backup.exists()
 
 # ── R9: Token/tool SSE events write to wrong session after switch ─────────────
 

@@ -1,6 +1,17 @@
 """Detached subagent/process inventory must be scoped to WebUI ownership."""
 from types import SimpleNamespace
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def require_auxiliary_agent_modules():
+    # These are integration contracts against optional Hermes Agent registries,
+    # not WebUI-owned modules. Match the suite's optional-agent policy while
+    # requiring these exact capabilities when running against an older agent.
+    pytest.importorskip("tools.async_delegation")
+    pytest.importorskip("tools.process_registry")
+
 
 def test_auxiliary_tasks_profile_scoped_and_batch_count(monkeypatch):
     import sys

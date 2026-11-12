@@ -84,4 +84,6 @@ def test_session_load_collapses_adjacent_duplicate_partials(tmp_path, monkeypatc
     persisted = json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
     assert sum(1 for message in persisted["messages"] if message.get("_partial")) == 1
     assert persisted["updated_at"] == 200.0
-    assert (session_dir / f"{sid}.json.bak").exists()
+    backup = session_dir / f"{sid}.json.bak"
+    assert backup.exists()
+    assert json.loads(backup.read_text(encoding="utf-8")) == payload

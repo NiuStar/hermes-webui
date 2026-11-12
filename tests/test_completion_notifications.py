@@ -105,6 +105,7 @@ def test_normalize_settings_rejects_unknown_or_unconfigured_channels(notificatio
 
 
 def test_send_completion_is_idempotent_and_uses_bounded_preview(notifications, monkeypatch):
+    monkeypatch.delenv("HERMES_WEBUI_PUBLIC_URL", raising=False)
     sent = []
     credential = "sk-" + "abcdefghijklmnop"
     monkeypatch.setattr(notifications, "_run_feishu_card_process", lambda card, home: sent.append(("feishu", card, home)) or {"success": True, "message_id": "m"})
@@ -134,9 +135,14 @@ def test_send_completion_is_idempotent_and_uses_bounded_preview(notifications, m
     message = card["elements"][0]["content"]
     assert len(message) < 550
     assert "生产验收 会话 sk&#45;abc&#46;&#46;&#46;mnop" in message
-    assert "部署成功，所有检查通过。 API&#95;KEY=&#42;&#42;&#42;" in message
+    # The local fallback fully masks this short value; the optional agent
+    # redactor may preserve a non-secret prefix/suffix before the fallback.
+    assert any(f"部署成功，所有检查通过。 API&#95;KEY={mask}" in message for mask in (
+        "&#42;&#42;&#42;", "super&#45;&#46;&#46;&#46;alue",
+    ))
     assert "session-1" not in repr(card)
     assert "super-secret-value" not in repr(card)
+    assert "super&#45;secret&#45;value" not in repr(card)
     assert "abcdefghijklmnop" not in repr(card)
 
 

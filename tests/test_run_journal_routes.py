@@ -540,8 +540,12 @@ def test_runtime_snapshot_transport_projection_keeps_tool_fallback_without_scene
     assert snapshot["tool_calls"][0]["preview"] == "same result"
 
 
-def test_paginated_session_followup_does_not_repeat_runtime_snapshot():
+def test_paginated_session_followup_does_not_repeat_runtime_snapshot(monkeypatch):
     from tests.test_session_tail_payload import _FakeSession, _invoke
+
+    # This fake session has no sidecar; do not let the fail-closed missing-file
+    # lineage check turn the nominal full-load control into a bounded request.
+    monkeypatch.setattr("api.routes._sidecar_lineage_exceeds_threshold", lambda *_a: False)
 
     stream_id = "stream-paginated-snapshot"
     session = _FakeSession([

@@ -4,6 +4,11 @@ from api import models, routes
 
 
 def test_sidecar_storage_health_is_aggregate_only_and_stat_bounded(tmp_path, monkeypatch):
+    from api import session_sidecar_maintenance as maintenance
+
+    # Prior maintenance tests legitimately publish a process-global last run.
+    monkeypatch.setattr(maintenance, "_LAST_RESULT", None)
+    monkeypatch.setattr(maintenance, "_WORKER_THREAD", None)
     monkeypatch.setattr(routes, "SESSION_DIR", tmp_path)
     sizes = {
         "small.json": 10,
