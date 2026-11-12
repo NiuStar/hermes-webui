@@ -109,6 +109,7 @@ global.$ = function(id) {{
   return null;
 }};
 global._speechPreferencesPayloadFromUi = function() {{ return {{}}; }};
+global.document = {{ querySelectorAll: () => [] }};
 global._preferencesPayloadFromUi = (0, eval)('(' + extractFunc(panelsSrc, '_preferencesPayloadFromUi') + ')');
 const payload = _preferencesPayloadFromUi();
 console.log(JSON.stringify(payload));

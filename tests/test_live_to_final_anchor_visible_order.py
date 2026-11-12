@@ -1770,7 +1770,7 @@ def test_done_follow_scroll_uses_pre_settle_follow_state():
 
     capture_idx = done.index("const shouldFollowOnDone=")
     render_idx = done.index("syncTopbar();renderMessages({preserveScroll:true});")
-    follow_idx = done.index("if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();")
+    follow_idx = done.index("if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom({settle:false});")
     assert capture_idx < render_idx < follow_idx
     after_render = done[render_idx:follow_idx]
     assert "_isMessagePaneNearBottom(250)" not in after_render

@@ -8,6 +8,7 @@ import textwrap
 from types import SimpleNamespace
 
 from api.commands import list_commands
+from tests.frontend_contract_helpers import run_node
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -532,53 +533,64 @@ def test_bundle_collisions_stay_hidden_until_agent_metadata_is_ready():
     assert result["after_sources"] == ["plugin"]
 
 
-def test_send_intercepts_cli_only_commands_before_agent_round_trip():
-    intercept_idx = MESSAGES_JS.find("Slash command intercept")
-    assert intercept_idx != -1
-    normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
-    assert normal_send_idx != -1
-    intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
+def _send_intercept(text, metadata=None, bundle=None):
+    """Execute the production intercept, stopping at the normal-send boundary."""
+    start = MESSAGES_JS.index("// Slash command intercept")
+    end = MESSAGES_JS.index("\n  if(!S.session){await newSession();await renderSessionList();}", start)
+    whitelist = MESSAGES_JS[MESSAGES_JS.index("const _AGENT_COMMANDS_RUN_ON_WEBUI"):].split(";", 1)[0] + ";"
+    return run_node(f"""
+const calls=[];
+const S={{session:{{session_id:'s'}},pendingFiles:[],messages:[]}};
+const input={{value:{json.dumps(text)}}};
+const $=()=>input;
+const COMMANDS=[];
+const parseCommand=text=>({{name:text.slice(1).split(' ')[0],args:''}});
+const renderMessages=()=>{{}};
+const autoResize=()=>{{}};
+const hideCmdDropdown=()=>{{}};
+const getAgentCommandMetadata=async name=>{{calls.push('agent:'+name);return {json.dumps(metadata)};}};
+const getBundleCommandMetadata=async name=>{{calls.push('bundle:'+name);return {json.dumps(bundle)};}};
+const resolveBundleCommand=async()=>{{calls.push('resolve');return {{message:'expanded bundle'}};}};
+const cliOnlyCommandResponse=()=> 'CLI-only response';
+const executeAgentCommand=async()=>{{calls.push('execute');return 'executed';}};
+{whitelist}
+(async()=>{{
+  let text={json.dumps(text)}, literalSlash=false, _slashDisplayTextOverride=null, _pendingMoaConfig=null;
+  await (async()=>{{
+    {MESSAGES_JS[start:end]}
+    calls.push('normal-send');
+  }})();
+  console.log(JSON.stringify({{calls,messages:S.messages,text,display:_slashDisplayTextOverride,input:input.value}}));
+}})().catch(error=>{{console.error(error);process.exit(1);}});
+""")
 
-    assert "await getAgentCommandMetadata(_parsedCmd.name)" in intercept
-    assert "if(_agentCmd&&_agentCmd.cli_only)" in intercept
-    assert "cliOnlyCommandResponse(_parsedCmd.name,_agentCmd)" in intercept
-    assert "return;" in intercept
+
+def test_send_intercepts_cli_only_commands_before_agent_round_trip():
+    result = _send_intercept('/browser', {'name': 'browser', 'cli_only': True})
+    assert result['calls'] == ['agent:browser']
+    assert [m['role'] for m in result['messages']] == ['user', 'assistant']
+    assert result['messages'][1]['content'] == 'CLI-only response'
+    assert result['input'] == ''
 
 
 def test_send_intercepts_bundle_commands_before_agent_round_trip():
-    intercept_idx = MESSAGES_JS.find("Slash command intercept")
-    normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
-    assert normal_send_idx != -1
-    intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
-
-    assert "const _bundleCmd=!_agentCmd&&typeof getBundleCommandMetadata==='function'" in intercept
-    assert "await resolveBundleCommand(text,_bundleCmd)" in intercept
-    assert "_slashDisplayTextOverride=text;" in intercept
-    assert "text=_bundleMessage;" in intercept
+    result = _send_intercept('/incident-review', bundle={'name': 'incident-review'})
+    assert result['calls'] == ['agent:incident-review', 'bundle:incident-review', 'resolve', 'normal-send']
+    assert result['text'] == 'expanded bundle'
+    assert result['display'] == '/incident-review'
 
 
 def test_send_consults_agent_metadata_before_bundle_resolution():
-    intercept_idx = MESSAGES_JS.find("Slash command intercept")
-    normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
-    assert normal_send_idx != -1
-    intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
-
-    agent_idx = intercept.find("await getAgentCommandMetadata(_parsedCmd.name)")
-    bundle_idx = intercept.find("await getBundleCommandMetadata(_parsedCmd.name)")
-    assert agent_idx != -1
-    assert bundle_idx != -1
-    assert agent_idx < bundle_idx
+    result = _send_intercept('/browser', {'name': 'browser', 'cli_only': True}, {'name': 'browser'})
+    assert result['calls'] == ['agent:browser']
 
 
 def test_send_intercepts_reload_mcp_agent_command_before_agent_round_trip():
-    intercept_idx = MESSAGES_JS.find("Slash command intercept")
-    normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
-    assert normal_send_idx != -1
-    intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
-
-    assert "const _agentCmdName=String(_agentCmd&&_agentCmd.name||_parsedCmd&&_parsedCmd.name||'')" in intercept
-    assert "if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName))" in intercept
-    assert "executeAgentCommand(text,_agentCmd||{name:_agentCmdName})" in intercept
+    for text in ('/reload-mcp', '/reload_mcp'):
+        result = _send_intercept(text)
+        assert result['calls'] == ['agent:' + text[1:], 'execute']
+        assert result['messages'][1]['content'] == 'executed'
+        assert result['input'] == ''
 
 
 def test_reload_mcp_reload_skills_and_codex_runtime_webui_intercept_aliases_are_defined_in_js_whitelist():
@@ -634,18 +646,10 @@ def test_codex_runtime_agent_command_metadata_resolves_alias():
 
 def test_unknown_slash_commands_still_fall_through_to_agent():
     """Only explicitly supported metadata-backed commands should be intercepted."""
-    intercept_idx = MESSAGES_JS.find("Slash command intercept")
-    normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
-    intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
-
-    assert "if(_bundleCmd){" in intercept
-    assert "if(_agentCmd&&_agentCmd.cli_only)" in intercept
-    assert "if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName))" in intercept
-    assert "if(_agentCmd&&_agentCmd.category==='Plugin')" in intercept
-    assert "if(_parsedCmd&&!_cmd)" in intercept
-    assert "if(!_agentCmd" not in intercept
-    assert "if(_agentCmd){" not in intercept
-    assert "else" not in intercept[intercept.find("if(_agentCmd&&_agentCmd.cli_only)") :]
+    result = _send_intercept('/unknown hello')
+    assert result['calls'] == ['agent:unknown', 'bundle:unknown', 'normal-send']
+    assert result['messages'] == []
+    assert result['text'] == result['input'] == '/unknown hello'
 
 
 def test_builtin_command_opt_outs_do_not_hit_agent_metadata_lookup():

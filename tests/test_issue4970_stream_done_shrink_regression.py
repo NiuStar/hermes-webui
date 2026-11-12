@@ -217,9 +217,9 @@ def test_stream_done_collapses_in_place_after_disarm_with_render_fallback():
         "the fallback render pass must also stay before shouldFollowOnDone so the "
         "fail-closed path preserves the prior #5260 invariant."
     )
-    assert "scrollToBottom()" in after, (
-        "a pinned/near-bottom follower must scrollToBottom() after the collapse "
-        "handling to re-settle exactly at the tail."
+    assert "scrollToBottom({settle:false})" in after, (
+        "a pinned/near-bottom follower must scroll to the tail after collapse "
+        "without scheduling a second expensive settlement pass."
     )
     # And the wrapper must exist and be scroll-preserving (capture → render →
     # restore same-frame), so the collapse height change is absorbed by the JS

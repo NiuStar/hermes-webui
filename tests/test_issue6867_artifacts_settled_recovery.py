@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 
 import pytest
+from tests.frontend_contract_helpers import function_source
 try:
     from playwright.sync_api import sync_playwright
 except ImportError:
@@ -167,6 +168,7 @@ def test_restore_settled_session_projects_through_production_path(browser):
             "catch(_){\n      return returnStatus?'error':false;",
             "catch(error){\n      window.restoreError=String(error);\n      return returnStatus?'error':false;",
         )
+        page.add_script_tag(content=function_source(MESSAGES_JS, "_boundTerminalMessageRenderWindow"))
         page.add_script_tag(content=restore_source)
         page.evaluate(
             """

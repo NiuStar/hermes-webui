@@ -221,9 +221,8 @@ def test_rightpanel_mobile_slide_over_css():
         "mobile rightpanel width variable should be used in compact mode rules"
     assert "calc(-1 * var(--mobile-rightpanel-width))" in CSS, \
         "closed mobile rightpanel should be off-canvas using a width-based negative offset"
-    mobile_640 = re.search(r'@media\(max-width:640px\)\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}', CSS, re.DOTALL)
-    assert mobile_640, "@media(max-width:640px) block missing from style.css"
-    rightpanel_block = mobile_640.group(1)
+    rightpanel_block = "\n".join(_max_width_media_blocks(640))
+    assert rightpanel_block, "@media(max-width:640px) block missing from style.css"
     assert re.search(r'\.rightpanel\{[^}]*width:\s*var\(--mobile-rightpanel-width\)\s*!important',
                      rightpanel_block, re.DOTALL), \
         ".rightpanel width must use var(--mobile-rightpanel-width) with !important in mobile block"
@@ -917,7 +916,7 @@ def test_mobile_titlebar_has_new_conversation_button():
 def test_titlebar_new_chat_button_mobile_visibility_css():
     """Keep the titlebar new-chat control mobile-only and reuse reload button styling."""
     base_rule = _declarations(_rule_body(CSS, ".app-titlebar-new-chat"))
-    assert base_rule.get("display") == "none", "app-titlebar new chat button must be hidden by default"
+    assert _display_hidden(base_rule), "app-titlebar new chat button must be hidden by default"
     mobile_blocks = "".join(_max_width_media_blocks(640))
     mobile_rule = _declarations(_rule_body(mobile_blocks, ".app-titlebar-new-chat"))
     assert mobile_rule.get("display") == "inline-flex", (

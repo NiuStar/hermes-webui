@@ -65,6 +65,7 @@ function installRuntimeHelpers() {
     "_carryForwardEphemeralTurnFields",
     "_isTerminalStreamErrorMarkerMessage",
     "_ensureSingleTerminalStreamErrorMarker",
+    "_boundTerminalMessageRenderWindow",
     "_restoreSettledSession",
     "_handleStreamError",
   ];

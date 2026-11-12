@@ -495,17 +495,13 @@ class TestApprovalCardTimerLogic:
             assert match == 'true', \
                 f'After stopApprovalPolling(), hideApprovalCard called without force=true (got: {match!r})'
 
-    def test_poll_loop_still_uses_no_force(self):
-        """Poll loop approval hides (when pending gone) keep no-force behavior."""
-        src = self._get_js().read_text()
-        # Poll/SSE empty-state hides should preserve the 30s visibility guard.
-        # Owner-scoped prompt cleanup now routes this through the helper, whose
-        # default force=false is behavior-equivalent to the old hideApprovalCard().
-        assert '_hideApprovalCardIfOwner(sid);' in src or \
-               'else { hideApprovalCard(); }' in src or \
-               'else {hideApprovalCard();}' in src or \
-               'else { hideApprovalCard() }' in src, \
-            'Poll loop should still hide approval prompts without force=true'
+    def test_poll_loop_retires_resolved_card_without_minimum_visibility_delay(self):
+        """An empty authoritative poll must unblock the composer immediately."""
+        from tests.test_issue4041_approval_poll_busy_dip import approval_poll_outcome
+        result = approval_poll_outcome(busy=True)
+        assert result['hidden'] == [True]
+        assert result['cleared'] == ['owner']
+        assert result['stopped'] == []  # busy turn still needs polling
 
     def test_show_approval_card_signature_dedup(self):
         """showApprovalCard uses a signature to avoid resetting timer on repeat polls."""

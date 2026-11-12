@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from tests.frontend_contract_helpers import max_width_media_blocks
 
 CSS = (Path(__file__).resolve().parent.parent / "static" / "style.css").read_text(encoding="utf-8")
 
@@ -123,9 +124,7 @@ def test_messages_remains_the_transcript_scroll_container():
 def test_overflow_x_clip_is_the_chosen_horizontal_clip():
     """Affirm the fix is in place: the mobile .messages-inner clips horizontally
     with `clip` (not `hidden`). Anchors the #4856/#4898 resolution."""
-    mobile = re.search(r"@media\(max-width:640px\)\{", CSS)
-    assert mobile, "@media(max-width:640px) block not found"
-    window = CSS[mobile.start(): mobile.start() + 12000]
+    window = max_width_media_blocks(CSS, 640)
     m = re.search(r"\.messages-inner\{([^}]*)\}", window)
     assert m, "mobile .messages-inner rule not found"
     assert "overflow-x:clip" in m.group(0), (

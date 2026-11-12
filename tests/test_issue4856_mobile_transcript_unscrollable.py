@@ -27,14 +27,13 @@ specific and not reproducible in headless CI without a full browser.
 """
 import re
 from pathlib import Path
+from tests.frontend_contract_helpers import max_width_media_blocks
 
 CSS = (Path(__file__).resolve().parent.parent / "static" / "style.css").read_text(encoding="utf-8")
 
 
 def _mobile_messages_inner_rule() -> str:
-    media = re.search(r"@media\(max-width:640px\)\{", CSS)
-    assert media, "@media(max-width:640px) block not found"
-    window = CSS[media.start(): media.start() + 8000]
+    window = max_width_media_blocks(CSS, 640)
     m = re.search(r"\.messages-inner\{([^}]*)\}", window)
     assert m, ".messages-inner rule not found in mobile media block"
     return m.group(0)

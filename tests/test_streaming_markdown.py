@@ -549,7 +549,7 @@ class TestDoneEventSmd:
             "live transcript DOM."
         )
         scroll_idx = fn.index("if(shouldFollowOnDone", render_idx)
-        assert "scrollToBottom()" in fn[scroll_idx:scroll_idx + 120], (
+        assert "scrollToBottom({settle:false})" in fn[scroll_idx:scroll_idx + 120], (
             "After final render, done handler must call scrollToBottom() when the "
             "user was pinned/near-bottom before DOM replacement."
         )

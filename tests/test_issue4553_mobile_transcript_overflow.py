@@ -1,5 +1,6 @@
 import re
 from pathlib import Path
+from tests.frontend_contract_helpers import max_width_media_blocks
 
 
 def test_messages_rule_has_overflow_x_hidden():
@@ -22,13 +23,7 @@ def test_messages_inner_mobile_has_containment():
     css_file = Path(__file__).resolve().parent.parent / "static" / "style.css"
     content = css_file.read_text()
 
-    # Find the @media(max-width:640px) block and then .messages-inner within a reasonable window
-    media_match = re.search(r'@media\(max-width:640px\)\{', content)
-    assert media_match, "@media(max-width:640px) block not found"
-
-    # Extract content after the media query opening brace
-    media_start = media_match.start()
-    remaining_content = content[media_start:media_start + 5000]  # Look ahead 5000 chars
+    remaining_content = max_width_media_blocks(content, 640)
 
     # Find .messages-inner rule within this section
     messages_inner_match = re.search(r'\.messages-inner\{([^}]*)\}', remaining_content)

@@ -219,11 +219,39 @@ class TestCancelledTurnPersistenceGuards:
         assert "const _applyCancelSessionPayload=(sessionPayload)=>" in block
         assert "const _cancelSessionPayload=_cancelData&&typeof _cancelData.session==='object'?_cancelData.session:null;" in block
         assert "if(_applyCancelSessionPayload(_cancelSessionPayload)) return;" in block
-        assert "const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);" in block
+        assert "const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}&messages=1&resolve_model=0&msg_limit=500`);" in block
         assert block.index("if(_applyCancelSessionPayload(_cancelSessionPayload)) return;") < block.index("const data=await api("), (
             "Cancel handler must apply the terminal SSE session payload before falling back "
             "to /api/session so captured _partial reasoning/tool rows are visible immediately."
         )
+
+    def test_cancel_payload_selection_uses_bounded_fetch_only_without_embedded_snapshot(self):
+        import json
+        from urllib.parse import parse_qs, urlsplit
+        from tests.frontend_contract_helpers import run_node
+        src = _read("static/messages.js")
+        start = src.index("if(_applyCancelSessionPayload(_cancelSessionPayload)) return;")
+        end = src.index("}catch(_)", start)
+        for embedded in (True, False):
+            result = run_node(f"""
+const requests=[],applied=[],activeSid='session / cancel';
+const _cancelSessionPayload={json.dumps({'session_id': 'embedded'} if embedded else None)};
+const _applyCancelSessionPayload=payload=>{{if(!payload) return false;applied.push(payload.session_id);return true;}};
+const api=async url=>{{requests.push(url);return {{session:{{session_id:'fetched'}}}};}};
+(async()=>{{
+  await (async()=>{{ {src[start:end]} }})();
+  console.log(JSON.stringify({{requests,applied}}));
+}})().catch(error=>{{console.error(error);process.exit(1);}});
+""")
+            assert result['applied'] == ['embedded' if embedded else 'fetched']
+            if embedded:
+                assert result['requests'] == []
+            else:
+                assert len(result['requests']) == 1
+                assert parse_qs(urlsplit(result['requests'][0]).query) == {
+                    'session_id': ['session / cancel'], 'messages': ['1'],
+                    'resolve_model': ['0'], 'msg_limit': ['500'],
+                }
 
     def test_worker_cancel_events_do_not_embed_session_payload(self):
         src = _read("api/streaming.py")

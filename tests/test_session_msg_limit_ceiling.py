@@ -93,5 +93,51 @@ def test_frontend_declares_live_ceiling_at_module_scope_with_fallback():
 
 def test_frontend_reload_width_paths_read_the_live_ceiling():
     """Both reload-width decisions read the live `_msgLimitMax`, not the mirror."""
-    assert "reloadLimit <= _msgLimitMax" in _SESSIONS_JS       # _ensureMessagesLoaded
+    assert "Math.min(reloadLimit || _INITIAL_MSG_LIMIT, _msgLimitMax)" in _SESSIONS_JS
+    assert "msg_limit=${boundedReloadLimit}" in _SESSIONS_JS
     assert "requestedLimit >= _msgLimitMax" in _SESSIONS_JS    # _loadOlderMessages
+
+
+def test_frontend_reload_and_history_requests_obey_changed_live_ceiling():
+    from tests.frontend_contract_helpers import function_source, run_node
+    functions = '\n'.join(function_source(_SESSIONS_JS, name) for name in (
+        '_ensureMessagesLoaded', '_loadOlderMessages', '_syncToolCallsForLoadedMessages',
+    ))
+    result = run_node(f"""
+const window={{}}, requests=[];
+let _loadingSessionId='s', _loadSessionGeneration=0, _messagesTruncated=true, _oldestIdx=100;
+let _msgLimitMax=70, _loadingOlder=false, _messagesGeneration=0;
+const _INITIAL_MSG_LIMIT=30, _MSG_LIMIT_MAX=500;
+const S={{session:{{session_id:'s'}},messages:[],toolCalls:[]}};
+const _messageReloadLimitForSession=()=>10000;
+const _clearSameSessionForceReloadHint=()=>{{}};
+const clearLiveToolCards=()=>{{}};
+const _setSessionViewedCount=()=>{{}};
+const api=async url=>{{
+  requests.push(url);
+  if(requests.length>1) return {{session:{{messages:[],_messages_truncated:false}}}};
+  return {{session:{{messages:[{{role:'assistant',content:'loaded'}}],
+    tool_calls:[{{name:'terminal',id:'new'}}], _msg_limit_max:40,
+    _messages_truncated:true,_messages_offset:99}}}};
+}};
+{functions}
+(async()=>{{
+  await _ensureMessagesLoaded('s',{{force:true}});
+  const tools=S.toolCalls;
+  // A full window at the newly advertised ceiling must use msg_before.
+  S.messages=Array.from({{length:40}},()=>({{role:'assistant',content:'loaded'}}));
+  // No older rows: stop before rendering, but keep the real request decision.
+  await _loadOlderMessages();
+  console.log(JSON.stringify({{requests,tools,ceiling:_msgLimitMax,loading:_loadingOlder}}));
+}})().catch(error=>{{console.error(error);process.exit(1);}});
+""")
+    from urllib.parse import parse_qs, urlsplit
+    queries = [parse_qs(urlsplit(url).query) for url in result['requests']]
+    assert len(queries) == 2
+    assert queries[0]['msg_limit'] == ['70']
+    assert queries[0]['messages'] == ['1']
+    assert queries[1]['msg_limit'] == ['30']
+    assert queries[1]['msg_before'] == ['99']
+    assert result['tools'] == [{'name': 'terminal', 'id': 'new', 'done': True}]
+    assert result['ceiling'] == 40
+    assert result['loading'] is False
