@@ -149,7 +149,10 @@ def chown_home(home: Path, uid: int, gid: int) -> None:
     try:
         root_mount_id = _mount_id(home_fd)
         _chown_fd(home_fd, uid, gid)
-        _walk_directory(home_fd, PurePosixPath(), root_mount_id, uid, gid)
+        # Preserve the same source exclusion when invoked directly on the
+        # explicitly mounted .hermes boundary by the entrypoint.
+        relative = PurePosixPath(".hermes") if home.name == ".hermes" else PurePosixPath()
+        _walk_directory(home_fd, relative, root_mount_id, uid, gid)
     finally:
         os.close(home_fd)
 

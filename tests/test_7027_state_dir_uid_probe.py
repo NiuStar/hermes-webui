@@ -165,13 +165,18 @@ class TestIdResolutionBehaviour:
         block = self._extract_block(INIT_SH)
         # Rewrite the block's absolute probe paths into the sandbox. Longest
         # first so /app/data is not clipped by a shorter prefix.
-        for absolute, name in (
+        rewrites = (
             ("/home/hermeswebui/.hermes", "hermes_home"),
             ("/opt/data", "opt_data"),
             ("/app/data", "app_data"),
             ("/workspace", "workspace"),
-        ):
-            block = block.replace(absolute, str(paths[name]))
+        )
+        # Do not re-rewrite /workspace inside an already substituted sandbox
+        # path (worktrees themselves may live under /workspace).
+        for index, (absolute, _name) in enumerate(rewrites):
+            block = block.replace(absolute, f"__PROBE_{index}__")
+        for index, (_absolute, name) in enumerate(rewrites):
+            block = block.replace(f"__PROBE_{index}__", str(paths[name]))
 
         # `stat -c FMT PATH` stub: $2 is the format, $3 the path. Unknown paths
         # exit nonzero so the block's `|| echo ""` yields an empty detection.

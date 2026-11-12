@@ -68,6 +68,23 @@ def test_fd_walker_never_follows_symlink_target(tmp_path, monkeypatch):
     assert target_inode not in touched
 
 
+def test_hermes_mount_root_still_prunes_agent_source(tmp_path, monkeypatch):
+    from api import docker_home_ownership as ownership
+
+    home = tmp_path / ".hermes"
+    agent = home / "hermes-agent"
+    agent.mkdir(parents=True)
+    (agent / "sentinel").write_text("read-only source")
+    (home / "config.yaml").write_text("fixture")
+    touched = []
+    monkeypatch.setattr(ownership, "_chown_fd", lambda fd, _uid, _gid: touched.append(__import__("os").fstat(fd).st_ino))
+    ownership.chown_home(home, 1000, 1000)
+    assert home.stat().st_ino in touched
+    assert (home / "config.yaml").stat().st_ino in touched
+    assert agent.stat().st_ino not in touched
+    assert (agent / "sentinel").stat().st_ino not in touched
+
+
 def test_fd_walker_uses_fd_relative_nofollow_operations_only():
     source = (ROOT / "api" / "docker_home_ownership.py").read_text(encoding="utf-8")
     assert "dir_fd=" in source

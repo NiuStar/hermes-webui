@@ -3,6 +3,8 @@
 # QUICK START:
 #   docker compose -f docker-compose.three-container.yml up -d
 #   Open http://localhost:8787 (chat) and http://localhost:9119 (dashboard)
+#   Set HERMES_DASHBOARD_SESSION_TOKEN in .env (or configure a dashboard auth
+#   provider in config.yaml). Non-loopback container listeners require auth.
 #   Remote access (issue #6876): echo "HERMES_DASHBOARD_BIND=0.0.0.0" >> .env
 #   and echo "API_SERVER_KEY=<16+ chars>" >> .env, then recreate the stack.
 #   The WebUI reports "Hermes agent is not responding" when the gateway
@@ -88,10 +90,10 @@ services:
   hermes-dashboard:
     image: nousresearch/hermes-agent:latest
     container_name: hermes-dashboard
-    command: dashboard --host 0.0.0.0 --insecure
+    command: dashboard --host 0.0.0.0
     ports:
-      # Loopback-only by default (the dashboard runs --insecure). To reach the
-      # dashboard from another machine (issue #6876), set
+      # Host port is loopback-only by default; container listener requires auth.
+      # To reach the dashboard from another machine (issue #6876), set
       # HERMES_DASHBOARD_BIND=0.0.0.0 in .env and put it behind auth / a
       # reverse proxy.
       - "${HERMES_DASHBOARD_BIND:-127.0.0.1}:9119:9119"
@@ -105,6 +107,7 @@ services:
       - HERMES_GID=${GID:-1000}
       # Dashboard connects to the gateway for health/session data
       - GATEWAY_HEALTH_URL=http://hermes-agent:8642
+      - HERMES_DASHBOARD_SESSION_TOKEN=${HERMES_DASHBOARD_SESSION_TOKEN:-}
     depends_on:
       - hermes-agent
     restart: unless-stopped
@@ -117,7 +120,7 @@ services:
       - hermes-net
 
   hermes-webui:
-    image: 24802117/hermes-webui:latest
+    image: ${HERMES_WEBUI_RUNTIME_IMAGE:-24802117/hermes-webui:latest}
     pull_policy: always
     container_name: hermes-webui
     depends_on:
@@ -184,7 +187,7 @@ services:
 
   hermes-webui-updater:
     profiles: ["self-update"]
-    image: 24802117/hermes-webui:latest
+    image: ${HERMES_WEBUI_RUNTIME_IMAGE:-24802117/hermes-webui:latest}
     pull_policy: always
     entrypoint: ["/usr/local/bin/python", "/apptoo/api/docker_self_update.py", "--serve", "/run/hermes-webui-updater/control.sock"]
     user: "0:0"

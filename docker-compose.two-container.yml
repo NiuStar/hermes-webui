@@ -90,7 +90,7 @@ services:
       - hermes-net
 
   hermes-webui:
-    image: 24802117/hermes-webui:latest
+    image: ${HERMES_WEBUI_RUNTIME_IMAGE:-24802117/hermes-webui:latest}
     pull_policy: always
     container_name: hermes-webui
     depends_on:
@@ -152,7 +152,7 @@ services:
 
   hermes-webui-updater:
     profiles: ["self-update"]
-    image: 24802117/hermes-webui:latest
+    image: ${HERMES_WEBUI_RUNTIME_IMAGE:-24802117/hermes-webui:latest}
     pull_policy: always
     entrypoint: ["/usr/local/bin/python", "/apptoo/api/docker_self_update.py", "--serve", "/run/hermes-webui-updater/control.sock"]
     user: "0:0"

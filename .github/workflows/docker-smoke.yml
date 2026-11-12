@@ -10,11 +10,9 @@ name: Docker smoke
 #
 # Scope (intentionally small for v1):
 #   - 3 compose variants (single, two-container, three-container)
-#   - For multi-container variants, rebuild the local Dockerfile and re-tag
-#     it as ghcr.io/nesquena/hermes-webui:latest BEFORE `up` so the PR's
-#     changes to docker_init.bash / Dockerfile actually execute. Without this
-#     the multi-container variants would pull the previous release from GHCR
-#     and silently miss every PR-level regression.
+#   - Build the checked-out Dockerfile, label it with github.sha, and resolve
+#     its local immutable image ID before `up`. All variants must run that ID,
+#     never a published image selected by the Compose production defaults.
 #   - Pre-flight `docker compose config` job to catch schema/interpolation drift.
 #   - Reaper before each smoke run + trap on EXIT for orphan defence.
 #
@@ -31,6 +29,8 @@ on:
     paths:
       - 'Dockerfile'
       - 'docker_init.bash'
+      - 'api/docker_home_ownership.py'
+      - 'tests/test_docker*.py'
       - 'docker-compose*.yml'
       - '.dockerignore'
       - '.env.docker.example'
@@ -40,6 +40,8 @@ on:
     paths:
       - 'Dockerfile'
       - 'docker_init.bash'
+      - 'api/docker_home_ownership.py'
+      - 'tests/test_docker*.py'
       - 'docker-compose*.yml'
       - '.dockerignore'
       - '.env.docker.example'
@@ -49,6 +51,9 @@ on:
 # Fork PRs run with no secrets — that's the right model. Pin to least privilege.
 permissions:
   contents: read
+
+env:
+  HERMES_WEBUI_RUNTIME_IMAGE: hermes-webui-smoke:${{ github.sha }}
 
 jobs:
   compose-config:
@@ -83,7 +88,9 @@ jobs:
         with:
           context: .
           load: true
-          tags: ghcr.io/nesquena/hermes-webui:latest
+          tags: hermes-webui-smoke:${{ github.sha }}
+          build-args: |
+            HERMES_WEBUI_REVISION=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -111,8 +118,18 @@ jobs:
         with:
           context: .
           load: true
-          tags: ghcr.io/nesquena/hermes-webui:latest
+          tags: hermes-webui-smoke:${{ github.sha }}
+          build-args: |
+            HERMES_WEBUI_REVISION=${{ github.sha }}
           cache-from: type=gha
+
+      - name: Resolve immutable candidate
+        run: |
+          set -euo pipefail
+          IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$HERMES_WEBUI_RUNTIME_IMAGE")"
+          [[ "$IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE_ID")" = "$GITHUB_SHA"
+          echo "HERMES_WEBUI_RUNTIME_IMAGE=$IMAGE_ID" >> "$GITHUB_ENV"
 
       - name: Boot on a host-owned state mount with no explicit IDs
         run: |
@@ -138,11 +155,11 @@ jobs:
           # the stock image's own /workspace (owned 1024:1024) must not win over
           # the host-owned state mount.
           echo "::group::docker run"
-          docker run -d --name "$CONTAINER" \
+          docker run --pull=never -d --name "$CONTAINER" \
             -p 127.0.0.1:8788:8787 \
             -e HERMES_WEBUI_STATE_DIR=/app/data \
             -v "$STATE_DIR":/app/data \
-            ghcr.io/nesquena/hermes-webui:latest
+            "$HERMES_WEBUI_RUNTIME_IMAGE"
           echo "::endgroup::"
 
           # ----- The product gate: the container must reach /health -----
@@ -226,14 +243,14 @@ jobs:
           }
           trap cleanup EXIT
 
-          docker run -d --name "$CONTAINER" \
+          docker run --pull=never -d --name "$CONTAINER" \
             -p 127.0.0.1:8789:8787 \
             -e HERMES_WEBUI_STATE_DIR=/app/data \
             -e WANTED_UID=1024 \
             -e WANTED_GID=1024 \
             -v "$STATE_DIR":/app/data \
             -v "$HERMES_DIR":/home/hermeswebui/.hermes \
-            ghcr.io/nesquena/hermes-webui:latest
+            "$HERMES_WEBUI_RUNTIME_IMAGE"
 
           attempts=0
           max_attempts=60
@@ -282,7 +299,9 @@ jobs:
         with:
           context: .
           load: true
-          tags: ghcr.io/nesquena/hermes-webui:latest
+          tags: hermes-webui-smoke:${{ github.sha }}
+          build-args: |
+            HERMES_WEBUI_REVISION=${{ github.sha }}
           cache-from: type=gha
 
       - name: Resolve compose file + project name
@@ -357,11 +376,35 @@ jobs:
           }
           trap cleanup EXIT
 
+          # Bind Compose to the just-built local image, not its production default.
+          # Upstream dashboard requires an auth provider on a non-loopback
+          # container listener. This token belongs only to this disposable run.
+          export HERMES_DASHBOARD_SESSION_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          export HERMES_WEBUI_RUNTIME_IMAGE="$(docker image inspect --format '{{.Id}}' "$HERMES_WEBUI_RUNTIME_IMAGE")"
+          [[ "$HERMES_WEBUI_RUNTIME_IMAGE" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$HERMES_WEBUI_RUNTIME_IMAGE")" = "$GITHUB_SHA"
+          # Evidence retains image/mount intent but never resolved environment secrets.
+          docker compose -p "$PROJECT" -f "$COMPOSE_FILE" config --format json \
+            | python3 -c 'import json,sys; c=json.load(sys.stdin); print(json.dumps({"services": {n: {k: s[k] for k in ("image", "volumes") if k in s} for n,s in c["services"].items()}}, indent=2))' > ci-evidence/compose-config.json
+          python3 -c 'import json, os; c=json.load(open("ci-evidence/compose-config.json")); assert c["services"]["hermes-webui"]["image"] == os.environ["HERMES_WEBUI_RUNTIME_IMAGE"], "Compose selected a different image"'
+          # Pull only the external agent/dashboard images; never pull the WebUI.
+          if [ "${{ matrix.variant }}" != "single" ]; then
+            docker compose -p "$PROJECT" -f "$COMPOSE_FILE" pull hermes-agent
+            if [ "${{ matrix.variant }}" = "three-container" ]; then
+              docker compose -p "$PROJECT" -f "$COMPOSE_FILE" pull hermes-dashboard
+            fi
+          fi
+
           echo "::group::docker compose up"
-          # --wait blocks until all services report healthy OR --wait-timeout fires.
-          # Compose v2 returns nonzero on either failure mode.
-          docker compose -p "$PROJECT" -f "$COMPOSE_FILE" up -d --wait --wait-timeout 120
+          # Compose must neither rebuild nor replace the candidate with a pull.
+          docker compose -p "$PROJECT" -f "$COMPOSE_FILE" up --no-build --pull never -d --wait --wait-timeout 120
           echo "::endgroup::"
+
+          WEBUI_CONTAINER="$(docker compose -p "$PROJECT" -f "$COMPOSE_FILE" ps -q hermes-webui)"
+          test -n "$WEBUI_CONTAINER"
+          ACTUAL_IMAGE="$(docker inspect --format '{{.Image}}' "$WEBUI_CONTAINER")"
+          printf '%s\n' "$ACTUAL_IMAGE" > ci-evidence/runtime-image-id.txt
+          test "$ACTUAL_IMAGE" = "$HERMES_WEBUI_RUNTIME_IMAGE"
 
           echo "::group::container roster"
           docker compose -p "$PROJECT" -f "$COMPOSE_FILE" ps

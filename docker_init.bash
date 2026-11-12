@@ -216,7 +216,13 @@ chown_home_hermeswebui() {
   # between enumeration and lchown do not abort startup. Only ENOENT is ignored;
   # permission, read-only filesystem, and I/O failures still fail closed.
   /usr/local/bin/python /apptoo/api/docker_home_ownership.py \
-    /home/hermeswebui "${WANTED_UID}" "${WANTED_GID}"
+    /home/hermeswebui "${WANTED_UID}" "${WANTED_GID}" || return $?
+  # The home walk intentionally never crosses mounts. The configured .hermes
+  # mount is a separate, explicit ownership root; nested agent mounts remain
+  # excluded by the same fd-safe helper. Also create it on standalone boot.
+  mkdir -p /home/hermeswebui/.hermes || return $?
+  /usr/local/bin/python /apptoo/api/docker_home_ownership.py \
+    /home/hermeswebui/.hermes "${WANTED_UID}" "${WANTED_GID}"
 }
 
 # The production image does not ship sudo. The entrypoint starts as root only
@@ -526,7 +532,8 @@ else
     # are lost on container recreation (fresh boot re-stages automatically).
     #
     # The copy excludes any pre-baked `*.egg-info` / `build` / `dist` artifacts
-    # to avoid the timestamp-update path setuptools takes when one is present.
+    # and runtime-private `.install.lock` files (not package source) before
+    # reading. Keep exclusions identical in the rsync and tar fallback paths.
     #
     # NB: `rsync -a` / `cp -a` preserve the source tree's mode bits, so a `:ro`
     # source mounted mode 555 leaves the staged copy also mode 555. setuptools
@@ -541,17 +548,20 @@ else
       rsync -a \
         --exclude='*.egg-info' --exclude='build' --exclude='dist' \
         --exclude='__pycache__' --exclude='.git' \
-        --exclude='.playwright' \
+        --exclude='.playwright' --exclude='.install.lock' \
         "$_agent_src"/ "$_stage_src"/ \
         || error_exit "Failed to stage hermes-agent source to writable build dir"
     else
-      # Fallback when rsync isn't in the image — straight cp -a, then drop
-      # the build artifacts that would trip setuptools.
-      cp -a "$_agent_src"/. "$_stage_src"/ \
-        || error_exit "Failed to copy hermes-agent source to writable build dir"
-      rm -rf "$_stage_src"/*.egg-info "$_stage_src"/build "$_stage_src"/dist 2>/dev/null || true
-      rm -rf "$_stage_src"/.playwright 2>/dev/null || true
-      find "$_stage_src" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+      # Exclude before reading, not after copying: installer locks and browser
+      # caches may be private to the agent container even on a readable source
+      # mount. pipefail must catch a failed producer as well as extraction.
+      ( set -o pipefail
+        tar -C "$_agent_src" \
+          --exclude='*.egg-info' --exclude='build' --exclude='dist' \
+          --exclude='__pycache__' --exclude='.git' \
+          --exclude='.playwright' --exclude='.install.lock' -cf - . \
+          | tar -C "$_stage_src" -xf -
+      ) || error_exit "Failed to copy hermes-agent source to writable build dir"
     fi
     chmod -R u+w "$_stage_src" \
       || error_exit "Failed to make staged hermes-agent source writable (rsync/cp preserved :ro mount perms)"
