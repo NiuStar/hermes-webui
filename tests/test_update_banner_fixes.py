@@ -2357,12 +2357,17 @@ if(!classes.has('is-complete')||classes.has('is-failed'))throw new Error('wrong 
 
     def test_update_progress_i18n_has_english_and_chinese_stage_copy(self):
         src = read('static/i18n.js')
-        for key in (
-            'update_progress_pulling_image', 'update_progress_waiting_for_health',
-            'update_progress_rolled_back', 'update_progress_step',
-            'update_progress_elapsed',
-        ):
-            assert len(re.findall(rf'\b{key}\s*:', src)) == 2
+        from tests.test_zh_hant_locale import locale_block
+        locales = re.findall(r"^  ([A-Za-z_]+|'[^']+'):\s*\{", src, re.MULTILINE)
+        assert 'en' in locales and 'zh' in locales
+        for locale in locales:
+            block = locale_block(src, f"\n  {locale}: {{")
+            for key in (
+                'update_progress_pulling_image', 'update_progress_waiting_for_health',
+                'update_progress_rolled_back', 'update_progress_step',
+                'update_progress_elapsed',
+            ):
+                assert len(re.findall(rf'\b{key}\s*:', block)) == 1, (locale, key)
         assert "update_progress_pulling_image: '正在拉取容器镜像'" in src
 
     def test_update_banner_includes_release_labels(self):
